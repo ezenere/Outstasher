@@ -1,0 +1,29 @@
+# venv e caches Python
+.venv/
+__pycache__/
+*.pyc
+
+# frontend: node_modules e build sao refeitos no estagio de build
+frontend/node_modules/
+frontend/dist/
+
+# banco e artefatos locais (nao vao para a imagem)
+jobs.db
+jobs.db-*
+jobs.json
+jobs.json.bak
+output/
+downloads/
+
+# git e afins
+.git/
+.gitignore
+
+# o .env NAO entra na imagem — e injetado em runtime via env_file no compose
+.env
+
+# docs/infra que nao precisam no build
+README.md
+Dockerfile
+docker-compose.yml
+.dockerignore

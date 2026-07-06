@@ -15,8 +15,12 @@ QBIT_PASS = os.getenv("QBIT_PASS", "")
 # OUTPUT_DIR do .env vira o destino "Padrão" na primeira execucao; depois os
 # destinos sao gerenciados pela UI (tabela destinations no jobs.db).
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(BASE_DIR / "output")))
-DB_FILE = BASE_DIR / "jobs.db"
-JOBS_FILE = BASE_DIR / "jobs.json"  # formato antigo; migrado para o SQLite no boot
+
+# DB_DIR permite pôr o jobs.db num volume (Docker) fora da imagem. Sem ele,
+# fica ao lado do codigo (comportamento local de sempre).
+DB_DIR = Path(os.getenv("DB_DIR", str(BASE_DIR)))
+DB_FILE = DB_DIR / "jobs.db"
+JOBS_FILE = DB_DIR / "jobs.json"  # formato antigo; migrado para o SQLite no boot
 
 
 def _parse_path_map(raw: str) -> list[tuple[str, str]]:

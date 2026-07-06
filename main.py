@@ -343,4 +343,9 @@ if __name__ == "__main__":
                 vite.terminate()
     else:
         _ensure_frontend_built()
-        uvicorn.run(app, host="127.0.0.1", port=8008)
+        # HOST/PORT configuraveis para o container (bind em 0.0.0.0). Local, o
+        # padrao continua 127.0.0.1 para nao expor o servico sem querer.
+        import os
+        host = os.getenv("HOST", "127.0.0.1")
+        port = int(os.getenv("PORT", "8008"))
+        uvicorn.run(app, host=host, port=port)

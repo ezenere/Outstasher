@@ -5,7 +5,7 @@ Uso:
 
 - Escolhe o melhor video entre os dois; melhor audio por lingua entre os dois.
 - Se o arquivo de melhor video ja tiver audio no idioma alvo, nao faz merge:
-  cria um symlink no destino (fallback: hardlink/copia).
+  cria um hardlink no destino (fallback: copia — nunca symlink).
 - Alinha os audios do outro arquivo via GCC-PHAT (re-encodados em AAC/AC3);
   o resto e stream copy.
 """
@@ -31,7 +31,7 @@ def main():
         sys.exit(f"ERRO: {e}")
     for note in result.notes:
         print(f"  - {note}")
-    print(f"Saída: {result.output}" + (" (link, sem merge)" if result.symlinked else ""))
+    print(f"Saída: {result.output}" + (" (hardlink, sem merge)" if result.linked else ""))
 
 
 if __name__ == "__main__":

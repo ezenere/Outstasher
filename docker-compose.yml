@@ -1,0 +1,29 @@
+services:
+  downloader:
+    build: .
+    image: movie-downloader:latest
+    container_name: movie-downloader
+    restart: unless-stopped
+    ports:
+      - "8008:8008"
+    env_file:
+      - .env
+    # Se o qBittorrent/Jackett rodam na SUA maquina (host), use
+    # host.docker.internal nas URLs do .env em vez de localhost. Esta linha faz
+    # isso funcionar tambem no Linux (no Docker Desktop ja funciona sem ela).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # jobs.db (SQLite) persiste fora do container
+      - downloader-data:/data
+      # Pastas de downloads e destino final: monte aqui os MESMOS caminhos que
+      # voce cadastra na UI (Configuracoes). O caminho DENTRO do container tem
+      # que bater com o "caminho local" do destino de torrents e com o path dos
+      # destinos do arquivo final. Ajuste a origem (esquerda) para a sua maquina.
+      #
+      #   <caminho no host>:<caminho dentro do container>
+      - ${DOWNLOADS_DIR:-./downloads}:/downloads
+      - ${OUTPUT_DIR_HOST:-./output}:/output
+
+volumes:
+  downloader-data:

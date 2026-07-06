@@ -513,21 +513,20 @@ async def _merge(job: dict, video_content: str, audio_content: str):
         job["language"], log=log)
 
     job["output"] = result.output
-    if result.symlinked:
-        _set(job, "done", f"Áudio no idioma alvo já existia no melhor vídeo — link criado: {result.output}")
+    if result.linked:
+        _set(job, "done", f"Áudio no idioma alvo já existia no melhor vídeo — hardlink criado: {result.output}")
     else:
         _set(job, "done", f"Concluído (offset {result.offset_ms:+.2f} ms): {result.output}")
 
-    await _cleanup_torrents(job, result.symlinked)
+    await _cleanup_torrents(job)
 
 
-async def _cleanup_torrents(job: dict, symlinked: bool):
+async def _cleanup_torrents(job: dict):
     if config.QBIT_CLEANUP == "keep":
         return
-    delete_files = config.QBIT_CLEANUP == "remove_data" and not symlinked
-    if config.QBIT_CLEANUP == "remove_data" and symlinked:
-        _event(job, "qbit",
-               "Saída é um link para o arquivo baixado — removendo só os torrents, mantendo os dados")
+    # hardlink/cópia são independentes do arquivo do qBittorrent (nada de symlink),
+    # então remove_data pode apagar os dados com segurança mesmo quando só linkou.
+    delete_files = config.QBIT_CLEANUP == "remove_data"
     for kind in ("video", "audio"):
         try:
             await _qbit.delete_by_tag(_tag(job, kind), delete_files)

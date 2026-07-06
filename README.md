@@ -23,7 +23,7 @@ torrent para cada uma, e junta tudo em um único arquivo: **melhor imagem + todo
 3. Manda os dois torrents para o **qBittorrent** via Web API e acompanha o progresso.
 4. Quando os dois terminam, faz o merge internamente:
    - se o arquivo de melhor vídeo **já tem áudio no idioma alvo**, não faz merge —
-     cria um **symlink** no destino (fallback: hardlink → cópia);
+     cria um **hardlink** no destino (fallback: cópia; nunca symlink);
    - senão: melhor áudio **por língua** entre os dois arquivos, legendas só das
      línguas com áudio, capítulos, offset medido por **GCC-PHAT** e corrigido via
      `-filter_complex` (áudios do segundo arquivo re-encodados em AAC/AC3; o resto
@@ -57,6 +57,36 @@ python main.py dev    # dev: API com reload em :8008 + Vite em watch em :5173
 
 Em produção, abra http://127.0.0.1:8008. Em dev, use http://127.0.0.1:5173 (o Vite
 faz proxy de `/api` para o backend e recarrega o frontend a cada mudança).
+
+## Docker
+
+Sobe tudo (backend + frontend buildado + ffmpeg) num container só:
+
+```sh
+cp .env.example .env      # edite com suas chaves/URLs
+docker compose up -d --build
+```
+
+Abra http://localhost:8008. O build é multi-stage: o frontend é compilado num
+estágio Node e só o `dist` vai para a imagem final Python — nada de Node/npm no
+runtime. O `ffmpeg`/`ffprobe` já vêm instalados.
+
+Pontos de atenção do `.env`/`docker-compose.yml`:
+
+- **qBittorrent / Jackett na sua máquina**: dentro do container `localhost` é o
+  *próprio container*, não o host. Troque para `host.docker.internal` nas URLs
+  (`QBIT_URL`, `JACKETT_URL`). O compose já mapeia esse nome no Linux via
+  `extra_hosts`.
+- **Pastas de download e destino**: o container precisa enxergar os mesmos
+  arquivos que o qBittorrent baixou. Monte-as no compose e use os caminhos *de
+  dentro do container* (`/downloads`, `/output`) ao cadastrar destinos na UI.
+  Ajuste `DOWNLOADS_DIR`/`OUTPUT_DIR_HOST` no `.env` para os caminhos reais da
+  sua máquina; o "caminho local" do destino de torrents deve ser `/downloads`
+  (ou o que você montou).
+- **Persistência**: o `jobs.db` fica no volume `downloader-data` (`/data` no
+  container, via `DB_DIR`), então sobrevive a `docker compose down`/rebuild.
+
+Parar: `docker compose down` (mantém o volume). Ver logs: `docker compose logs -f`.
 
 Busque um filme, clique nele, escolha o idioma e o **destino**, e clique em
 **Baixar e fazer merge**. O andamento aparece na aba *Downloads*. O arquivo final
@@ -95,9 +125,11 @@ o aviso fica registrado na timeline e nas notas do job.
 ### Limpeza pós-merge (QBIT_CLEANUP)
 
 `keep` (padrão) mantém tudo seedando; `remove` remove os torrents mantendo os
-arquivos; `remove_data` apaga também os dados — exceto quando a saída é um
-symlink para o próprio download (aí ele remove só o torrent, para não quebrar o
-link).
+arquivos; `remove_data` apaga também os dados. Quando o merge é pulado (o vídeo
+já tinha o áudio alvo), a saída é um **hardlink** — que compartilha os bytes com
+o download, então apagar o arquivo do qBittorrent com `remove_data` não quebra a
+saída (o dado sobrevive pelo hardlink). No fallback de cópia, a saída é
+independente de qualquer forma.
 
 ### Cancelar / repetir
 
@@ -177,7 +209,7 @@ python merge.py "filme.1080p.mkv" "filme.dublado.mkv" "resultado.mkv" --audio-la
 - Escolhe automaticamente qual dos dois tem a melhor imagem.
 - Melhor áudio por língua entre os dois arquivos (se ambos têm a mesma língua,
   ganha o de melhor codec/canais/bitrate); tags como `pob`/`pt-br` são normalizadas.
-- Se o arquivo de melhor vídeo já tem o idioma alvo, sai com symlink em vez de merge.
+- Se o arquivo de melhor vídeo já tem o idioma alvo, sai com hardlink (fallback: cópia) em vez de merge.
 - Offset detectado por GCC-PHAT (janela de 5 min a partir de 30s — música e efeitos
   coincidem mesmo com falas em idiomas diferentes); só os áudios do outro arquivo
   são re-encodados, o resto é stream copy.
@@ -197,3 +229,5 @@ python merge.py "filme.1080p.mkv" "filme.dublado.mkv" "resultado.mkv" --audio-la
 | `services/merger.py` | merge + alinhamento GCC-PHAT (usado pelos jobs) |
 | `merge.py` | CLI avulso em cima do `services/merger.py` |
 | `frontend/` | frontend React (TS + Tailwind + Iconoir + Router) |
+| `Dockerfile` | build multi-stage (Node builda o front, runtime Python + ffmpeg) |
+| `docker-compose.yml` | sobe o serviço local com volume p/ o `jobs.db` e mounts |

@@ -22,6 +22,8 @@ def init():
     global _conn
     if _conn is not None:
         return
+    # garante o diretorio do banco (ex.: /data montado como volume no Docker)
+    config.DB_FILE.parent.mkdir(parents=True, exist_ok=True)
     _conn = sqlite3.connect(config.DB_FILE, check_same_thread=False)
     _conn.execute("PRAGMA journal_mode=WAL")
     _conn.execute("PRAGMA synchronous=NORMAL")

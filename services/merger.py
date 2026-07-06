@@ -2,7 +2,7 @@
 
 - escolhe o melhor VIDEO entre os 2 (resolucao, 10-bit, bitrate, codec)
 - se o arquivo de melhor video JA TEM audio no idioma alvo: pula o merge e
-  cria um symlink no destino (fallback: hardlink, depois copia)
+  cria um hardlink no destino (fallback: copia — nunca symlink)
 - escolhe o melhor AUDIO por LINGUA entre os 2 arquivos
 - inclui LEGENDAS apenas nas linguas em que ha audio
 - copia CAPITULOS do arquivo de melhor video (ou do outro, se so ele tiver)
@@ -69,7 +69,7 @@ SUB_CODEC_WEIGHT = {
 @dataclass
 class MergeResult:
     output: str
-    symlinked: bool = False
+    linked: bool = False  # True quando pulou o merge e só hardlinkou/copiou
     offset_ms: float | None = None
     notes: list[str] = field(default_factory=list)
 
@@ -336,18 +336,18 @@ def build_audio_fix_chain(input_spec: str, tau_s: float) -> str:
     return f"{base},atrim=start={tau_s:.6f},asetpts=N/SR/TB"
 
 
-# -------------------- symlink quando o merge e desnecessario --------------------
+# -------------------- link quando o merge e desnecessario --------------------
 
 def _link_or_copy(src: Path, dst: Path, notes: list[str]):
+    """Coloca `src` em `dst` sem re-encodar: hardlink por padrão, cópia se falhar.
+
+    Nada de symlink — hardlink é o preferido (mesmo inode, sem duplicar bytes;
+    não quebra se o original for movido). Se não der (volumes diferentes, FS sem
+    suporte a hardlink), cai para cópia real.
+    """
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists() or dst.is_symlink():
         dst.unlink()
-    try:
-        os.symlink(src, dst)
-        notes.append(f"symlink criado: {dst} -> {src}")
-        return
-    except OSError as e:
-        notes.append(f"symlink falhou ({e}); tentando hardlink")
     try:
         os.link(src, dst)
         notes.append(f"hardlink criado: {dst}")
@@ -394,11 +394,11 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
         ref_langs = {_lang_of_stream(s, ref_input, und_lang_by_input)
                      for s in get_streams(probes[ref_input], "audio")}
         if target_iso in ref_langs:
-            log(f"O arquivo de melhor vídeo já tem áudio '{target_iso}' — pulando merge, criando link.")
+            log(f"O arquivo de melhor vídeo já tem áudio '{target_iso}' — pulando merge, criando hardlink.")
             out_path = Path(output).with_suffix(Path(ref_path).suffix)
             _link_or_copy(Path(ref_path), out_path, result.notes)
             result.output = str(out_path)
-            result.symlinked = True
+            result.linked = True
             for n in result.notes:
                 log(n)
             return result
