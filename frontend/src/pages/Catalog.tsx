@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Folder, MediaVideoList, NavArrowRight, WarningTriangle } from 'iconoir-react'
 import { api, type CatalogList, type Destination } from '../api'
-import { Empty } from '../components/ui'
+import { DiskBar, Empty } from '../components/ui'
 
 export default function Catalog() {
   const [destinations, setDestinations] = useState<Destination[]>([])
@@ -50,7 +50,10 @@ export default function Catalog() {
         </label>
       </div>
       {data?.destination && (
-        <p className="mt-1 font-mono text-xs text-zinc-500">{data.destination.path}</p>
+        <div className="mt-1">
+          <p className="font-mono text-xs text-zinc-500">{data.destination.path}</p>
+          <div className="mt-2 max-w-md"><DiskBar disk={data.destination.disk} /></div>
+        </div>
       )}
 
       {loading && <Empty>Carregando...</Empty>}

@@ -171,9 +171,11 @@ async def delete_torrent_target(target_id: int):
 @app.get("/api/catalog")
 async def catalog_list(destination_id: int | None = None):
     try:
-        return catalog.list_items(destination_id)
+        result = catalog.list_items(destination_id)
     except catalog.CatalogError as e:
         raise HTTPException(400, str(e))
+    result["destination"] = _with_disk(result["destination"])
+    return result
 
 
 @app.get("/api/catalog/item")

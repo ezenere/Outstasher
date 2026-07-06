@@ -78,6 +78,7 @@ export interface MovieRef {
   original_title: string
   localized_title?: string | null
   year: string
+  poster?: string | null
 }
 
 export interface Job {

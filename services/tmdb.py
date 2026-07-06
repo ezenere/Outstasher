@@ -72,4 +72,6 @@ async def details(movie_id: int, language: str) -> dict:
         "original_title": data.get("original_title"),
         "localized_title": data.get("title"),
         "year": (data.get("release_date") or "")[:4],
+        "poster": f"https://image.tmdb.org/t/p/w342{data['poster_path']}"
+        if data.get("poster_path") else None,
     }

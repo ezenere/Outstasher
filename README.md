@@ -157,7 +157,7 @@ Dentro do caminho local, o serviço pega o maior arquivo de vídeo (ignorando "s
 ### Catálogo
 
 A aba **Catálogo** lê uma pasta de destino e lista os filmes já baixados (cada
-subpasta é um filme). Clicando num item abre o detalhe: correspondência no TMDB
+subpasta é um filme), com a barra de uso do disco do destino no topo. Clicando num item abre o detalhe: correspondência no TMDB
 (pôster, título original, nota, sinopse), tamanho total, e a lista de arquivos.
 Cada arquivo é um **dropdown** — expandindo, mostra o `ffprobe` parseado em
 detalhe: container, bitrate total, capítulos e cada track (vídeo com resolução,

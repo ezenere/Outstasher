@@ -57,7 +57,20 @@ export default function Jobs() {
         const pv = prog(j.progress?.video)
         const pa = prog(j.progress?.audio)
         return (
-          <div key={j.id} className="rounded-xl bg-zinc-900 px-4 py-3.5">
+          <div key={j.id} className="flex gap-3 rounded-xl bg-zinc-900 px-4 py-3.5">
+            {j.movie?.poster ? (
+              <img
+                src={j.movie.poster}
+                loading="lazy"
+                className="hidden h-24 w-16 shrink-0 rounded-md bg-zinc-800 object-cover sm:block"
+                alt=""
+              />
+            ) : (
+              <div className="hidden h-24 w-16 shrink-0 items-center justify-center rounded-md bg-zinc-800 text-zinc-600 sm:flex">
+                🎬
+              </div>
+            )}
+            <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <span className="flex-1 font-semibold">
                 {jobTitle(j)}{' '}
@@ -109,6 +122,7 @@ export default function Jobs() {
                 <ProgressBar label="Áudio" p={pa} />
               </>
             )}
+            </div>
           </div>
         )
       })}
