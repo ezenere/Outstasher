@@ -1,0 +1,507 @@
+"""Orquestrador: TMDB -> Jackett -> qBittorrent -> merge interno.
+
+Cada job guarda um log de eventos estruturado ({ts, kind, message, data?})
+persistido em jobs.json — o frontend consome isso pela lupa (detalhe do job).
+
+Modos:
+- auto: escolhe os torrents sozinho (áudio define o corte; vídeo tem que casar).
+- manual: para em "awaiting" com os candidatos viáveis; o usuário escolhe
+  pela UI e o job continua via select().
+
+Watchdog: download sem progresso por STALL_TIMEOUT_MINUTES é trocado pelo
+próximo candidato viável do mesmo corte (job["fallbacks"]).
+"""
+import asyncio
+import re
+import time
+import uuid
+from datetime import datetime
+from pathlib import Path
+
+import config
+from services import jackett, merger, selector, store, tmdb
+from services.qbittorrent import QbitClient
+
+VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m2ts", ".mov", ".wmv", ".mpg", ".mpeg"}
+MAX_SELECTABLE = 30  # candidatos guardados por papel para selecao manual/fallback
+
+# estados: searching -> (awaiting ->) downloading -> merging -> done | error | cancelled
+_jobs: dict[str, dict] = {}
+_tasks: dict[str, asyncio.Task] = {}
+_qbit = QbitClient()
+
+
+def load():
+    store.init()
+    for job in store.load_jobs():
+        _jobs[job["id"]] = job
+
+
+def resume_pending():
+    """Retoma jobs interrompidos por um restart do servidor."""
+    for job in _jobs.values():
+        if job["status"] in ("downloading", "merging"):
+            job["status"] = "downloading"
+            _event(job, "status", "Servidor reiniciado — retomando acompanhamento dos downloads")
+            _tasks[job["id"]] = asyncio.create_task(_run_from_download(job))
+        elif job["status"] == "searching":
+            _set(job, "error", "Servidor reiniciado durante a busca — use ↻ para tentar de novo")
+        # awaiting: candidatos estao persistidos; segue esperando a escolha
+
+
+def _public(job: dict) -> dict:
+    return {k: v for k, v in job.items() if k not in ("events", "search")}
+
+
+def list_jobs() -> list[dict]:
+    """Lista leve (sem eventos nem candidatos) para o polling da pagina."""
+    ordered = sorted(_jobs.values(), key=lambda j: j["created_at"], reverse=True)
+    return [_public(j) for j in ordered]
+
+
+def get_job(job_id: str) -> dict | None:
+    """Job completo, com os eventos vindos do banco (para a lupa)."""
+    job = _jobs.get(job_id)
+    if not job:
+        return None
+    return {**_public(job), "events": store.load_events(job_id)}
+
+
+def _event(job: dict, kind: str, message: str, data=None):
+    ev = {"ts": datetime.now().isoformat(timespec="seconds"), "kind": kind, "message": message}
+    if data is not None:
+        ev["data"] = data
+    store.add_event(job["id"], ev)
+    store.upsert_job(job)  # status/detail quase sempre mudam junto com o evento
+
+
+def _set(job: dict, status: str, detail: str = ""):
+    job["status"] = status
+    job["detail"] = detail
+    _event(job, "status", detail or status)
+
+
+def _fail(job: dict, message: str):
+    _set(job, "error", message)
+
+
+async def create(tmdb_id: int, language: str, mode: str = "auto",
+                 destination_id: int | None = None,
+                 torrent_target_id: int | None = None) -> dict:
+    dest = store.get_destination(destination_id) if destination_id else None
+    if dest is None:
+        dest = store.default_destination()
+    if dest is None:
+        raise ValueError("Nenhum destino cadastrado — cadastre uma pasta de destino antes")
+
+    # destino dos torrents e opcional: sem ele, usa pasta padrao do qBittorrent
+    # e nao traduz o content_path (comportamento antigo do .env)
+    target = store.get_torrent_target(torrent_target_id) if torrent_target_id else None
+    if target is None:
+        target = store.default_torrent_target()
+
+    job = {
+        "id": uuid.uuid4().hex[:10],
+        "tmdb_id": tmdb_id,
+        "language": language,
+        "mode": mode,
+        "status": "searching",
+        "detail": "Buscando informações do filme...",
+        "movie": None,
+        "video_torrent": None,
+        "audio_torrent": None,
+        "progress": {"video": None, "audio": None},
+        "output": None,
+        "destination_id": dest["id"],
+        "destination_label": dest["label"],
+        "destination_path": dest["path"],
+        "torrent_target_id": target["id"] if target else None,
+        "torrent_target_label": target["label"] if target else None,
+        "torrent_save_path": (target["save_path"] if target else "") or "",
+        "torrent_local_path": (target["local_path"] if target else "") or "",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "search": None,     # candidatos viaveis {audio: [...], video: [...]}
+        "fallbacks": None,  # reservas do mesmo corte para o watchdog
+    }
+    _jobs[job["id"]] = job
+    tinfo = f" — torrents: {target['label']}" if target else ""
+    _event(job, "status",
+           f"Job criado (modo {mode}) — destino: {dest['label']} ({dest['path']}){tinfo}")
+    _tasks[job["id"]] = asyncio.create_task(_run(job))
+    return _public(job)
+
+
+# -------------------- acoes da UI --------------------
+
+async def select(job_id: str, audio_id: str, video_id: str) -> dict | None:
+    """Continuacao do modo manual: usuario escolheu os torrents."""
+    job = _jobs.get(job_id)
+    if not job or job["status"] != "awaiting":
+        return None
+    search = job.get("search") or {}
+    a = next((c for c in search.get("audio", []) if c["id"] == audio_id), None)
+    v = next((c for c in search.get("video", []) if c["id"] == video_id), None)
+    if not a or not v:
+        raise ValueError("Candidato não encontrado (a busca pode ter sido refeita)")
+    _event(job, "chosen", "Seleção manual do usuário")
+    _tasks[job["id"]] = asyncio.create_task(_download_and_merge(job, a, v))
+    return _public(job)
+
+
+async def cancel(job_id: str, delete_torrents: bool = False) -> dict | None:
+    job = _jobs.get(job_id)
+    if not job:
+        return None
+    task = _tasks.pop(job_id, None)
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    if delete_torrents:
+        for kind in ("video", "audio"):
+            try:
+                await _qbit.delete_by_tag(_tag(job, kind), delete_files=True)
+            except Exception as e:  # noqa: BLE001
+                _event(job, "qbit", f"Falha ao remover torrent de {kind}: {e}")
+    if job["status"] not in ("done", "error", "cancelled"):
+        _set(job, "cancelled",
+             "Cancelado pelo usuário" + (" (torrents removidos)" if delete_torrents else ""))
+    return job
+
+
+async def remove(job_id: str, delete_torrents: bool = False) -> bool:
+    job = await cancel(job_id, delete_torrents)
+    if not job:
+        return False
+    _jobs.pop(job_id, None)
+    store.delete_job(job_id)
+    return True
+
+
+async def retry(job_id: str) -> dict | None:
+    old = _jobs.get(job_id)
+    if not old or old["status"] not in ("error", "cancelled"):
+        return None
+    return await create(old["tmdb_id"], old["language"], old.get("mode", "auto"),
+                        old.get("destination_id"), old.get("torrent_target_id"))
+
+
+# -------------------- pipeline --------------------
+
+async def _run(job: dict):
+    try:
+        await _search(job)
+        if job["mode"] == "manual":
+            _set(job, "awaiting",
+                 "Busca concluída — clique em Escolher para selecionar os torrents")
+            return
+        a, v = _auto_pick(job)
+        await _start_download(job, a, v)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 - job nunca deve derrubar o servidor
+        _fail(job, f"{type(e).__name__}: {e}")
+        return
+    await _run_from_download(job)
+
+
+async def _download_and_merge(job: dict, a: dict, v: dict):
+    try:
+        await _start_download(job, a, v)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        _fail(job, f"{type(e).__name__}: {e}")
+        return
+    await _run_from_download(job)
+
+
+def _slim(cand: dict, cid: str) -> dict:
+    return {"id": cid, "title": cand["title"], "tracker": cand.get("tracker"),
+            "seeders": cand["seeders"], "size": cand["size"],
+            "edition": cand.get("edition"), "score": cand["score"],
+            "magnet": cand.get("magnet"), "link": cand.get("link")}
+
+
+async def _search(job: dict):
+    """Busca no Jackett e preenche job["search"] com os candidatos viáveis."""
+    lang = job["language"]
+    label = config.LANGUAGES[lang]["label"]
+    movie = await tmdb.details(job["tmdb_id"], lang)
+    job["movie"] = movie
+    original, localized, year = movie["original_title"], movie["localized_title"], movie["year"]
+    _event(job, "info", f"Filme: {original} ({year}) — título em {label}: {localized}")
+
+    query_original = f"{original} {year}".strip()
+    _set(job, "searching",
+         f"Procurando '{query_original}' no Jackett (pode levar vários minutos)...")
+    results_original = await jackett.search(query_original)
+    _event(job, "search", f"Jackett devolveu {len(results_original)} resultados para '{query_original}'")
+
+    # ---- audio dublado: titulo traduzido + titulo original com marcador ----
+    _set(job, "searching", f"Procurando versão em {label} no Jackett...")
+    audio_ranked = []
+    if localized and localized.lower() != (original or "").lower():
+        query_localized = f"{localized} {year}".strip()
+        results_localized = await jackett.search(query_localized)
+        _event(job, "search",
+               f"Jackett devolveu {len(results_localized)} resultados para '{query_localized}'")
+        ranked, trace = selector.rank(results_localized, "audio", localized, year)
+        _event(job, "candidates", f"Avaliação para ÁUDIO — busca '{query_localized}'",
+               {"role": "audio", "query": query_localized, "candidates": trace})
+        audio_ranked.extend(ranked)
+
+    ranked, trace = selector.rank(results_original, "audio", original, year,
+                                  language=lang, require_language=True)
+    _event(job, "candidates",
+           f"Avaliação para ÁUDIO — busca '{query_original}' exigindo marcador de {label}",
+           {"role": "audio", "query": query_original, "candidates": trace})
+    audio_ranked.extend(ranked)
+
+    # dedupe (o mesmo torrent pode aparecer nas duas buscas) e ordena por score
+    seen, audio_viable = set(), []
+    for c in sorted(audio_ranked, key=lambda r: r["score"], reverse=True):
+        key = c.get("magnet") or c.get("link")
+        if key in seen:
+            continue
+        seen.add(key)
+        audio_viable.append(c)
+
+    # ---- video: titulo original, qualquer corte (o filtro vem depois) ----
+    video_viable, trace = selector.rank(results_original, "video", original, year)
+    _event(job, "candidates", f"Avaliação para VÍDEO — busca '{query_original}'",
+           {"role": "video", "query": query_original, "candidates": trace})
+
+    if not audio_viable:
+        raise RuntimeError(f"Nenhum torrent encontrado com áudio em {label}")
+    if not video_viable:
+        raise RuntimeError(f"Nenhum torrent de vídeo viável para '{original}'")
+
+    job["search"] = {
+        "audio": [_slim(c, f"a{i}") for i, c in enumerate(audio_viable[:MAX_SELECTABLE])],
+        "video": [_slim(c, f"v{i}") for i, c in enumerate(video_viable[:MAX_SELECTABLE])],
+    }
+    store.upsert_job(job)
+
+
+def _auto_pick(job: dict) -> tuple[dict, dict]:
+    """Melhor áudio define o corte; melhor vídeo do MESMO corte."""
+    search = job["search"]
+    for a in search["audio"]:
+        ed_label = a["edition"] or "normal"
+        vids = [v for v in search["video"] if v["edition"] == a["edition"]]
+        if vids:
+            _event(job, "info",
+                   f"Corte definido pelo áudio: '{ed_label}' — {len(vids)} vídeos compatíveis")
+            return a, vids[0]
+        _event(job, "info",
+               f"Nenhum vídeo com corte '{ed_label}' para casar com "
+               f"'{a['title']}' — tentando o próximo candidato de áudio")
+    raise RuntimeError(
+        "Nenhum torrent de vídeo com o mesmo corte das versões dubladas encontradas "
+        "(as duas versões precisam ser do mesmo corte para os áudios alinharem)")
+
+
+async def _start_download(job: dict, a: dict, v: dict):
+    _event(job, "chosen", f"🔊 Áudio: {a['title']} (score {a['score']}, "
+                          f"{a['seeders']} seeds, corte {a['edition'] or 'normal'})")
+    _event(job, "chosen", f"🎥 Vídeo: {v['title']} (score {v['score']}, "
+                          f"{v['seeders']} seeds, corte {v['edition'] or 'normal'})")
+
+    job["audio_torrent"] = {"title": a["title"], "seeders": a["seeders"],
+                            "size": a["size"], "score": a["score"], "edition": a["edition"]}
+    job["video_torrent"] = {"title": v["title"], "seeders": v["seeders"],
+                            "size": v["size"], "score": v["score"], "edition": v["edition"]}
+    # reservas do mesmo corte, para o watchdog trocar se o download travar
+    search = job.get("search") or {"audio": [], "video": []}
+    job["fallbacks"] = {
+        "audio": [x for x in search["audio"] if x["edition"] == a["edition"] and x["id"] != a["id"]],
+        "video": [x for x in search["video"] if x["edition"] == v["edition"] and x["id"] != v["id"]],
+    }
+
+    _set(job, "searching", "Enviando torrents para o qBittorrent...")
+    save_path = job.get("torrent_save_path") or config.QBIT_SAVE_PATH or None
+    url_video = v.get("magnet") or v["link"]
+    url_audio = a.get("magnet") or a["link"]
+    if url_video == url_audio:
+        # mesmo torrent serve para os dois (ex.: release dual audio)
+        await _qbit.add(url_video, f"{_tag(job, 'video')},{_tag(job, 'audio')}", save_path)
+        _event(job, "qbit", "Mesmo torrent serve para vídeo e áudio — adicionado uma única vez")
+    else:
+        await _qbit.add(url_video, _tag(job, "video"), save_path)
+        _event(job, "qbit", f"Torrent de vídeo adicionado ao qBittorrent (tag {_tag(job, 'video')})")
+        await _qbit.add(url_audio, _tag(job, "audio"), save_path)
+        _event(job, "qbit", f"Torrent de áudio adicionado ao qBittorrent (tag {_tag(job, 'audio')})")
+    if save_path:
+        _event(job, "qbit", f"Salvando em: {save_path}")
+    _set(job, "downloading", "Baixando torrents...")
+
+
+def _tag(job: dict, kind: str) -> str:
+    return f"dl-{job['id']}-{kind}"
+
+
+async def _run_from_download(job: dict):
+    try:
+        paths = await _wait_downloads(job)
+        await _merge(job, paths["video"], paths["audio"])
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        _fail(job, f"{type(e).__name__}: {e}")
+
+
+async def _wait_downloads(job: dict) -> dict:
+    """Espera os dois torrents terminarem; watchdog troca torrent travado."""
+    paths = {}
+    stall = {k: {"pct": -1.0, "since": time.monotonic(), "warned": False}
+             for k in ("video", "audio")}
+    while len(paths) < 2:
+        for kind in ("video", "audio"):
+            if kind in paths:
+                continue
+            torrents = await _qbit.info_by_tag(_tag(job, kind))
+            if not torrents:
+                raise RuntimeError(
+                    f"Torrent de {kind} não encontrado no qBittorrent (foi removido?)")
+            t = torrents[0]
+            pct = t.get("progress", 0)
+            job["progress"][kind] = {
+                "pct": round(pct * 100, 1),
+                "speed": t.get("dlspeed", 0),
+                "eta": t.get("eta"),
+                "state": t.get("state"),
+                "seeds": t.get("num_seeds", 0),
+                "name": t.get("name"),
+            }
+            if pct >= 1:
+                paths[kind] = t["content_path"]
+                _event(job, "qbit", f"Download de {kind} concluído: {t['content_path']}")
+                continue
+
+            st = stall[kind]
+            if pct > st["pct"] + 1e-4:
+                st.update(pct=pct, since=time.monotonic(), warned=False)
+            elif (config.STALL_TIMEOUT_MINUTES > 0
+                  and time.monotonic() - st["since"] > config.STALL_TIMEOUT_MINUTES * 60):
+                if await _switch_torrent(job, kind, t):
+                    st.update(pct=-1.0, since=time.monotonic(), warned=False)
+                elif not st["warned"]:
+                    _event(job, "qbit",
+                           f"⚠️ Download de {kind} sem progresso há "
+                           f"{config.STALL_TIMEOUT_MINUTES} min e sem candidato reserva — "
+                           f"continuando a esperar (cancele o job se quiser desistir)")
+                    st["warned"] = True
+        store.upsert_job(job)
+        if len(paths) < 2:
+            await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
+    return paths
+
+
+async def _switch_torrent(job: dict, kind: str, current: dict) -> bool:
+    """Troca um download travado pelo próximo candidato do mesmo corte."""
+    fallbacks = (job.get("fallbacks") or {}).get(kind) or []
+    if not fallbacks:
+        return False
+    nxt = fallbacks.pop(0)
+    store.upsert_job(job)
+
+    tag = _tag(job, kind)
+    other = "audio" if kind == "video" else "video"
+    other_torrents = await _qbit.info_by_tag(_tag(job, other))
+    shared = bool(other_torrents) and other_torrents[0].get("hash") == current.get("hash")
+
+    await _qbit.remove_tag(current["hash"], tag)
+    if not shared:
+        await _qbit.delete(current["hash"], delete_files=True)
+    save_path = job.get("torrent_save_path") or config.QBIT_SAVE_PATH or None
+    await _qbit.add(nxt.get("magnet") or nxt["link"], tag, save_path)
+
+    job[f"{kind}_torrent"] = {"title": nxt["title"], "seeders": nxt["seeders"],
+                              "size": nxt["size"], "score": nxt["score"],
+                              "edition": nxt["edition"]}
+    _event(job, "qbit",
+           f"⏳ Download de {kind} travado há {config.STALL_TIMEOUT_MINUTES} min — "
+           f"trocado por: {nxt['title']} ({nxt['seeders']} seeds)")
+    return True
+
+
+def _map_qbit_path(job: dict, path: str) -> Path:
+    """Traduz o caminho reportado pelo qBittorrent para o caminho local.
+
+    Prioridade: o par save_path->local_path do destino de torrents do job;
+    depois o QBIT_PATH_MAP global do .env (fallback/compatibilidade).
+    """
+    save = job.get("torrent_save_path") or ""
+    local = job.get("torrent_local_path") or ""
+    if save and local:
+        mapped = config.map_path(path, [(save, local)])
+        if mapped != path:
+            return Path(mapped)
+    return Path(config.map_path(path, config.QBIT_PATH_MAP))
+
+
+def _find_video_file(job: dict, content_path: str) -> Path:
+    p = _map_qbit_path(job, content_path)
+    if not p.exists():
+        raise RuntimeError(
+            f"Caminho '{p}' (qBittorrent reportou '{content_path}') não existe nesta máquina. "
+            f"Configure o caminho local do destino de torrents em Configurações "
+            f"(ou monte a pasta de downloads nesta máquina).")
+    if p.is_file():
+        return p
+    files = [f for f in p.rglob("*")
+             if f.suffix.lower() in VIDEO_EXTENSIONS and "sample" not in f.name.lower()]
+    if not files:
+        raise RuntimeError(f"Nenhum arquivo de vídeo encontrado em {p}")
+    return max(files, key=lambda f: f.stat().st_size)
+
+
+async def _merge(job: dict, video_content: str, audio_content: str):
+    video_file = _find_video_file(job, video_content)
+    audio_file = _find_video_file(job, audio_content)
+    _event(job, "merge", f"Arquivo de vídeo: {video_file}")
+    _event(job, "merge", f"Arquivo de áudio: {audio_file}")
+
+    movie = job["movie"]
+    safe_title = re.sub(r'[<>:"/\\|?*]', "", f"{movie['original_title']} ({movie['year']})")
+    # subpasta por filme dentro do destino escolhido (bom para Jellyfin/Plex)
+    dest_dir = Path(job.get("destination_path") or config.OUTPUT_DIR)
+    output = dest_dir / safe_title / f"{safe_title} [{job['language']}+orig].mkv"
+
+    _set(job, "merging", f"Fazendo merge ({video_file.name} + {audio_file.name})...")
+
+    def log(msg):
+        job["detail"] = str(msg)
+        _event(job, "merge", str(msg))
+
+    # merger.merge é bloqueante (ffmpeg/ffprobe); roda em thread para não travar a API
+    result = await asyncio.to_thread(
+        merger.merge, str(video_file), str(audio_file), str(output),
+        job["language"], log=log)
+
+    job["output"] = result.output
+    if result.symlinked:
+        _set(job, "done", f"Áudio no idioma alvo já existia no melhor vídeo — link criado: {result.output}")
+    else:
+        _set(job, "done", f"Concluído (offset {result.offset_ms:+.2f} ms): {result.output}")
+
+    await _cleanup_torrents(job, result.symlinked)
+
+
+async def _cleanup_torrents(job: dict, symlinked: bool):
+    if config.QBIT_CLEANUP == "keep":
+        return
+    delete_files = config.QBIT_CLEANUP == "remove_data" and not symlinked
+    if config.QBIT_CLEANUP == "remove_data" and symlinked:
+        _event(job, "qbit",
+               "Saída é um link para o arquivo baixado — removendo só os torrents, mantendo os dados")
+    for kind in ("video", "audio"):
+        try:
+            await _qbit.delete_by_tag(_tag(job, kind), delete_files)
+            _event(job, "qbit", f"Torrent de {kind} removido do qBittorrent"
+                                + (" (com os dados)" if delete_files else ""))
+        except Exception as e:  # noqa: BLE001
+            _event(job, "qbit", f"Falha ao remover torrent de {kind}: {e}")

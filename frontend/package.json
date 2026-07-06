@@ -1,0 +1,32 @@
+{
+  "name": "downloader-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "iconoir-react": "^7.10.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.5.4",
+    "vite": "^6.0.0"
+  },
+  "optionalDependencies": {
+    "@esbuild/linux-x64": "^0.25.12",
+    "@rollup/rollup-linux-x64-gnu": "^4.62.2",
+    "@tailwindcss/oxide-linux-x64-gnu": "^4.3.2",
+    "lightningcss-linux-x64-gnu": "^1.32.0"
+  }
+}
