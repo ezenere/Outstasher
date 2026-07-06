@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import {
-  Check, EditPencil, Folder, HardDrive, Plus, Star, StarSolid, Trash, Xmark,
+  Check, EditPencil, Folder, HardDrive, Lock, Plus, Star, StarSolid, Trash, Xmark,
 } from 'iconoir-react'
 import {
-  api, del, post, put, type Destination, type TorrentTarget,
+  api, changePassword, del, post, put, type Destination, type TorrentTarget,
 } from '../api'
 import { DiskBar, Empty } from '../components/ui'
 
@@ -12,7 +12,65 @@ export default function Settings() {
     <div className="flex flex-col gap-10">
       <DestinationsSection />
       <TorrentTargetsSection />
+      <SecuritySection />
     </div>
+  )
+}
+
+// ---------------- senha ----------------
+
+function SecuritySection() {
+  const [current, setCurrent] = useState('')
+  const [next, setNext] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  async function save() {
+    setMsg(null)
+    if (next !== confirm) return setMsg({ ok: false, text: 'As senhas novas não conferem.' })
+    if (next.length < 4) return setMsg({ ok: false, text: 'A nova senha precisa ter ao menos 4 caracteres.' })
+    setBusy(true)
+    try {
+      await changePassword(current, next)
+      setCurrent(''); setNext(''); setConfirm('')
+      setMsg({ ok: true, text: 'Senha alterada. As outras sessões foram desconectadas.' })
+    } catch (e) {
+      setMsg({ ok: false, text: (e as Error).message })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section>
+      <div className="flex items-center gap-2">
+        <Lock width={18} height={18} className="text-zinc-500" />
+        <h1 className="text-lg font-semibold">Senha de acesso</h1>
+      </div>
+      <p className="mt-1 text-sm text-zinc-400">
+        Troca a senha usada para entrar no serviço. Ao salvar, as outras sessões abertas caem.
+      </p>
+      <div className="mt-4 max-w-md rounded-xl border border-zinc-700 bg-zinc-900 p-4">
+        <div className="grid gap-3">
+          <Field label="Senha atual" value={current} onChange={setCurrent} type="password" />
+          <Field label="Nova senha" value={next} onChange={setNext} type="password" />
+          <Field label="Confirmar nova senha" value={confirm} onChange={setConfirm} type="password" />
+        </div>
+        {msg && (
+          <div className={`mt-3 text-sm ${msg.ok ? 'text-emerald-400' : 'text-red-400'}`}>{msg.text}</div>
+        )}
+        <div className="mt-4">
+          <button
+            onClick={save}
+            disabled={busy || !current || !next}
+            className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
+          >
+            <Check width={16} height={16} /> Alterar senha
+          </button>
+        </div>
+      </div>
+    </section>
   )
 }
 
@@ -32,17 +90,19 @@ function IconBtn({ title, onClick, children }: {
   )
 }
 
-function Field({ label, value, onChange, placeholder, mono }: {
+function Field({ label, value, onChange, placeholder, mono, type }: {
   label: string
   value: string
   onChange: (v: string) => void
   placeholder?: string
   mono?: boolean
+  type?: string
 }) {
   return (
     <label className="text-sm">
       <span className="text-zinc-400">{label}</span>
       <input
+        type={type}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}

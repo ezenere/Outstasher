@@ -61,10 +61,33 @@ def init():
             is_default INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
         )""")
+    # tabela chave/valor (senha, api key, e o que mais precisar guardar)
+    _conn.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )""")
     _conn.commit()
     _migrate_from_json()
     _seed_default_destination()
     _seed_default_torrent_target()
+
+
+# -------------------- settings (chave/valor) --------------------
+
+def get_setting(key: str, default: str | None = None) -> str | None:
+    with _lock:
+        r = _conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return r[0] if r else default
+
+
+def set_setting(key: str, value: str):
+    with _lock:
+        _conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value))
+        _conn.commit()
 
 
 # -------------------- destinos (pastas de destino do arquivo final) --------------------

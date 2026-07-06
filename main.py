@@ -10,12 +10,12 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 import config
-from services import catalog, jobs, store, tmdb
+from services import auth, catalog, jobs, store, tmdb
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
 DIST_DIR = FRONTEND_DIR / "dist"
@@ -50,6 +50,85 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Movie Downloader & Merger", lifespan=lifespan)
+
+
+# -------------------- autenticacao --------------------
+# Rotas de auth que NAO exigem sessao (status/setup/login). O resto de /api/* e
+# protegido pelo middleware abaixo; arquivos estaticos do SPA ficam liberados
+# (a propria tela de login e servida por eles).
+_PUBLIC_PATHS = {"/api/auth/status", "/api/auth/setup", "/api/auth/login"}
+
+
+def _bearer(request: Request) -> str | None:
+    h = request.headers.get("Authorization", "")
+    return h[7:].strip() if h.lower().startswith("bearer ") else None
+
+
+@app.middleware("http")
+async def auth_gate(request: Request, call_next):
+    path = request.url.path
+    # so protege a API; o SPA (html/js/css) e servido livremente
+    if path.startswith("/api/") and path not in _PUBLIC_PATHS:
+        # sem senha cadastrada ainda: obriga o setup antes de qualquer coisa
+        if not auth.is_password_set():
+            return JSONResponse({"detail": "Senha não configurada"}, status_code=401)
+        if not auth.validate_token(_bearer(request)):
+            return JSONResponse({"detail": "Não autenticado"}, status_code=401)
+    return await call_next(request)
+
+
+class PasswordRequest(BaseModel):
+    password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@app.get("/api/auth/status")
+async def auth_status(request: Request):
+    """A UI chama isto no boot: precisa de setup? esta logado?"""
+    return {
+        "password_set": auth.is_password_set(),
+        "authenticated": auth.validate_token(_bearer(request)),
+    }
+
+
+@app.post("/api/auth/setup")
+async def auth_setup(req: PasswordRequest):
+    if auth.is_password_set():
+        raise HTTPException(409, "Senha já configurada — use o login")
+    if len(req.password) < 4:
+        raise HTTPException(400, "A senha precisa ter pelo menos 4 caracteres")
+    auth.set_password(req.password)
+    return {"token": auth.create_session()}
+
+
+@app.post("/api/auth/login")
+async def auth_login(req: PasswordRequest):
+    if not auth.is_password_set():
+        raise HTTPException(409, "Nenhuma senha configurada ainda")
+    if not auth.verify_password(req.password):
+        raise HTTPException(401, "Senha incorreta")
+    return {"token": auth.create_session()}
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request):
+    auth.revoke_session(_bearer(request))
+    return {"ok": True}
+
+
+@app.post("/api/auth/change-password")
+async def auth_change_password(req: ChangePasswordRequest):
+    if not auth.verify_password(req.current_password):
+        raise HTTPException(401, "Senha atual incorreta")
+    if len(req.new_password) < 4:
+        raise HTTPException(400, "A nova senha precisa ter pelo menos 4 caracteres")
+    auth.set_password(req.new_password)
+    auth.revoke_all_sessions()  # derruba as outras sessoes
+    return {"token": auth.create_session()}  # mantem quem trocou logado
 
 
 @app.get("/api/languages")

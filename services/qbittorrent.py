@@ -47,13 +47,13 @@ class QbitClient:
                 f"(app/version -> {v.status_code}); confira usuário/senha")
         self._logged_in = True
 
-    async def _post(self, path: str, data: dict) -> httpx.Response:
+    async def _post(self, path: str, data: dict, files: dict | None = None) -> httpx.Response:
         if not self._logged_in:
             await self._login()
-        r = await self._client.post(path, data=data)
+        r = await self._client.post(path, data=data, files=files)
         if r.status_code == 403:  # sessao expirou
             await self._login()
-            r = await self._client.post(path, data=data)
+            r = await self._client.post(path, data=data, files=files)
         return r
 
     async def _get(self, path: str, params: dict | None = None) -> httpx.Response:
@@ -65,14 +65,72 @@ class QbitClient:
             r = await self._client.get(path, params=params)
         return r
 
+    async def _resolve_link(self, link: str) -> tuple[str, str | bytes]:
+        """Resolve um link do Jackett para algo que o qBittorrent aceite.
+
+        O Jackett costuma devolver uma URL da PROPRIA API dele (/dl/...) que, ao
+        ser acessada, ou redireciona para um `magnet:` ou entrega os bytes do
+        `.torrent`. O qBittorrent nem sempre segue esse redirect nem manda os
+        headers certos, entao resolvemos aqui:
+
+        - magnet:            -> ("magnet", magnet)
+        - http que redireciona para magnet -> ("magnet", magnet)
+        - http que entrega .torrent (bencode) -> ("file", bytes)
+        - http que ainda aponta para outro http -> ("url", url final)
+
+        Retorna o tipo e o payload correspondente.
+        """
+        if link.startswith("magnet:"):
+            return "magnet", link
+        if not link.startswith(("http://", "https://")):
+            # ja e um caminho/algo que o qBittorrent resolve sozinho
+            return "url", link
+
+        # segue redirects manualmente para capturar um eventual "Location: magnet:"
+        async with httpx.AsyncClient(timeout=60, follow_redirects=False) as client:
+            url = link
+            for _ in range(10):  # teto de saltos para nao loopar
+                resp = await client.get(url)
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    loc = resp.headers.get("location", "")
+                    if loc.startswith("magnet:"):
+                        return "magnet", loc
+                    if not loc:
+                        break
+                    url = str(httpx.URL(url).join(loc))
+                    continue
+                resp.raise_for_status()
+                body = resp.content
+                # .torrent e um dicionario bencode: comeca com 'd' e termina com 'e'
+                ctype = resp.headers.get("content-type", "").lower()
+                if body[:1] == b"d" or "application/x-bittorrent" in ctype:
+                    return "file", body
+                # texto que na verdade e um magnet (alguns indexers fazem isso)
+                text = body[:2048].decode("utf-8", "ignore").strip()
+                if text.startswith("magnet:"):
+                    return "magnet", text.splitlines()[0].strip()
+                raise QbitError(
+                    f"Link do Jackett não retornou magnet nem .torrent "
+                    f"(content-type {ctype or '??'}, {len(body)} bytes)")
+        raise QbitError(f"Excesso de redirects ao resolver o link: {link}")
+
     async def add(self, magnet_or_url: str, tag: str, save_path: str | None = None):
-        """Adiciona um torrent (magnet ou URL de .torrent) com uma tag para rastrear."""
-        data = {"urls": magnet_or_url, "tags": tag}
+        """Adiciona um torrent (magnet, URL de .torrent, ou link da API do Jackett)."""
+        data: dict = {"tags": tag}
         if save_path:
             # autoTMM ligado ignoraria o savepath
             data["savepath"] = save_path
             data["autoTMM"] = "false"
-        r = await self._post("/api/v2/torrents/add", data)
+
+        kind, payload = await self._resolve_link(magnet_or_url)
+        files = None
+        if kind == "file":
+            # envia os bytes do .torrent como multipart
+            files = {"torrents": ("dl.torrent", payload, "application/x-bittorrent")}
+        else:  # magnet ou url final
+            data["urls"] = payload
+
+        r = await self._post("/api/v2/torrents/add", data, files=files)
         # 200 = adicionado; 202 = aceito mas ainda buscando metadados (tipico de
         # magnet: o qBittorrent responde antes de ter o .torrent completo).
         if r.status_code not in (200, 202):

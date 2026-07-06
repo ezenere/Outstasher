@@ -21,6 +21,10 @@ torrent para cada uma, e junta tudo em um único arquivo: **melhor imagem + todo
      não alinham. Se não houver vídeo com o corte do melhor áudio, tenta o próximo
      candidato de áudio.
 3. Manda os dois torrents para o **qBittorrent** via Web API e acompanha o progresso.
+   Se o Jackett devolver um link HTTP da própria API (em vez de um `magnet:`), o
+   serviço resolve antes de mandar: segue o redirect (que costuma virar um
+   `magnet:`) ou baixa os bytes do `.torrent` e envia como arquivo — o qBittorrent
+   nem sempre segue esse redirect sozinho.
 4. Quando os dois terminam, faz o merge internamente:
    - se o arquivo de melhor vídeo **já tem áudio no idioma alvo**, não faz merge —
      cria um **hardlink** no destino (fallback: cópia; nunca symlink);
@@ -57,6 +61,19 @@ python main.py dev    # dev: API com reload em :8008 + Vite em watch em :5173
 
 Em produção, abra http://127.0.0.1:8008. Em dev, use http://127.0.0.1:5173 (o Vite
 faz proxy de `/api` para o backend e recarrega o frontend a cada mudança).
+
+### Senha de acesso
+
+Na primeira vez que abrir, o serviço pede para **criar uma senha** (estilo
+Jackett/qBittorrent). Depois disso, toda chamada da API exige estar logado. A
+senha é guardada com hash PBKDF2 na tabela `settings` do `jobs.db` (junto de uma
+`API_KEY` gerada no setup, que também vale como token permanente via header
+`Authorization: Bearer <api_key>` para scripts).
+
+O login gera um token de sessão guardado no `sessionStorage` do navegador:
+fechou o navegador/aba, precisa digitar de novo; reiniciar o servidor também
+derruba as sessões. Trocar a senha (aba **Configurações → Senha de acesso**)
+desconecta as outras sessões abertas.
 
 ## Docker
 

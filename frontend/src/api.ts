@@ -184,8 +184,31 @@ export interface CatalogDetail {
   tmdb: Movie | null
 }
 
+// ---------- sessão / token ----------
+// Token no sessionStorage: some quando o navegador/aba fecha (login de novo),
+// que é o comportamento pedido. Um evento 'auth-expired' avisa o App quando a
+// API responde 401 (sessão caiu, servidor reiniciou etc.).
+
+const TOKEN_KEY = 'downloader_token'
+
+export const getToken = () => sessionStorage.getItem(TOKEN_KEY)
+export const setToken = (t: string) => sessionStorage.setItem(TOKEN_KEY, t)
+export const clearToken = () => sessionStorage.removeItem(TOKEN_KEY)
+
+export interface AuthStatus {
+  password_set: boolean
+  authenticated: boolean
+}
+
 export async function api<T>(path: string, opts?: RequestInit): Promise<T> {
-  const r = await fetch(path, opts)
+  const token = getToken()
+  const headers = new Headers(opts?.headers)
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+  const r = await fetch(path, { ...opts, headers })
+  if (r.status === 401 && !path.startsWith('/api/auth/')) {
+    clearToken()
+    window.dispatchEvent(new Event('auth-expired'))
+  }
   if (!r.ok) {
     const body = await r.json().catch(() => ({}) as { detail?: string })
     throw new Error((body as { detail?: string }).detail || r.statusText)
@@ -208,6 +231,36 @@ export const put = <T,>(path: string, body: unknown) =>
   })
 
 export const del = <T,>(path: string) => api<T>(path, { method: 'DELETE' })
+
+// ---------- ações de auth ----------
+
+export const authStatus = () => api<AuthStatus>('/api/auth/status')
+
+export async function login(password: string): Promise<void> {
+  const { token } = await post<{ token: string }>('/api/auth/login', { password })
+  setToken(token)
+}
+
+export async function setupPassword(password: string): Promise<void> {
+  const { token } = await post<{ token: string }>('/api/auth/setup', { password })
+  setToken(token)
+}
+
+export async function logout(): Promise<void> {
+  try {
+    await post('/api/auth/logout')
+  } finally {
+    clearToken()
+  }
+}
+
+export async function changePassword(current_password: string, new_password: string): Promise<void> {
+  const { token } = await post<{ token: string }>('/api/auth/change-password', {
+    current_password,
+    new_password,
+  })
+  setToken(token)
+}
 
 // ---------- formatadores ----------
 

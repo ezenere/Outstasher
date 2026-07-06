@@ -51,22 +51,26 @@ ANY_EDITION = "__any__"
 
 # Apenas edicoes que MUDAM O CORTE do filme (duracao/conteudo) — remaster/IMAX
 # nao alteram a linha do tempo e nao atrapalham o alinhamento dos audios.
+# Comparados contra o titulo SEM acento (_fold), entao os padroes tambem sao
+# sem acento: "versao" pega "Versão", "estendida" pega "Estendida".
 EDITION_PATTERNS = [
-    (re.compile(r"extended|estendida|extendida", re.I), "extended"),
-    (re.compile(r"director'?s[ ._-]?cut", re.I), "director's cut"),
-    (re.compile(r"final[ ._-]?cut", re.I), "final cut"),
+    (re.compile(r"extended|estendid[oa]|extendid[oa]", re.I), "extended"),
+    (re.compile(r"director'?s[ ._-]?cut|versao[ ._-]?do[ ._-]?diretor", re.I),
+     "director's cut"),
+    (re.compile(r"final[ ._-]?cut|corte[ ._-]?final", re.I), "final cut"),
     (re.compile(r"ultimate[ ._-]?(cut|edition)", re.I), "ultimate"),
-    (re.compile(r"special[ ._-]?edition", re.I), "special edition"),
+    (re.compile(r"special[ ._-]?edition|edicao[ ._-]?especial", re.I), "special edition"),
     (re.compile(r"\bunrated\b", re.I), "unrated"),
     (re.compile(r"\buncut\b", re.I), "uncut"),
-    (re.compile(r"\btheatrical\b", re.I), None),  # explicito = corte normal
+    (re.compile(r"\btheatrical\b|\bcinema\b", re.I), None),  # explicito = corte normal
 ]
 
 
 def edition_of(title: str) -> str | None:
     """Edicao do corte no nome do torrent; None = corte normal (theatrical)."""
+    folded = _fold(title)  # sem acento/entidades, para pegar "Versão", "Estendido"
     for pattern, tag in EDITION_PATTERNS:
-        if pattern.search(title):
+        if pattern.search(folded):
             return tag
     return None
 
