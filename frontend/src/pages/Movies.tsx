@@ -4,7 +4,7 @@ import { Search, Xmark } from 'iconoir-react'
 import {
   api, post, type Destination, type Job, type Language, type Movie, type TorrentTarget,
 } from '../api'
-import { Empty } from '../components/ui'
+import { DiskFree, Empty } from '../components/ui'
 
 export default function Movies() {
   const [movies, setMovies] = useState<Movie[] | null>(null)
@@ -154,6 +154,7 @@ export default function Movies() {
                   cadastrar destino
                 </Link>
               )}
+              <DiskFree disk={destinations.find((d) => d.id === destId)?.disk} />
             </label>
             <label className="flex items-center gap-2 text-sm">
               Torrents:
@@ -175,6 +176,7 @@ export default function Movies() {
                   padrão do qBittorrent
                 </span>
               )}
+              <DiskFree disk={targets.find((t) => t.id === targetId)?.disk} />
             </label>
             <label className="flex items-center gap-1.5 text-sm text-zinc-300">
               <input type="checkbox" checked={manual} onChange={(e) => setManual(e.target.checked)} />

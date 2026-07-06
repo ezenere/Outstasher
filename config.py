@@ -60,33 +60,44 @@ POLL_INTERVAL_SECONDS = 15
 
 # Idiomas suportados para a faixa dublada.
 # tmdb: codigo de idioma usado para buscar o titulo traduzido no TMDB.
-# markers: palavras que indicam o idioma no nome do torrent (minusculas).
+# markers_strong: marcadores que CONFIRMAM dublagem no idioma ("dublado",
+#   grupos/sites nacionais, "dual áudio" com acento...) — ganham bônus de score.
+# markers_weak: ambiguos ("dual", "multi" podem ser quaisquer idiomas) — contam
+#   como marcador só por falta de opção melhor, sem bônus.
+# Comparados em minúsculas, MANTENDO acentos: "dual áudio" (com acento) é sinal
+# de release brasileiro; "dual audio" (sem) pode ser Hindi+English.
 LANGUAGES = {
     "pt": {
         "label": "Português",
         "tmdb": "pt-BR",
-        "markers": ["dublado", "dual", "nacional", "portugues", "português",
-                    "pt-br", "ptbr", "pt br", "brazilian", "dublagem"],
+        "markers_strong": ["dublado", "dublagem", "nacional", "portugues",
+                           "português", "pt-br", "ptbr", "pt br", "brazilian",
+                           "bludv", "dual áudio", "áudio dual", "filmes"],
+        "markers_weak": ["dual"],
     },
     "es": {
         "label": "Espanhol",
         "tmdb": "es-ES",
-        "markers": ["castellano", "español", "espanol", "latino", "spanish",
-                    "esp", "dual", "multi"],
+        "markers_strong": ["castellano", "español", "espanol", "latino",
+                           "spanish", "esp"],
+        "markers_weak": ["dual", "multi"],
     },
     "it": {
         "label": "Italiano",
         "tmdb": "it-IT",
-        "markers": ["italian", "ita", "dual", "multi"],
+        "markers_strong": ["italian", "ita"],
+        "markers_weak": ["dual", "multi"],
     },
     "de": {
         "label": "Alemão",
         "tmdb": "de-DE",
-        "markers": ["german", "deutsch", "ger", "dual", "multi"],
+        "markers_strong": ["german", "deutsch", "ger"],
+        "markers_weak": ["dual", "multi"],
     },
     "fr": {
         "label": "Francês",
         "tmdb": "fr-FR",
-        "markers": ["french", "truefrench", "vff", "vf ", "fre", "dual", "multi"],
+        "markers_strong": ["french", "truefrench", "vff", "vf ", "fre"],
+        "markers_weak": ["dual", "multi"],
     },
 }

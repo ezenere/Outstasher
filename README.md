@@ -1,4 +1,4 @@
-# Movie Downloader & Merger
+# Outstasher
 
 Serviço que baixa duas versões de um filme (original + dublada), escolhendo o melhor
 torrent para cada uma, e junta tudo em um único arquivo: **melhor imagem + todos os
@@ -9,7 +9,12 @@ torrent para cada uma, e junta tudo em um único arquivo: **melhor imagem + todo
 1. Você escolhe um filme (busca ou populares do TMDB) e um idioma de áudio no frontend.
 2. O serviço busca no **Jackett**:
    - o título traduzido / com marcadores de idioma (dublado, dual, castellano...) →
-     melhor **qualidade de áudio** (TrueHD, DTS, EAC3...);
+     melhor **qualidade de áudio** (TrueHD, DTS, EAC3...). Releases com o
+     **título no idioma dublado** têm preferência absoluta; título original +
+     marcador é só fallback — e marcadores fortes ("Dublado", "BLUDV",
+     "Dual Áudio" com acento) ganham bônus sobre o "dual" genérico, que pode
+     ser qualquer par de idiomas. Acentos e entidades HTML são normalizados
+     ("Tóquio" = "Toquio" = "T&amp;oacute;quio");
    - o título original → melhor **qualidade de vídeo** (resolução, remux/bluray, seeds),
      **restrito ao mesmo corte** da versão dublada: se o dublado é o corte normal, um
      "extended/director's cut" original é rejeitado (e vice-versa) — cortes diferentes
@@ -39,7 +44,7 @@ torrent para cada uma, e junta tudo em um único arquivo: **melhor imagem + todo
 ```sh
 cd pasta_onde_baixou
 pip install -r requirements.txt
-copy .env.example .env
+cp .env.example .env
 # edite o .env com suas chaves/URLs
 ```
 
@@ -121,6 +126,14 @@ numa subpasta própria dentro do destino escolhido (bom para o Jellyfin/Plex
 parsearem o nome). O destino fica registrado no job, então repetir um job (↻)
 mantém a mesma pasta. O `OUTPUT_DIR` do `.env` é usado só para criar o destino
 "Padrão" na primeira execução.
+
+Cada destino mostra o **uso do disco** do volume que o contém (na visão desta
+máquina): uma barra `usado / total · livres` nas Configurações e o espaço livre
+compacto (`350 GB livre`) ao lado do seletor na hora do download. A barra fica
+amarela acima de 75% e vermelha acima de 90%. Se o caminho ainda não existir, o
+serviço sobe pelos diretórios pais até achar um volume montado. Nos destinos de
+torrents, o disco mostrado é o do **caminho local** (onde os downloads caem nesta
+máquina).
 
 ### Destinos dos torrents (qBittorrent)
 

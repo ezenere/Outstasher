@@ -248,9 +248,12 @@ async def _search(job: dict):
         results_localized = await jackett.search(query_localized)
         _event(job, "search",
                f"Jackett devolveu {len(results_localized)} resultados para '{query_localized}'")
-        ranked, trace = selector.rank(results_localized, "audio", localized, year)
+        ranked, trace = selector.rank(results_localized, "audio", localized, year,
+                                      language=lang)
         _event(job, "candidates", f"Avaliação para ÁUDIO — busca '{query_localized}'",
                {"role": "audio", "query": query_localized, "candidates": trace})
+        for c in ranked:
+            c["tier"] = 0  # titulo no idioma dublado: preferencia maxima
         audio_ranked.extend(ranked)
 
     ranked, trace = selector.rank(results_original, "audio", original, year,
@@ -258,16 +261,27 @@ async def _search(job: dict):
     _event(job, "candidates",
            f"Avaliação para ÁUDIO — busca '{query_original}' exigindo marcador de {label}",
            {"role": "audio", "query": query_original, "candidates": trace})
+    for c in ranked:
+        # titulo original MAS com o titulo traduzido junto (release "Título / Title")
+        # ainda conta como dublado confirmado; senao e so fallback
+        c["tier"] = 0 if localized and selector.matches_title(c["title"], localized) else 1
     audio_ranked.extend(ranked)
 
-    # dedupe (o mesmo torrent pode aparecer nas duas buscas) e ordena por score
+    # dedupe (o mesmo torrent pode aparecer nas duas buscas) e ordena:
+    # titulo dublado (tier 0) SEMPRE antes de ingles+marcador (tier 1);
+    # score decide dentro de cada tier
     seen, audio_viable = set(), []
-    for c in sorted(audio_ranked, key=lambda r: r["score"], reverse=True):
+    for c in sorted(audio_ranked, key=lambda r: (r.get("tier", 1), -r["score"])):
         key = c.get("magnet") or c.get("link")
         if key in seen:
             continue
         seen.add(key)
         audio_viable.append(c)
+    n_localized = sum(1 for c in audio_viable if c.get("tier") == 0)
+    if n_localized and n_localized < len(audio_viable):
+        _event(job, "info",
+               f"Preferência de áudio: {n_localized} candidato(s) com título em {label} "
+               f"na frente de {len(audio_viable) - n_localized} em inglês com marcador")
 
     # ---- video: titulo original, qualquer corte (o filtro vem depois) ----
     video_viable, trace = selector.rank(results_original, "video", original, year)
@@ -358,14 +372,30 @@ async def _wait_downloads(job: dict) -> dict:
     paths = {}
     stall = {k: {"pct": -1.0, "since": time.monotonic(), "warned": False}
              for k in ("video", "audio")}
+    # magnet adicionado pode levar alguns segundos ate aparecer em /info
+    # (qBittorrent ainda buscando metadados). so tratamos como "removido" se
+    # sumir por um bom tempo, nao na primeira consulta.
+    missing = {k: {"since": None, "warned": False} for k in ("video", "audio")}
+    METADATA_GRACE = max(config.STALL_TIMEOUT_MINUTES, 5) * 60
     while len(paths) < 2:
         for kind in ("video", "audio"):
             if kind in paths:
                 continue
             torrents = await _qbit.info_by_tag(_tag(job, kind))
             if not torrents:
-                raise RuntimeError(
-                    f"Torrent de {kind} não encontrado no qBittorrent (foi removido?)")
+                miss = missing[kind]
+                if miss["since"] is None:
+                    miss["since"] = time.monotonic()
+                    _event(job, "qbit",
+                           f"Torrent de {kind} ainda não aparece no qBittorrent "
+                           f"(buscando metadados do magnet)...")
+                elif time.monotonic() - miss["since"] > METADATA_GRACE:
+                    raise RuntimeError(
+                        f"Torrent de {kind} não apareceu no qBittorrent após "
+                        f"{METADATA_GRACE // 60} min (sem seeds para os metadados do "
+                        f"magnet, ou foi removido?)")
+                continue
+            missing[kind]["since"] = None
             t = torrents[0]
             pct = t.get("progress", 0)
             job["progress"][kind] = {

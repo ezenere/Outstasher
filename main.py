@@ -21,6 +21,27 @@ FRONTEND_DIR = Path(__file__).parent / "frontend"
 DIST_DIR = FRONTEND_DIR / "dist"
 
 
+def _disk_for(path: str) -> dict | None:
+    """Uso do disco que contém `path`, na visão DESTA máquina.
+
+    Sobe pelos diretórios até achar um que exista (o destino pode ainda não ter
+    sido criado). Retorna None se nada no caminho existir ou o SO recusar.
+    """
+    p = Path(path)
+    for candidate in (p, *p.parents):
+        if candidate.exists():
+            try:
+                total, used, free = shutil.disk_usage(candidate)
+            except OSError:
+                return None
+            return {"total": total, "used": used, "free": free}
+    return None
+
+
+def _with_disk(dest: dict) -> dict:
+    return {**dest, "disk": _disk_for(dest["path"])}
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     jobs.load()
@@ -79,14 +100,14 @@ class TorrentTargetRequest(BaseModel):
 
 @app.get("/api/destinations")
 async def list_destinations():
-    return store.list_destinations()
+    return [_with_disk(d) for d in store.list_destinations()]
 
 
 @app.post("/api/destinations")
 async def add_destination(req: DestinationRequest):
     if not req.label.strip() or not req.path.strip():
         raise HTTPException(400, "Nome e caminho são obrigatórios")
-    return store.add_destination(req.label.strip(), req.path.strip(), req.is_default)
+    return _with_disk(store.add_destination(req.label.strip(), req.path.strip(), req.is_default))
 
 
 @app.put("/api/destinations/{dest_id}")
@@ -96,7 +117,7 @@ async def update_destination(dest_id: int, req: DestinationRequest):
     dest = store.update_destination(dest_id, req.label.strip(), req.path.strip(), req.is_default)
     if not dest:
         raise HTTPException(404, "Destino não encontrado")
-    return dest
+    return _with_disk(dest)
 
 
 @app.delete("/api/destinations/{dest_id}")
@@ -108,17 +129,22 @@ async def delete_destination(dest_id: int):
 
 # -------------------- destinos dos torrents (qBittorrent) --------------------
 
+def _target_with_disk(t: dict) -> dict:
+    # o disco relevante e o do caminho local (onde os torrents caem NESTA maquina)
+    return {**t, "disk": _disk_for(t["local_path"]) if t.get("local_path") else None}
+
+
 @app.get("/api/torrent-targets")
 async def list_torrent_targets():
-    return store.list_torrent_targets()
+    return [_target_with_disk(t) for t in store.list_torrent_targets()]
 
 
 @app.post("/api/torrent-targets")
 async def add_torrent_target(req: TorrentTargetRequest):
     if not req.label.strip():
         raise HTTPException(400, "Nome é obrigatório")
-    return store.add_torrent_target(
-        req.label.strip(), req.save_path.strip(), req.local_path.strip(), req.is_default)
+    return _target_with_disk(store.add_torrent_target(
+        req.label.strip(), req.save_path.strip(), req.local_path.strip(), req.is_default))
 
 
 @app.put("/api/torrent-targets/{target_id}")
@@ -130,7 +156,7 @@ async def update_torrent_target(target_id: int, req: TorrentTargetRequest):
         req.is_default)
     if not target:
         raise HTTPException(404, "Destino de torrents não encontrado")
-    return target
+    return _target_with_disk(target)
 
 
 @app.delete("/api/torrent-targets/{target_id}")

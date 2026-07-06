@@ -73,10 +73,12 @@ class QbitClient:
             data["savepath"] = save_path
             data["autoTMM"] = "false"
         r = await self._post("/api/v2/torrents/add", data)
-        if r.status_code != 200:
+        # 200 = adicionado; 202 = aceito mas ainda buscando metadados (tipico de
+        # magnet: o qBittorrent responde antes de ter o .torrent completo).
+        if r.status_code not in (200, 202):
             raise QbitError(f"Falha ao adicionar torrent: {r.status_code} {r.text!r}")
-        # qBittorrent 5.x devolve JSON {success_count, failure_count, ...};
-        # versoes antigas devolvem o texto "Ok." ou "Fails."
+        # qBittorrent 5.x devolve JSON {success_count, failure_count, pending_count, ...};
+        # versoes antigas devolvem o texto "Ok." ou "Fails.".
         body = r.text.strip()
         try:
             result = r.json()
@@ -84,7 +86,12 @@ class QbitClient:
             if body.lower() == "fails.":
                 raise QbitError(f"qBittorrent recusou o torrent: {body!r}")
             return
-        if result.get("failure_count", 0) > 0 or result.get("success_count", 1) == 0:
+        # so e falha de verdade se ele contou falhas OU nao aceitou nada
+        # (nem sucesso nem pendente). pending_count>0 significa "aceito, buscando
+        # metadados" — o torrent VAI aparecer, entao nao e erro.
+        failed = result.get("failure_count", 0)
+        accepted = result.get("success_count", 0) + result.get("pending_count", 0)
+        if failed > 0 or accepted == 0:
             raise QbitError(f"qBittorrent não adicionou o torrent: {body!r}")
 
     async def info_by_tag(self, tag: str) -> list[dict]:

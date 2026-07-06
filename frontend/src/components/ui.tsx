@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
-import type { Candidate, Progress } from '../api'
-import { fmtEta, fmtSize, fmtSpeed, STATUS_LABEL } from '../api'
+import type { Candidate, DiskInfo, Progress } from '../api'
+import { fmtDisk, fmtEta, fmtSize, fmtSpeed, STATUS_LABEL } from '../api'
 import { Check } from 'iconoir-react'
 
 const BADGE_STYLES: Record<string, string> = {
@@ -45,6 +45,41 @@ export function ProgressBar({ label, p }: { label: string; p: Progress | null })
 
 export function Empty({ children }: { children: ReactNode }) {
   return <div className="py-3 text-zinc-500">{children}</div>
+}
+
+/** Barra de uso do disco: [======      ] 650 GB / 1 TB · 350 GB livres */
+export function DiskBar({ disk }: { disk?: DiskInfo | null }) {
+  if (!disk || !disk.total) {
+    return <div className="text-xs text-zinc-600">disco indisponível (caminho não existe nesta máquina)</div>
+  }
+  const pct = Math.min(100, Math.round((disk.used / disk.total) * 100))
+  const tight = pct >= 90
+  return (
+    <div>
+      <div className="h-2 overflow-hidden rounded bg-zinc-800">
+        <div
+          className={`h-full transition-all ${tight ? 'bg-red-500' : pct >= 75 ? 'bg-yellow-500' : 'bg-emerald-500'}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <div className="mt-1 text-xs text-zinc-400">
+        {fmtDisk(disk.used)} / {fmtDisk(disk.total)}
+        {' · '}
+        <span className={tight ? 'text-red-400' : 'text-zinc-300'}>{fmtDisk(disk.free)} livres</span>
+      </div>
+    </div>
+  )
+}
+
+/** Espaço livre compacto para exibir ao lado de um seletor. */
+export function DiskFree({ disk }: { disk?: DiskInfo | null }) {
+  if (!disk || !disk.total) return null
+  const tight = disk.free / disk.total < 0.1
+  return (
+    <span className={`text-xs whitespace-nowrap ${tight ? 'text-red-400' : 'text-zinc-500'}`}>
+      ({fmtDisk(disk.free)} livre{tight ? ' ⚠' : ''})
+    </span>
+  )
 }
 
 interface CandidatesTableProps {

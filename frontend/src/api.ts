@@ -15,11 +15,18 @@ export interface Language {
   label: string
 }
 
+export interface DiskInfo {
+  total: number
+  used: number
+  free: number
+}
+
 export interface Destination {
   id: number
   label: string
   path: string
   is_default: boolean
+  disk?: DiskInfo | null
 }
 
 export interface TorrentTarget {
@@ -28,6 +35,7 @@ export interface TorrentTarget {
   save_path: string
   local_path: string
   is_default: boolean
+  disk?: DiskInfo | null
 }
 
 export interface Progress {
@@ -206,6 +214,16 @@ export function fmtSize(bytes: number | null | undefined): string {
   if (!bytes) return '?'
   const gb = bytes / 1024 ** 3
   return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / 1024 ** 2).toFixed(0)} MB`
+}
+
+/** Tamanho de disco: escala até TB, sem casas quando é grande. */
+export function fmtDisk(bytes: number | null | undefined): string {
+  if (bytes == null) return '?'
+  const tb = bytes / 1024 ** 4
+  if (tb >= 1) return `${tb.toFixed(tb >= 10 ? 0 : 1)} TB`
+  const gb = bytes / 1024 ** 3
+  if (gb >= 1) return `${Math.round(gb)} GB`
+  return `${Math.round(bytes / 1024 ** 2)} MB`
 }
 
 export function fmtSpeed(bps: number): string {

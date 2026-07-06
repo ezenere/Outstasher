@@ -8,8 +8,10 @@ Dois modos:
 pick_best devolve tambem o "trace" da decisao: todos os candidatos avaliados,
 com score e motivo de rejeicao, para exibir no frontend.
 """
+import html
 import math
 import re
+import unicodedata
 
 import config
 
@@ -85,19 +87,55 @@ def _seeders_score(seeders: int) -> float:
     return min(10.0, 3 * math.log10(seeders + 1) * 3)
 
 
-def _matches_movie(title_lower: str, movie_title: str, year: str) -> bool:
+def _clean(text: str) -> str:
+    """Entidades HTML decodificadas + minúsculas (Jackett devolve 'T&oacute;quio').
+
+    MANTÉM acentos — eles diferenciam marcador forte ('dual áudio' brasileiro)
+    de fraco ('dual audio' pode ser Hindi+English).
+    """
+    return html.unescape(text).lower()
+
+
+def _fold(text: str) -> str:
+    """_clean + sem acentos, para comparar títulos ('Tóquio' == 'Toquio')."""
+    nfkd = unicodedata.normalize("NFKD", _clean(text))
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+def _matches_movie(title: str, movie_title: str, year: str) -> bool:
     """Confere se o resultado parece ser do filme certo (todas as palavras do titulo)."""
-    words = [w for w in re.split(r"\W+", movie_title.lower()) if len(w) > 1]
-    return not words or all(w in title_lower for w in words)
+    folded = _fold(title)
+    words = [w for w in re.split(r"\W+", _fold(movie_title)) if len(w) > 1]
+    return not words or all(w in folded for w in words)
+
+
+def matches_title(title: str, movie_title: str) -> bool:
+    """True se o nome do torrent contém o título (sem acentos/entidades HTML)."""
+    return _matches_movie(title, movie_title, "")
+
+
+# Bônus (modo audio) para marcador forte: dublagem confirmada no idioma vence
+# "dual"/"multi" genérico mesmo com release de qualidade um pouco menor.
+STRONG_MARKER_BONUS = 25
+
+
+def marker_strength(title: str, language: str) -> int:
+    """2 = marcador forte (dublagem confirmada), 1 = fraco ('dual'...), 0 = nenhum."""
+    t = " " + _clean(title) + " "
+    info = config.LANGUAGES[language]
+    if any(m in t for m in info["markers_strong"]):
+        return 2
+    if any(m in t for m in info["markers_weak"]):
+        return 1
+    return 0
 
 
 def has_language_marker(title: str, language: str) -> bool:
-    t = " " + title.lower() + " "
-    return any(m in t for m in config.LANGUAGES[language]["markers"])
+    return marker_strength(title, language) > 0
 
 
-def score(result: dict, mode: str) -> float:
-    t = " " + result["title"].lower() + " "
+def score(result: dict, mode: str, language: str | None = None) -> float:
+    t = " " + _clean(result["title"]) + " "
     s = _seeders_score(result["seeders"])
     s += _keyword_score(t, SOURCE_SCORES)
     if mode == "video":
@@ -106,6 +144,8 @@ def score(result: dict, mode: str) -> float:
     else:  # audio
         s += _keyword_score(t, AUDIO_SCORES) * 2
         s += _keyword_score(t, RESOLUTION_SCORES) * 0.5
+        if language and marker_strength(result["title"], language) == 2:
+            s += STRONG_MARKER_BONUS
     return s
 
 
@@ -133,10 +173,9 @@ def rank(results: list[dict], mode: str, movie_title: str, year: str,
             "rejected": None,
             "chosen": False,
         }
-        t = r["title"].lower()
         if not (r.get("magnet") or r.get("link")):
             cand["rejected"] = "sem magnet/link"
-        elif not _matches_movie(t, movie_title, year):
+        elif not _matches_movie(r["title"], movie_title, year):
             cand["rejected"] = "título não bate"
         elif require_language and language and not has_language_marker(r["title"], language):
             cand["rejected"] = f"sem marcador de idioma ({config.LANGUAGES[language]['label']})"
@@ -146,7 +185,7 @@ def rank(results: list[dict], mode: str, movie_title: str, year: str,
         elif r["seeders"] <= 0:
             cand["rejected"] = "sem seeders"
         else:
-            s = score(r, mode)
+            s = score(r, mode, language)
             cand["score"] = round(s, 1)
             if s <= -30:
                 cand["rejected"] = "qualidade muito baixa (CAM/TS)"

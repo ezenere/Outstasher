@@ -5,7 +5,7 @@ import {
 import {
   api, del, post, put, type Destination, type TorrentTarget,
 } from '../api'
-import { Empty } from '../components/ui'
+import { DiskBar, Empty } from '../components/ui'
 
 export default function Settings() {
   return (
@@ -141,14 +141,15 @@ function DestinationsSection() {
         {dests === null && <Empty>Carregando...</Empty>}
         {dests?.length === 0 && <Empty>Nenhum destino cadastrado. Crie o primeiro.</Empty>}
         {dests?.map((d) => (
-          <div key={d.id} className="flex items-center gap-3 rounded-xl bg-zinc-900 px-4 py-3">
-            <Folder width={18} height={18} className="shrink-0 text-zinc-500" />
+          <div key={d.id} className="flex items-start gap-3 rounded-xl bg-zinc-900 px-4 py-3">
+            <Folder width={18} height={18} className="mt-0.5 shrink-0 text-zinc-500" />
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <span className="font-semibold">{d.label}</span>
                 {d.is_default && <DefaultBadge />}
               </div>
               <div className="truncate font-mono text-xs text-zinc-400">{d.path}</div>
+              <div className="mt-2 max-w-md"><DiskBar disk={d.disk} /></div>
             </div>
             {!d.is_default && (
               <IconBtn title="Tornar padrão" onClick={() => makeDefault(d)}><Star width={15} height={15} /></IconBtn>
@@ -267,8 +268,8 @@ function TorrentTargetsSection() {
           <Empty>Nenhum destino de torrents. Sem isso, usa a pasta padrão do qBittorrent.</Empty>
         )}
         {targets?.map((t) => (
-          <div key={t.id} className="flex items-center gap-3 rounded-xl bg-zinc-900 px-4 py-3">
-            <HardDrive width={18} height={18} className="shrink-0 text-zinc-500" />
+          <div key={t.id} className="flex items-start gap-3 rounded-xl bg-zinc-900 px-4 py-3">
+            <HardDrive width={18} height={18} className="mt-0.5 shrink-0 text-zinc-500" />
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <span className="font-semibold">{t.label}</span>
@@ -278,6 +279,11 @@ function TorrentTargetsSection() {
                 {t.save_path || '(pasta padrão do qBittorrent)'}
                 {t.local_path && <span className="text-zinc-500"> → {t.local_path}</span>}
               </div>
+              {t.local_path ? (
+                <div className="mt-2 max-w-md"><DiskBar disk={t.disk} /></div>
+              ) : (
+                <div className="mt-1 text-xs text-zinc-600">defina um caminho local para ver o uso do disco</div>
+              )}
             </div>
             {!t.is_default && (
               <IconBtn title="Tornar padrão" onClick={() => makeDefault(t)}><Star width={15} height={15} /></IconBtn>
