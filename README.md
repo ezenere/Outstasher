@@ -11,7 +11,7 @@ torrent para cada uma, e junta tudo em um único arquivo: **melhor imagem + todo
    - o título traduzido / com marcadores de idioma (dublado, dual, castellano...) →
      melhor **qualidade de áudio** (TrueHD, DTS, EAC3...). Releases com o
      **título no idioma dublado** têm preferência absoluta; título original +
-     marcador é só fallback — e marcadores fortes ("Dublado", "BLUDV",
+     marcador é só fallback — e marcadores fortes ("Dublado",
      "Dual Áudio" com acento) ganham bônus sobre o "dual" genérico, que pode
      ser qualquer par de idiomas. Acentos e entidades HTML são normalizados
      ("Tóquio" = "Toquio" = "T&amp;oacute;quio");
