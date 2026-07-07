@@ -1,6 +1,6 @@
-<p align="center">
+<div align="center">
   <img src="frontend/src/assets/logo.png" alt="Outstasher" width="128" height="128">
-</p>
+</div>
 
 <h1 align="center">Outstasher</h1>
 
