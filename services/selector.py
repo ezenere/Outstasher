@@ -138,6 +138,23 @@ def has_language_marker(title: str, language: str) -> bool:
     return marker_strength(title, language) > 0
 
 
+# marcadores de legenda como PALAVRA inteira (\b) — "leg"/"ost" nao podem casar
+# dentro de "legiao"/"lost". Sem acento porque comparamos contra _fold().
+_SUBS_RE = re.compile(
+    r"\b(" + "|".join(re.escape(m) for m in config.SUBTITLE_MARKERS) + r")\b", re.I)
+
+
+def is_subs_only(title: str, language: str) -> bool:
+    """True se o título indica LEGENDA sem nenhuma indicação de dublagem/dual.
+
+    Nesse caso o vídeo tem áudio ORIGINAL (só legendado) e não serve como faixa
+    dublada — mesmo que o título esteja no idioma alvo.
+    """
+    if has_language_marker(title, language):
+        return False  # tem dublado/dual: legenda junto não desqualifica
+    return bool(_SUBS_RE.search(_fold(title)))
+
+
 def score(result: dict, mode: str, language: str | None = None) -> float:
     t = " " + _clean(result["title"]) + " "
     s = _seeders_score(result["seeders"])
@@ -183,6 +200,8 @@ def rank(results: list[dict], mode: str, movie_title: str, year: str,
             cand["rejected"] = "título não bate"
         elif require_language and language and not has_language_marker(r["title"], language):
             cand["rejected"] = f"sem marcador de idioma ({config.LANGUAGES[language]['label']})"
+        elif mode == "audio" and language and is_subs_only(r["title"], language):
+            cand["rejected"] = "só legendado (áudio original, sem dublagem)"
         elif required_edition != ANY_EDITION and edition != required_edition:
             cand["rejected"] = (f"corte diferente da outra versão "
                                 f"({edition or 'normal'} ≠ {required_edition or 'normal'})")

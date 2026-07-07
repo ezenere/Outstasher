@@ -86,6 +86,7 @@ export interface Job {
   tmdb_id: number
   language: string
   mode: string
+  kind?: string // both | original | dubbed
   status: string
   detail: string
   movie: MovieRef | null

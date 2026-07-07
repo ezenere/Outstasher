@@ -85,9 +85,29 @@ def _fail(job: dict, message: str):
     _set(job, "error", message)
 
 
+# Tipos de job: o que baixar/entregar.
+#   both     -> baixa vídeo original + áudio dublado e faz o merge (padrão)
+#   original -> baixa só o vídeo original e entrega direto (sem merge)
+#   dubbed   -> baixa só a versão dublada e entrega direto (sem merge)
+KINDS = ("both", "original", "dubbed")
+
+
+def _needed_torrents(job: dict) -> tuple[str, ...]:
+    """Quais torrents este job baixa: ('video',), ('audio',) ou os dois."""
+    kind = job.get("kind", "both")
+    if kind == "original":
+        return ("video",)
+    if kind == "dubbed":
+        return ("audio",)
+    return ("video", "audio")
+
+
 async def create(tmdb_id: int, language: str, mode: str = "auto",
                  destination_id: int | None = None,
-                 torrent_target_id: int | None = None) -> dict:
+                 torrent_target_id: int | None = None,
+                 kind: str = "both") -> dict:
+    if kind not in KINDS:
+        raise ValueError(f"kind inválido: {kind!r}")
     dest = store.get_destination(destination_id) if destination_id else None
     if dest is None:
         dest = store.default_destination()
@@ -105,6 +125,7 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
         "tmdb_id": tmdb_id,
         "language": language,
         "mode": mode,
+        "kind": kind,
         "status": "searching",
         "detail": "Buscando informações do filme...",
         "movie": None,
@@ -125,24 +146,32 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
     }
     _jobs[job["id"]] = job
     tinfo = f" — torrents: {target['label']}" if target else ""
+    kind_label = {"both": "original + dublado (merge)",
+                  "original": "só original", "dubbed": "só dublado"}[kind]
     _event(job, "status",
-           f"Job criado (modo {mode}) — destino: {dest['label']} ({dest['path']}){tinfo}")
+           f"Job criado ({kind_label}, modo {mode}) — destino: {dest['label']} ({dest['path']}){tinfo}")
     _tasks[job["id"]] = asyncio.create_task(_run(job))
     return _public(job)
 
 
 # -------------------- acoes da UI --------------------
 
-async def select(job_id: str, audio_id: str, video_id: str) -> dict | None:
-    """Continuacao do modo manual: usuario escolheu os torrents."""
+async def select(job_id: str, audio_id: str | None, video_id: str | None) -> dict | None:
+    """Continuacao do modo manual: usuario escolheu o(s) torrent(s)."""
     job = _jobs.get(job_id)
     if not job or job["status"] != "awaiting":
         return None
     search = job.get("search") or {}
-    a = next((c for c in search.get("audio", []) if c["id"] == audio_id), None)
-    v = next((c for c in search.get("video", []) if c["id"] == video_id), None)
-    if not a or not v:
-        raise ValueError("Candidato não encontrado (a busca pode ter sido refeita)")
+    needed = _needed_torrents(job)
+    a = v = None
+    if "audio" in needed:
+        a = next((c for c in search.get("audio", []) if c["id"] == audio_id), None)
+        if not a:
+            raise ValueError("Candidato de áudio não encontrado (a busca pode ter sido refeita)")
+    if "video" in needed:
+        v = next((c for c in search.get("video", []) if c["id"] == video_id), None)
+        if not v:
+            raise ValueError("Candidato de vídeo não encontrado (a busca pode ter sido refeita)")
     _event(job, "chosen", "Seleção manual do usuário")
     _tasks[job["id"]] = asyncio.create_task(_download_and_merge(job, a, v))
     return _public(job)
@@ -185,7 +214,8 @@ async def retry(job_id: str) -> dict | None:
     if not old or old["status"] not in ("error", "cancelled"):
         return None
     return await create(old["tmdb_id"], old["language"], old.get("mode", "auto"),
-                        old.get("destination_id"), old.get("torrent_target_id"))
+                        old.get("destination_id"), old.get("torrent_target_id"),
+                        old.get("kind", "both"))
 
 
 # -------------------- pipeline --------------------
@@ -207,7 +237,7 @@ async def _run(job: dict):
     await _run_from_download(job)
 
 
-async def _download_and_merge(job: dict, a: dict, v: dict):
+async def _download_and_merge(job: dict, a: dict | None, v: dict | None):
     try:
         await _start_download(job, a, v)
     except asyncio.CancelledError:
@@ -234,6 +264,10 @@ async def _search(job: dict):
     original, localized, year = movie["original_title"], movie["localized_title"], movie["year"]
     _event(job, "info", f"Filme: {original} ({year}) — título em {label}: {localized}")
 
+    needed = _needed_torrents(job)
+    want_video = "video" in needed
+    want_audio = "audio" in needed
+
     query_original = f"{original} {year}".strip()
     _set(job, "searching",
          f"Procurando '{query_original}' no Jackett (pode levar vários minutos)...")
@@ -241,56 +275,60 @@ async def _search(job: dict):
     _event(job, "search", f"Jackett devolveu {len(results_original)} resultados para '{query_original}'")
 
     # ---- audio dublado: titulo traduzido + titulo original com marcador ----
-    _set(job, "searching", f"Procurando versão em {label} no Jackett...")
-    audio_ranked = []
-    if localized and localized.lower() != (original or "").lower():
-        query_localized = f"{localized} {year}".strip()
-        results_localized = await jackett.search(query_localized)
-        _event(job, "search",
-               f"Jackett devolveu {len(results_localized)} resultados para '{query_localized}'")
-        ranked, trace = selector.rank(results_localized, "audio", localized, year,
-                                      language=lang)
-        _event(job, "candidates", f"Avaliação para ÁUDIO — busca '{query_localized}'",
-               {"role": "audio", "query": query_localized, "candidates": trace})
+    audio_viable = []
+    if want_audio:
+        _set(job, "searching", f"Procurando versão em {label} no Jackett...")
+        audio_ranked = []
+        if localized and localized.lower() != (original or "").lower():
+            query_localized = f"{localized} {year}".strip()
+            results_localized = await jackett.search(query_localized)
+            _event(job, "search",
+                   f"Jackett devolveu {len(results_localized)} resultados para '{query_localized}'")
+            ranked, trace = selector.rank(results_localized, "audio", localized, year,
+                                          language=lang)
+            _event(job, "candidates", f"Avaliação para ÁUDIO — busca '{query_localized}'",
+                   {"role": "audio", "query": query_localized, "candidates": trace})
+            for c in ranked:
+                c["tier"] = 0  # titulo no idioma dublado: preferencia maxima
+            audio_ranked.extend(ranked)
+
+        ranked, trace = selector.rank(results_original, "audio", original, year,
+                                      language=lang, require_language=True)
+        _event(job, "candidates",
+               f"Avaliação para ÁUDIO — busca '{query_original}' exigindo marcador de {label}",
+               {"role": "audio", "query": query_original, "candidates": trace})
         for c in ranked:
-            c["tier"] = 0  # titulo no idioma dublado: preferencia maxima
+            # titulo original MAS com o titulo traduzido junto (release "Título / Title")
+            # ainda conta como dublado confirmado; senao e so fallback
+            c["tier"] = 0 if localized and selector.matches_title(c["title"], localized) else 1
         audio_ranked.extend(ranked)
 
-    ranked, trace = selector.rank(results_original, "audio", original, year,
-                                  language=lang, require_language=True)
-    _event(job, "candidates",
-           f"Avaliação para ÁUDIO — busca '{query_original}' exigindo marcador de {label}",
-           {"role": "audio", "query": query_original, "candidates": trace})
-    for c in ranked:
-        # titulo original MAS com o titulo traduzido junto (release "Título / Title")
-        # ainda conta como dublado confirmado; senao e so fallback
-        c["tier"] = 0 if localized and selector.matches_title(c["title"], localized) else 1
-    audio_ranked.extend(ranked)
-
-    # dedupe (o mesmo torrent pode aparecer nas duas buscas) e ordena:
-    # titulo dublado (tier 0) SEMPRE antes de ingles+marcador (tier 1);
-    # score decide dentro de cada tier
-    seen, audio_viable = set(), []
-    for c in sorted(audio_ranked, key=lambda r: (r.get("tier", 1), -r["score"])):
-        key = c.get("magnet") or c.get("link")
-        if key in seen:
-            continue
-        seen.add(key)
-        audio_viable.append(c)
-    n_localized = sum(1 for c in audio_viable if c.get("tier") == 0)
-    if n_localized and n_localized < len(audio_viable):
-        _event(job, "info",
-               f"Preferência de áudio: {n_localized} candidato(s) com título em {label} "
-               f"na frente de {len(audio_viable) - n_localized} em inglês com marcador")
+        # dedupe (o mesmo torrent pode aparecer nas duas buscas) e ordena:
+        # titulo dublado (tier 0) SEMPRE antes de ingles+marcador (tier 1);
+        # score decide dentro de cada tier
+        seen = set()
+        for c in sorted(audio_ranked, key=lambda r: (r.get("tier", 1), -r["score"])):
+            key = c.get("magnet") or c.get("link")
+            if key in seen:
+                continue
+            seen.add(key)
+            audio_viable.append(c)
+        n_localized = sum(1 for c in audio_viable if c.get("tier") == 0)
+        if n_localized and n_localized < len(audio_viable):
+            _event(job, "info",
+                   f"Preferência de áudio: {n_localized} candidato(s) com título em {label} "
+                   f"na frente de {len(audio_viable) - n_localized} em inglês com marcador")
 
     # ---- video: titulo original, qualquer corte (o filtro vem depois) ----
-    video_viable, trace = selector.rank(results_original, "video", original, year)
-    _event(job, "candidates", f"Avaliação para VÍDEO — busca '{query_original}'",
-           {"role": "video", "query": query_original, "candidates": trace})
+    video_viable = []
+    if want_video:
+        video_viable, trace = selector.rank(results_original, "video", original, year)
+        _event(job, "candidates", f"Avaliação para VÍDEO — busca '{query_original}'",
+               {"role": "video", "query": query_original, "candidates": trace})
 
-    if not audio_viable:
+    if want_audio and not audio_viable:
         raise RuntimeError(f"Nenhum torrent encontrado com áudio em {label}")
-    if not video_viable:
+    if want_video and not video_viable:
         raise RuntimeError(f"Nenhum torrent de vídeo viável para '{original}'")
 
     job["search"] = {
@@ -300,9 +338,20 @@ async def _search(job: dict):
     store.upsert_job(job)
 
 
-def _auto_pick(job: dict) -> tuple[dict, dict]:
-    """Melhor áudio define o corte; melhor vídeo do MESMO corte."""
+def _auto_pick(job: dict) -> tuple[dict | None, dict | None]:
+    """Escolhe o(s) torrent(s) automaticamente conforme o tipo do job.
+
+    - dubbed:   melhor áudio (sem vídeo).
+    - original: melhor vídeo (sem áudio).
+    - both:     melhor áudio define o corte; melhor vídeo do MESMO corte.
+    """
     search = job["search"]
+    needed = _needed_torrents(job)
+    if needed == ("audio",):
+        return search["audio"][0], None
+    if needed == ("video",):
+        return None, search["video"][0]
+
     for a in search["audio"]:
         ed_label = a["edition"] or "normal"
         vids = [v for v in search["video"] if v["edition"] == a["edition"]]
@@ -318,39 +367,47 @@ def _auto_pick(job: dict) -> tuple[dict, dict]:
         "(as duas versões precisam ser do mesmo corte para os áudios alinharem)")
 
 
-async def _start_download(job: dict, a: dict, v: dict):
-    _event(job, "chosen", f"🔊 Áudio: {a['title']} (score {a['score']}, "
-                          f"{a['seeders']} seeds, corte {a['edition'] or 'normal'})")
-    _event(job, "chosen", f"🎥 Vídeo: {v['title']} (score {v['score']}, "
-                          f"{v['seeders']} seeds, corte {v['edition'] or 'normal'})")
+async def _start_download(job: dict, a: dict | None, v: dict | None):
+    if a:
+        _event(job, "chosen", f"🔊 Áudio: {a['title']} (score {a['score']}, "
+                              f"{a['seeders']} seeds, corte {a['edition'] or 'normal'})")
+        job["audio_torrent"] = {"title": a["title"], "seeders": a["seeders"],
+                                "size": a["size"], "score": a["score"], "edition": a["edition"]}
+    if v:
+        _event(job, "chosen", f"🎥 Vídeo: {v['title']} (score {v['score']}, "
+                              f"{v['seeders']} seeds, corte {v['edition'] or 'normal'})")
+        job["video_torrent"] = {"title": v["title"], "seeders": v["seeders"],
+                                "size": v["size"], "score": v["score"], "edition": v["edition"]}
 
-    job["audio_torrent"] = {"title": a["title"], "seeders": a["seeders"],
-                            "size": a["size"], "score": a["score"], "edition": a["edition"]}
-    job["video_torrent"] = {"title": v["title"], "seeders": v["seeders"],
-                            "size": v["size"], "score": v["score"], "edition": v["edition"]}
     # reservas do mesmo corte, para o watchdog trocar se o download travar
     search = job.get("search") or {"audio": [], "video": []}
     job["fallbacks"] = {
-        "audio": [x for x in search["audio"] if x["edition"] == a["edition"] and x["id"] != a["id"]],
-        "video": [x for x in search["video"] if x["edition"] == v["edition"] and x["id"] != v["id"]],
+        "audio": [x for x in search["audio"]
+                  if a and x["edition"] == a["edition"] and x["id"] != a["id"]],
+        "video": [x for x in search["video"]
+                  if v and x["edition"] == v["edition"] and x["id"] != v["id"]],
     }
 
     _set(job, "searching", "Enviando torrents para o qBittorrent...")
     save_path = job.get("torrent_save_path") or config.QBIT_SAVE_PATH or None
-    url_video = v.get("magnet") or v["link"]
-    url_audio = a.get("magnet") or a["link"]
-    if url_video == url_audio:
+    url_video = (v.get("magnet") or v["link"]) if v else None
+    url_audio = (a.get("magnet") or a["link"]) if a else None
+
+    if v and a and url_video == url_audio:
         # mesmo torrent serve para os dois (ex.: release dual audio)
         await _qbit.add(url_video, f"{_tag(job, 'video')},{_tag(job, 'audio')}", save_path)
         _event(job, "qbit", "Mesmo torrent serve para vídeo e áudio — adicionado uma única vez")
     else:
-        await _qbit.add(url_video, _tag(job, "video"), save_path)
-        _event(job, "qbit", f"Torrent de vídeo adicionado ao qBittorrent (tag {_tag(job, 'video')})")
-        await _qbit.add(url_audio, _tag(job, "audio"), save_path)
-        _event(job, "qbit", f"Torrent de áudio adicionado ao qBittorrent (tag {_tag(job, 'audio')})")
+        if v:
+            await _qbit.add(url_video, _tag(job, "video"), save_path)
+            _event(job, "qbit", f"Torrent de vídeo adicionado ao qBittorrent (tag {_tag(job, 'video')})")
+        if a:
+            await _qbit.add(url_audio, _tag(job, "audio"), save_path)
+            _event(job, "qbit", f"Torrent de áudio adicionado ao qBittorrent (tag {_tag(job, 'audio')})")
     if save_path:
         _event(job, "qbit", f"Salvando em: {save_path}")
-    _set(job, "downloading", "Baixando torrents...")
+    _set(job, "downloading", "Baixando torrent..." if len(_needed_torrents(job)) == 1
+         else "Baixando torrents...")
 
 
 def _tag(job: dict, kind: str) -> str:
@@ -360,7 +417,10 @@ def _tag(job: dict, kind: str) -> str:
 async def _run_from_download(job: dict):
     try:
         paths = await _wait_downloads(job)
-        await _merge(job, paths["video"], paths["audio"])
+        if len(_needed_torrents(job)) == 1:
+            await _deliver_single(job, paths)
+        else:
+            await _merge(job, paths["video"], paths["audio"])
     except asyncio.CancelledError:
         raise
     except Exception as e:  # noqa: BLE001
@@ -368,17 +428,18 @@ async def _run_from_download(job: dict):
 
 
 async def _wait_downloads(job: dict) -> dict:
-    """Espera os dois torrents terminarem; watchdog troca torrent travado."""
+    """Espera os torrents necessários terminarem; watchdog troca torrent travado."""
+    needed = _needed_torrents(job)
     paths = {}
     stall = {k: {"pct": -1.0, "since": time.monotonic(), "warned": False}
-             for k in ("video", "audio")}
+             for k in needed}
     # magnet adicionado pode levar alguns segundos ate aparecer em /info
     # (qBittorrent ainda buscando metadados). so tratamos como "removido" se
     # sumir por um bom tempo, nao na primeira consulta.
-    missing = {k: {"since": None, "warned": False} for k in ("video", "audio")}
+    missing = {k: {"since": None, "warned": False} for k in needed}
     METADATA_GRACE = max(config.STALL_TIMEOUT_MINUTES, 5) * 60
-    while len(paths) < 2:
-        for kind in ("video", "audio"):
+    while len(paths) < len(needed):
+        for kind in needed:
             if kind in paths:
                 continue
             torrents = await _qbit.info_by_tag(_tag(job, kind))
@@ -425,7 +486,7 @@ async def _wait_downloads(job: dict) -> dict:
                            f"continuando a esperar (cancele o job se quiser desistir)")
                     st["warned"] = True
         store.upsert_job(job)
-        if len(paths) < 2:
+        if len(paths) < len(needed):
             await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
     return paths
 
@@ -487,6 +548,32 @@ def _find_video_file(job: dict, content_path: str) -> Path:
     if not files:
         raise RuntimeError(f"Nenhum arquivo de vídeo encontrado em {p}")
     return max(files, key=lambda f: f.stat().st_size)
+
+
+async def _deliver_single(job: dict, paths: dict):
+    """Job de um torrent só: entrega o arquivo direto no destino, sem merge."""
+    kind = "video" if "video" in paths else "audio"
+    src_file = _find_video_file(job, paths[kind])
+    _event(job, "info", f"Arquivo baixado: {src_file}")
+
+    movie = job["movie"]
+    safe_title = re.sub(r'[<>:"/\\|?*]', "", f"{movie['original_title']} ({movie['year']})")
+    tag = "orig" if job["kind"] == "original" else job["language"]
+    dest_dir = Path(job.get("destination_path") or config.OUTPUT_DIR)
+    output = dest_dir / safe_title / f"{safe_title} [{tag}]{src_file.suffix}"
+
+    label = "original" if job["kind"] == "original" else f"dublado ({job['language']})"
+    _set(job, "merging", f"Entregando arquivo {label} no destino...")
+
+    notes: list[str] = []
+    # hardlink (fallback cópia) roda em thread para não travar a API em cópias grandes
+    await asyncio.to_thread(merger._link_or_copy, src_file, output, notes)
+    for n in notes:
+        _event(job, "info", n)
+
+    job["output"] = str(output)
+    _set(job, "done", f"Concluído — {label} entregue em: {output}")
+    await _cleanup_torrents(job)
 
 
 async def _merge(job: dict, video_content: str, audio_content: str):

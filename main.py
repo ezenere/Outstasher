@@ -49,7 +49,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Movie Downloader & Merger", lifespan=lifespan)
+app = FastAPI(title="Outstasher", lifespan=lifespan)
 
 
 # -------------------- autenticacao --------------------
@@ -149,13 +149,14 @@ class JobRequest(BaseModel):
     tmdb_id: int
     language: str
     mode: str = "auto"  # auto | manual
+    kind: str = "both"  # both (merge) | original | dubbed
     destination_id: int | None = None
     torrent_target_id: int | None = None
 
 
 class SelectRequest(BaseModel):
-    audio_id: str
-    video_id: str
+    audio_id: str | None = None
+    video_id: str | None = None
 
 
 class CancelRequest(BaseModel):
@@ -295,9 +296,11 @@ async def create_job(req: JobRequest):
         raise HTTPException(400, f"Idioma inválido: {req.language}")
     if req.mode not in ("auto", "manual"):
         raise HTTPException(400, f"Modo inválido: {req.mode}")
+    if req.kind not in jobs.KINDS:
+        raise HTTPException(400, f"Tipo inválido: {req.kind}")
     try:
         return await jobs.create(req.tmdb_id, req.language, req.mode,
-                                 req.destination_id, req.torrent_target_id)
+                                 req.destination_id, req.torrent_target_id, req.kind)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

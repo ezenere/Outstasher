@@ -8,6 +8,13 @@ export function jobTitle(j: Job): string {
   return j.movie ? `${j.movie.original_title} (${j.movie.year})` : `TMDB #${j.tmdb_id}`
 }
 
+// rótulo curto do tipo do job para exibir junto do idioma
+export function kindLabel(j: Job): string {
+  if (j.kind === 'original') return 'só original'
+  if (j.kind === 'dubbed') return `só dublado (${j.language})`
+  return `${j.language} + orig`
+}
+
 // agrupa os status internos nas categorias que o filtro oferece
 type Filter = 'all' | 'active' | 'error' | 'done'
 
@@ -152,7 +159,7 @@ export default function Jobs() {
               <span className="flex-1 font-semibold">
                 {jobTitle(j)}{' '}
                 <small className="font-normal text-zinc-400">
-                  [áudio: {j.language}{j.mode === 'manual' ? ' · manual' : ''}
+                  [{kindLabel(j)}{j.mode === 'manual' ? ' · manual' : ''}
                   {j.destination_label ? ` · ${j.destination_label}` : ''}]
                 </small>
               </span>

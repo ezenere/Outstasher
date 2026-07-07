@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { Lock } from 'iconoir-react'
 import { login, setupPassword } from '../api'
+import logo from '../assets/logo.png'
 
 /** Tela de senha: modo "setup" cria a primeira senha, "login" autentica. */
 export default function Login({ needsSetup, onDone }: {
@@ -38,10 +38,8 @@ export default function Login({ needsSetup, onDone }: {
         className="w-full max-w-sm rounded-2xl border border-zinc-800 bg-zinc-900 p-6 shadow-xl"
       >
         <div className="mb-5 flex flex-col items-center gap-2 text-center">
-          <div className="rounded-full bg-blue-600/20 p-3 text-blue-400">
-            <Lock width={22} height={22} />
-          </div>
-          <h1 className="text-lg font-semibold">🎬 Downloader &amp; Merger</h1>
+          <img src={logo} alt="Outstasher" className="h-48 w-48 rounded-xl" />
+          <h1 className="text-lg font-semibold">Outstasher</h1>
           <p className="text-sm text-zinc-400">
             {needsSetup
               ? 'Primeira vez aqui — crie uma senha para proteger o acesso.'

@@ -14,7 +14,9 @@ torrent para cada uma, e junta tudo em um único arquivo: **melhor imagem + todo
      marcador é só fallback — e marcadores fortes ("Dublado",
      "Dual Áudio" com acento) ganham bônus sobre o "dual" genérico, que pode
      ser qualquer par de idiomas. Acentos e entidades HTML são normalizados
-     ("Tóquio" = "Toquio" = "T&amp;oacute;quio");
+     ("Tóquio" = "Toquio" = "T&amp;oacute;quio"). Um título só **legendado**
+     ("legendado", "leg", "subbed", "VOSE"...) sem nenhuma marca de dublagem é
+     descartado — tem áudio original, não serve como faixa dublada;
    - o título original → melhor **qualidade de vídeo** (resolução, remux/bluray, seeds),
      **restrito ao mesmo corte** da versão dublada: se o dublado é o corte normal, um
      "extended/director's cut" original é rejeitado (e vice-versa) — cortes diferentes
@@ -105,9 +107,21 @@ Pontos de atenção do `.env`/`docker-compose.yml`:
 
 Parar: `docker compose down` (mantém o volume). Ver logs: `docker compose logs -f`.
 
-Busque um filme, clique nele, escolha o idioma e o **destino**, e clique em
-**Baixar e fazer merge**. O andamento aparece na aba *Downloads*. O arquivo final
-vai para a pasta de destino escolhida (veja *Destinos* abaixo).
+Busque um filme, clique nele, escolha o idioma e o **destino**, e escolha o que
+baixar:
+
+- **Baixar e fazer merge** — baixa a versão original + a dublada e junta tudo
+  num MKV (o fluxo completo descrito acima).
+- **🎥 Só original** — baixa apenas o melhor vídeo no idioma original e entrega
+  o arquivo direto no destino, sem merge.
+- **🔊 Só dublado** — baixa apenas a melhor versão dublada e entrega direto, sem
+  merge.
+
+Nos dois modos "só um", o arquivo baixado é **hardlinkado** (fallback cópia) para
+o destino, numa subpasta própria — sem re-encodar nada. O modo manual (escolher
+torrents) e o destino dos torrents funcionam igual nos três. O andamento aparece
+na aba *Downloads*. O arquivo final vai para a pasta de destino escolhida (veja
+*Destinos* abaixo).
 
 O frontend é React + TypeScript + Tailwind + Iconoir + React Router (`frontend/`),
 com rotas `/` (filmes), `/jobs` (downloads), `/jobs/:id` (detalhe/lupa — é também

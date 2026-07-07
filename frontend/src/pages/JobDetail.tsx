@@ -4,7 +4,7 @@ import { NavArrowLeft, Refresh, Trash } from 'iconoir-react'
 import { post, prog, type Job } from '../api'
 import { api } from '../api'
 import { Badge, CandidatesTable, Empty, ProgressBar } from '../components/ui'
-import { jobTitle, removeJob } from './Jobs'
+import { jobTitle, kindLabel, removeJob } from './Jobs'
 
 export default function JobDetail() {
   const { id } = useParams<{ id: string }>()
@@ -47,18 +47,29 @@ export default function JobDetail() {
   const candEvents = (job.events ?? []).filter((e) => e.kind === 'candidates' && e.data?.candidates)
   const timeline = (job.events ?? []).filter((e) => e.kind !== 'candidates')
 
+  // que torrents este job baixa (kind = both | original | dubbed)
+  const needAudio = job.kind !== 'original'
+  const needVideo = job.kind !== 'dubbed'
+  const selectionReady = (!needAudio || !!selAudio) && (!needVideo || !!selVideo)
+
   async function submitSelection() {
-    if (!job || !selAudio || !selVideo) return
-    const a = job.search?.audio.find((c) => c.id === selAudio)
-    const v = job.search?.video.find((c) => c.id === selVideo)
-    const ea = a?.edition ?? null
-    const ev = v?.edition ?? null
-    if (ea !== ev && !confirm(
-      `Cortes diferentes (${ea ?? 'normal'} ≠ ${ev ?? 'normal'}) — os áudios provavelmente NÃO vão alinhar.\nContinuar mesmo assim?`,
-    )) return
+    if (!job || !selectionReady) return
+    const a = needAudio ? job.search?.audio.find((c) => c.id === selAudio) : null
+    const v = needVideo ? job.search?.video.find((c) => c.id === selVideo) : null
+    // aviso de corte só quando os dois são baixados (merge)
+    if (a && v) {
+      const ea = a.edition ?? null
+      const ev = v.edition ?? null
+      if (ea !== ev && !confirm(
+        `Cortes diferentes (${ea ?? 'normal'} ≠ ${ev ?? 'normal'}) — os áudios provavelmente NÃO vão alinhar.\nContinuar mesmo assim?`,
+      )) return
+    }
     setSubmitting(true)
     try {
-      await post(`/api/jobs/${job.id}/select`, { audio_id: selAudio, video_id: selVideo })
+      await post(`/api/jobs/${job.id}/select`, {
+        audio_id: needAudio ? selAudio : null,
+        video_id: needVideo ? selVideo : null,
+      })
       void reload()
     } catch (e) {
       alert(`Erro: ${(e as Error).message}`)
@@ -74,7 +85,7 @@ export default function JobDetail() {
           <NavArrowLeft width={16} height={16} />
         </Link>
         <h1 className="flex-1 text-lg font-semibold">
-          {jobTitle(job)} <small className="font-normal text-zinc-400">— áudio {job.language}</small>
+          {jobTitle(job)} <small className="font-normal text-zinc-400">— {kindLabel(job)}</small>
         </h1>
         <Badge status={job.status} />
         {(job.status === 'error' || job.status === 'cancelled') && (
@@ -99,14 +110,24 @@ export default function JobDetail() {
 
       {job.status === 'awaiting' && job.search && (
         <section className="mt-6 rounded-xl border border-purple-900/60 bg-purple-950/20 p-4">
-          <h2 className="mb-3 font-semibold text-purple-300">Escolha os torrents</h2>
-          <h3 className="mb-2 text-sm text-zinc-400">🔊 Áudio ({job.language})</h3>
-          <CandidatesTable candidates={job.search.audio} selectable selectedId={selAudio} onSelect={setSelAudio} />
-          <h3 className="mt-4 mb-2 text-sm text-zinc-400">🎥 Vídeo (original)</h3>
-          <CandidatesTable candidates={job.search.video} selectable selectedId={selVideo} onSelect={setSelVideo} />
+          <h2 className="mb-3 font-semibold text-purple-300">
+            {needAudio && needVideo ? 'Escolha os torrents' : 'Escolha o torrent'}
+          </h2>
+          {needAudio && (
+            <>
+              <h3 className="mb-2 text-sm text-zinc-400">🔊 Áudio ({job.language})</h3>
+              <CandidatesTable candidates={job.search.audio} selectable selectedId={selAudio} onSelect={setSelAudio} />
+            </>
+          )}
+          {needVideo && (
+            <>
+              <h3 className="mt-4 mb-2 text-sm text-zinc-400">🎥 Vídeo (original)</h3>
+              <CandidatesTable candidates={job.search.video} selectable selectedId={selVideo} onSelect={setSelVideo} />
+            </>
+          )}
           <button
             onClick={submitSelection}
-            disabled={submitting || !selAudio || !selVideo}
+            disabled={submitting || !selectionReady}
             className="mt-3 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
           >
             ⬇ Confirmar e baixar

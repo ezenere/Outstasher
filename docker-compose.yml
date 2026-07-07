@@ -1,8 +1,8 @@
 services:
-  downloader:
+  outstasher:
     build: .
-    image: movie-downloader:latest
-    container_name: movie-downloader
+    image: outstasher:latest
+    container_name: outstasher
     restart: unless-stopped
     ports:
       - "8008:8008"

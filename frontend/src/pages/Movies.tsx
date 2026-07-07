@@ -48,7 +48,7 @@ export default function Movies() {
     }
   }
 
-  async function start() {
+  async function start(kind: 'both' | 'original' | 'dubbed') {
     if (!selected) return
     setStarting(true)
     try {
@@ -56,6 +56,7 @@ export default function Movies() {
         tmdb_id: selected.id,
         language,
         mode: manual ? 'manual' : 'auto',
+        kind,
         destination_id: destId,
         torrent_target_id: targetId,
       })
@@ -196,9 +197,25 @@ export default function Movies() {
                 <input type="checkbox" checked={manual} onChange={(e) => setManual(e.target.checked)} />
                 Escolher torrents manualmente
               </label>
-              <div className="ml-auto flex items-center gap-2">
+              <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
                 <button
-                  onClick={start}
+                  onClick={() => start('original')}
+                  disabled={starting || !destinations.length}
+                  title="Baixa só o vídeo no idioma original, sem merge"
+                  className="rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  🎥 Só original
+                </button>
+                <button
+                  onClick={() => start('dubbed')}
+                  disabled={starting || !destinations.length}
+                  title="Baixa só a versão dublada, sem merge"
+                  className="rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  🔊 Só dublado
+                </button>
+                <button
+                  onClick={() => start('both')}
                   disabled={starting || !destinations.length}
                   className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
                 >

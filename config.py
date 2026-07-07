@@ -105,3 +105,13 @@ LANGUAGES = {
         "markers_weak": ["dual", "multi"],
     },
 }
+
+# Marcadores de LEGENDA (universais). Se o titulo tem algum destes e NENHUM
+# marcador de dublagem/dual do idioma alvo, o video tem audio ORIGINAL (so
+# legendado) — nao serve como faixa dublada. Comparados sem acento (_fold).
+SUBTITLE_MARKERS = [
+    "legendado", "legenda", "legendas", "leg",
+    "subbed", "subtitled", "subtitle", "subtitles", "subs",
+    "subtitulado", "subtitulada", "sottotitolato", "untertitel",
+    "vose", "vostfr", "ost",  # versao original + legenda (es/fr)
+]

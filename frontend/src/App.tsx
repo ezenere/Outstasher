@@ -9,6 +9,7 @@ import Settings from './pages/Settings'
 import Catalog from './pages/Catalog'
 import CatalogItem from './pages/CatalogItem'
 import Login from './pages/Login'
+import logo from './assets/logo.png'
 
 function Tab({ to, children }: { to: string; children: React.ReactNode }) {
   return (
@@ -67,7 +68,10 @@ export default function App() {
       <div className="min-h-screen">
         <header className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/90 backdrop-blur">
           <div className="mx-auto flex h-14 max-w-5xl items-center gap-6 px-4">
-            <span className="font-semibold">🎬 Downloader &amp; Merger</span>
+            <span className="flex items-center gap-2 font-semibold">
+              <img src={logo} alt="" className="h-10 w-10 rounded" />
+              Outstasher
+            </span>
             <nav className="flex flex-1 gap-1">
               <Tab to="/">
                 <MediaVideo width={16} height={16} /> Filmes
