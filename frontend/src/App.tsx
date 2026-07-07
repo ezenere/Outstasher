@@ -9,20 +9,24 @@ import Settings from './pages/Settings'
 import Catalog from './pages/Catalog'
 import CatalogItem from './pages/CatalogItem'
 import Login from './pages/Login'
+import ProcessMenu from './components/ProcessMenu'
 import logo from './assets/logo.png'
 
-function Tab({ to, children }: { to: string; children: React.ReactNode }) {
+function Tab({ to, children, dot }: { to: string; children: React.ReactNode; dot?: boolean }) {
   return (
     <NavLink
       to={to}
       end={to === '/'}
       className={({ isActive }) =>
-        `flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm transition-colors ${
+        `relative flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm transition-colors ${
           isActive ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'
         }`
       }
     >
       {children}
+      {dot && (
+        <span className="absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-red-500 ring-2 ring-zinc-950" />
+      )}
     </NavLink>
   )
 }
@@ -31,6 +35,7 @@ type Gate = 'loading' | 'setup' | 'login' | 'ok'
 
 export default function App() {
   const [gate, setGate] = useState<Gate>('loading')
+  const [pending, setPending] = useState(false)
 
   const check = useCallback(async () => {
     try {
@@ -76,7 +81,7 @@ export default function App() {
               <Tab to="/">
                 <MediaVideo width={16} height={16} /> Filmes
               </Tab>
-              <Tab to="/jobs">
+              <Tab to="/jobs" dot={pending}>
                 <Download width={16} height={16} /> Downloads
               </Tab>
               <Tab to="/catalog">
@@ -86,6 +91,7 @@ export default function App() {
                 <SettingsIcon width={16} height={16} /> Configurações
               </Tab>
             </nav>
+            <ProcessMenu onPending={setPending} />
             <button
               onClick={doLogout}
               title="Sair"

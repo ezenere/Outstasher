@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
-import type { Candidate, DiskInfo, MergeProgress, Progress } from '../api'
-import { fmtDisk, fmtEta, fmtSize, fmtSpeed, fmtTime, STATUS_LABEL } from '../api'
-import { Check } from 'iconoir-react'
+import type { Candidate, DiskInfo, MergeProgress, MovieState, Progress } from '../api'
+import { fmtDisk, fmtEta, fmtSize, fmtSpeed, fmtTime, MOVIE_STATE_LABEL, STATUS_LABEL } from '../api'
+import { Check, MediaVideoList, Download, Search, WarningTriangle, CheckCircle, XmarkCircle } from 'iconoir-react'
 
 const BADGE_STYLES: Record<string, string> = {
   searching: 'bg-blue-950 text-blue-400',
@@ -73,6 +73,32 @@ export function MergeBar({ p }: { p?: MergeProgress | null }) {
 
 export function Empty({ children }: { children: ReactNode }) {
   return <div className="py-3 text-zinc-500">{children}</div>
+}
+
+// ícone + cor por estado do filme (usado no card de filme e no dropdown)
+const STATE_STYLE: Record<MovieState, { icon: typeof Download; cls: string; badge: string }> = {
+  converting: { icon: MediaVideoList, cls: 'text-blue-300', badge: 'bg-blue-950/80 text-blue-300' },
+  downloading: { icon: Download, cls: 'text-yellow-300', badge: 'bg-yellow-950/80 text-yellow-300' },
+  searching: { icon: Search, cls: 'text-sky-300', badge: 'bg-sky-950/80 text-sky-300' },
+  awaiting: { icon: WarningTriangle, cls: 'text-purple-300', badge: 'bg-purple-950/80 text-purple-300' },
+  done: { icon: CheckCircle, cls: 'text-emerald-300', badge: 'bg-emerald-950/80 text-emerald-300' },
+  error: { icon: XmarkCircle, cls: 'text-red-300', badge: 'bg-red-950/80 text-red-300' },
+}
+
+/** Ícone do estado do filme (para sobrepor no poster). */
+export function MovieStateIcon({ state, className }: { state: MovieState; className?: string }) {
+  const { icon: Icon, cls } = STATE_STYLE[state]
+  return <Icon width={16} height={16} className={`${cls} ${className ?? ''}`} />
+}
+
+/** Badge de estado com ícone + rótulo. */
+export function MovieStateBadge({ state }: { state: MovieState }) {
+  const { icon: Icon, badge } = STATE_STYLE[state]
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold ${badge}`}>
+      <Icon width={12} height={12} /> {MOVIE_STATE_LABEL[state]}
+    </span>
+  )
 }
 
 /** Barra de uso do disco: [======      ] 650 GB / 1 TB · 350 GB livres */

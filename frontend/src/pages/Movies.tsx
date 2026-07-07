@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { Search, Xmark } from 'iconoir-react'
 import {
-  api, post, type Destination, type Job, type Language, type Movie, type TorrentTarget,
+  api, MOVIE_STATE_LABEL, movieStates, post,
+  type Destination, type Job, type Language, type Movie, type TorrentTarget,
 } from '../api'
-import { DiskFree, Empty } from '../components/ui'
+import { DiskFree, Empty, MovieStateBadge, MovieStateIcon } from '../components/ui'
 
 export default function Movies() {
   const [movies, setMovies] = useState<Movie[] | null>(null)
@@ -19,7 +20,24 @@ export default function Movies() {
   const [targetId, setTargetId] = useState<number | null>(null)
   const [selected, setSelected] = useState<Movie | null>(null)
   const [starting, setStarting] = useState(false)
-  const navigate = useNavigate()
+  const [jobs, setJobs] = useState<Job[]>([])
+  const [justStarted, setJustStarted] = useState<number | null>(null)
+
+  // estado de cada filme (tmdb_id -> convertendo/baixando/... ) a partir dos jobs
+  const states = useMemo(() => movieStates(jobs), [jobs])
+
+  useEffect(() => {
+    async function loadJobs() {
+      try {
+        setJobs(await api<Job[]>('/api/jobs'))
+      } catch {
+        /* servidor reiniciando; proxima tentativa no tick */
+      }
+    }
+    void loadJobs()
+    const t = setInterval(loadJobs, 4000)
+    return () => clearInterval(t)
+  }, [])
 
   useEffect(() => {
     api<Language[]>('/api/languages').then(setLanguages).catch(() => {})
@@ -50,18 +68,28 @@ export default function Movies() {
 
   async function start(kind: 'both' | 'original' | 'dubbed') {
     if (!selected) return
+    // avisa se o filme já está sendo baixado/convertido/finalizado
+    const existing = states.get(selected.id)
+    if (existing && !confirm(
+      `Este filme já tem um download ${MOVIE_STATE_LABEL[existing].toLowerCase()}.\n`
+      + 'Quer baixar de novo mesmo assim?',
+    )) return
+    const tmdbId = selected.id
     setStarting(true)
     try {
-      await post<Job>('/api/jobs', {
-        tmdb_id: selected.id,
+      const job = await post<Job>('/api/jobs', {
+        tmdb_id: tmdbId,
         language,
         mode: manual ? 'manual' : 'auto',
         kind,
         destination_id: destId,
         torrent_target_id: targetId,
       })
+      // some com a seleção e sinaliza que começou (sem trocar de tela)
       setSelected(null)
-      navigate('/jobs')
+      setJobs((js) => [job, ...js])
+      setJustStarted(tmdbId)
+      setTimeout(() => setJustStarted((cur) => (cur === tmdbId ? null : cur)), 4000)
     } catch (e) {
       alert(`Erro ao criar job: ${(e as Error).message}`)
     } finally {
@@ -94,29 +122,50 @@ export default function Movies() {
         {movies === null && !error && <Empty>Carregando...</Empty>}
         {error && <Empty>Erro: {error}</Empty>}
         {movies?.length === 0 && <Empty>Nada encontrado.</Empty>}
-        {movies?.map((m) => (
-          <button
-            key={m.id}
-            onClick={() => setSelected(m)}
-            className={`overflow-hidden rounded-xl border-2 bg-zinc-900 text-left transition-transform hover:-translate-y-1 ${
-              selected?.id === m.id ? 'border-blue-500' : 'border-transparent'
-            }`}
-          >
-            {m.poster ? (
-              <img src={m.poster} loading="lazy" className="aspect-[2/3] w-full bg-zinc-800 object-cover" />
-            ) : (
-              <div className="flex aspect-[2/3] w-full items-center justify-center bg-zinc-800 p-2 text-center text-sm text-zinc-500">
-                {m.title ?? '?'}
+        {movies?.map((m) => {
+          const state = states.get(m.id)
+          const started = justStarted === m.id
+          return (
+            <button
+              key={m.id}
+              onClick={() => setSelected(m)}
+              className={`flex flex-col relative overflow-hidden rounded-xl border-2 bg-zinc-900 text-left transition-transform hover:-translate-y-1 ${
+                selected?.id === m.id ? 'border-blue-500' : state ? 'border-zinc-700' : 'border-transparent'
+              }`}
+            >
+              {(state || started) && (
+                <div className="absolute top-1.5 left-1.5 z-10 flex items-center gap-1 rounded-md bg-black/70 px-1.5 py-0.5 backdrop-blur">
+                  {started && !state ? (
+                    <MovieStateIcon state="downloading" />
+                  ) : state ? (
+                    <MovieStateIcon state={state} />
+                  ) : null}
+                </div>
+              )}
+              {m.poster ? (
+                <img src={m.poster} loading="lazy" className="aspect-[2/3] w-full bg-zinc-800 object-cover" />
+              ) : (
+                <div className="flex aspect-[2/3] w-full items-center justify-center bg-zinc-800 p-2 text-center text-sm text-zinc-500">
+                  {m.title ?? '?'}
+                </div>
+              )}
+              <div className="px-2.5 py-2 min-h-16">
+                <div className="text-sm leading-tight font-semibold">{m.title ?? m.original_title}</div>
+                <div className="mt-0.5 text-xs text-zinc-400">
+                  {m.year} {m.rating ? `· ⭐ ${m.rating.toFixed(1)}` : ''}
+                </div>
+                {state && (
+                  <div className="mt-1.5">
+                    <MovieStateBadge state={state} />
+                  </div>
+                )}
+                {started && !state && (
+                  <div className="mt-1.5 text-xs font-medium text-yellow-300">Iniciando download…</div>
+                )}
               </div>
-            )}
-            <div className="px-2.5 py-2">
-              <div className="text-sm leading-tight font-semibold">{m.title ?? m.original_title}</div>
-              <div className="mt-0.5 text-xs text-zinc-400">
-                {m.year} {m.rating ? `· ⭐ ${m.rating.toFixed(1)}` : ''}
-              </div>
-            </div>
-          </button>
-        ))}
+            </button>
+          )
+        })}
       </div>
 
       {selected && (

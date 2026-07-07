@@ -337,3 +337,52 @@ export const STATUS_LABEL: Record<string, string> = {
   error: 'Erro',
   cancelled: 'Cancelado',
 }
+
+// ---------- estado de um filme derivado dos jobs ----------
+// Um mesmo filme (tmdb_id) pode ter vários jobs. Reduzimos todos os jobs
+// daquele filme a um único estado, com a prioridade pedida:
+// CONVERTENDO > BAIXANDO > AGUARDANDO > FINALIZADO > ERRO.
+
+export type MovieState = 'converting' | 'downloading' | 'searching' | 'awaiting' | 'done' | 'error'
+
+// menor número = maior prioridade
+const STATE_RANK: Record<MovieState, number> = {
+  converting: 0,
+  downloading: 1,
+  searching: 2,
+  awaiting: 3,
+  done: 4,
+  error: 5,
+}
+
+/** Mapeia o status de um job para o estado de filme (null = ignorar, ex: cancelado). */
+function jobState(status: string): MovieState | null {
+  if (status === 'merging') return 'converting'
+  if (status === 'downloading') return 'downloading'
+  if (status === 'searching') return 'searching'
+  if (status === 'awaiting') return 'awaiting'
+  if (status === 'done') return 'done'
+  if (status === 'error') return 'error'
+  return null // cancelled
+}
+
+/** Reduz todos os jobs a um mapa tmdb_id -> estado de maior prioridade. */
+export function movieStates(jobs: Job[]): Map<number, MovieState> {
+  const m = new Map<number, MovieState>()
+  for (const j of jobs) {
+    const s = jobState(j.status)
+    if (!s) continue
+    const cur = m.get(j.tmdb_id)
+    if (cur === undefined || STATE_RANK[s] < STATE_RANK[cur]) m.set(j.tmdb_id, s)
+  }
+  return m
+}
+
+export const MOVIE_STATE_LABEL: Record<MovieState, string> = {
+  converting: 'Convertendo',
+  downloading: 'Baixando',
+  searching: 'Procurando',
+  awaiting: 'Aguardando escolha',
+  done: 'Baixado',
+  error: 'Com erro',
+}
