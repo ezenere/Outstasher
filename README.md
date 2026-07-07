@@ -1,4 +1,8 @@
-# Outstasher
+<p align="center">
+  <img src="frontend/src/assets/logo.png" alt="Outstasher" width="128" height="128">
+</p>
+
+<h1 align="center">Outstasher</h1>
 
 Serviço que baixa duas versões de um filme (original + dublada), escolhendo o melhor
 torrent para cada uma, e junta tudo em um único arquivo: **melhor imagem + todos os
