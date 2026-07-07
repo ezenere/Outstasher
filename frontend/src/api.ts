@@ -47,6 +47,18 @@ export interface Progress {
   name?: string | null
 }
 
+/** Progresso do ffmpeg durante o merge (parseado de -progress pipe:1). */
+export interface MergeProgress {
+  pct: number
+  out_s: number       // tempo do filme já processado (s)
+  duration_s: number  // duração total esperada (s)
+  size: number        // bytes escritos até agora
+  bitrate: number     // bits/s
+  speed: number       // multiplicador (1.35 = 1.35x tempo real)
+  fps: number
+  eta: number | null  // segundos restantes
+}
+
 export interface TorrentInfo {
   title: string
   seeders: number
@@ -92,7 +104,11 @@ export interface Job {
   movie: MovieRef | null
   video_torrent: TorrentInfo | null
   audio_torrent: TorrentInfo | null
-  progress: { video: Progress | number | null; audio: Progress | number | null }
+  progress: {
+    video: Progress | number | null
+    audio: Progress | number | null
+    merge?: MergeProgress | null
+  }
   output: string | null
   destination_id?: number | null
   destination_label?: string | null
@@ -284,6 +300,16 @@ export function fmtDisk(bytes: number | null | undefined): string {
 export function fmtSpeed(bps: number): string {
   const mb = bps / 1024 ** 2
   return mb >= 1 ? `${mb.toFixed(1)} MB/s` : `${(bps / 1024).toFixed(0)} kB/s`
+}
+
+/** Segundos -> "1:42:13" / "42:13" (posição no filme). */
+export function fmtTime(s: number): string {
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = Math.floor(s % 60)
+  const mm = String(m).padStart(2, '0')
+  const ss = String(sec).padStart(2, '0')
+  return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`
 }
 
 export function fmtEta(s: number): string {

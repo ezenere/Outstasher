@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { NavArrowLeft, Refresh, Trash } from 'iconoir-react'
 import { post, prog, type Job } from '../api'
 import { api } from '../api'
-import { Badge, CandidatesTable, Empty, ProgressBar } from '../components/ui'
+import { Badge, CandidatesTable, Empty, MergeBar, ProgressBar } from '../components/ui'
 import { jobTitle, kindLabel, removeJob } from './Jobs'
 
 export default function JobDetail() {
@@ -132,6 +132,13 @@ export default function JobDetail() {
           >
             ⬇ Confirmar e baixar
           </button>
+        </section>
+      )}
+
+      {job.status === 'merging' && job.progress?.merge && (
+        <section className="mt-6">
+          <h2 className="mb-2 text-sm font-semibold text-zinc-400">Conversão</h2>
+          <MergeBar p={job.progress.merge} />
         </section>
       )}
 

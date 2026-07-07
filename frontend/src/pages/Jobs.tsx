@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Refresh, Search, Trash, Xmark } from 'iconoir-react'
 import { api, fmtSize, post, prog, type Job } from '../api'
-import { Badge, Empty, ProgressBar } from '../components/ui'
+import { Badge, Empty, MergeBar, ProgressBar } from '../components/ui'
 
 export function jobTitle(j: Job): string {
   return j.movie ? `${j.movie.original_title} (${j.movie.year})` : `TMDB #${j.tmdb_id}`
@@ -146,11 +146,11 @@ export default function Jobs() {
               <img
                 src={j.movie.poster}
                 loading="lazy"
-                className="hidden h-24 w-16 shrink-0 rounded-md bg-zinc-800 object-cover sm:block"
+                className="hidden h-[167px] w-[111px] shrink-0 rounded-md bg-zinc-800 object-cover sm:block"
                 alt=""
               />
             ) : (
-              <div className="hidden h-24 w-16 shrink-0 items-center justify-center rounded-md bg-zinc-800 text-zinc-600 sm:flex">
+              <div className="hidden h-[167px] w-[111px] shrink-0 items-center justify-center rounded-md bg-zinc-800 text-zinc-600 sm:flex">
                 🎬
               </div>
             )}
@@ -206,6 +206,7 @@ export default function Jobs() {
                 <ProgressBar label="Áudio" p={pa} />
               </>
             )}
+            {j.status === 'merging' && <MergeBar p={j.progress?.merge} />}
             </div>
           </div>
         )

@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import wave
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -358,14 +360,92 @@ def _link_or_copy(src: Path, dst: Path, notes: list[str]):
     notes.append(f"cópia criada: {dst}")
 
 
+# -------------------- progresso do ffmpeg (-progress pipe:1) --------------------
+
+def _hms_to_seconds(text: str) -> float:
+    m = re.match(r"(\d+):(\d+):(\d+(?:\.\d+)?)", text or "")
+    if not m:
+        return 0.0
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+
+
+def _parse_progress_block(raw: dict, duration_s: float) -> dict:
+    """Bloco chave=valor do -progress -> dict amigável para a UI."""
+    # out_time_us e out_time_ms são AMBOS microssegundos (quirk histórico do ffmpeg)
+    out_us = raw.get("out_time_us") or raw.get("out_time_ms") or ""
+    if out_us.lstrip("-").isdigit():
+        out_s = max(0.0, int(out_us) / 1_000_000)
+    else:
+        out_s = _hms_to_seconds(raw.get("out_time", ""))
+
+    try:
+        speed = float((raw.get("speed") or "").rstrip("x") or 0)
+    except ValueError:
+        speed = 0.0
+    try:
+        fps = float(raw.get("fps") or 0)
+    except ValueError:
+        fps = 0.0
+    m = re.match(r"([\d.]+)\s*kbits/s", raw.get("bitrate") or "")
+    bitrate = int(float(m.group(1)) * 1000) if m else 0  # bits/s
+    size = int(raw["total_size"]) if (raw.get("total_size") or "").isdigit() else 0
+
+    pct = min(100.0, out_s / duration_s * 100) if duration_s > 0 else 0.0
+    eta = (duration_s - out_s) / speed if (speed > 0 and duration_s > out_s) else None
+    return {"pct": round(pct, 1), "out_s": round(out_s, 1),
+            "duration_s": round(duration_s, 1), "size": size, "bitrate": bitrate,
+            "speed": round(speed, 2), "fps": round(fps, 1),
+            "eta": round(eta) if eta is not None else None}
+
+
+def _run_ffmpeg_progress(cmd: list[str], duration_s: float,
+                         on_progress=None) -> None:
+    """Roda o ffmpeg lendo o stream do -progress pipe:1 e reportando via callback.
+
+    stderr é drenado numa thread (para não travar o pipe) e usado na mensagem
+    de erro se o ffmpeg falhar.
+    """
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace", bufsize=1)
+    stderr_lines: list[str] = []
+    t = threading.Thread(target=lambda: stderr_lines.extend(proc.stderr), daemon=True)
+    t.start()
+
+    block: dict = {}
+    for line in proc.stdout:
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key != "progress":
+            block[key] = value
+            continue
+        # "progress=continue|end" fecha um bloco de status
+        if on_progress:
+            info = _parse_progress_block(block, duration_s)
+            if value == "end":
+                info["pct"] = 100.0
+                info["eta"] = 0
+            on_progress(info)
+        block = {}
+
+    proc.wait()
+    t.join(timeout=5)
+    if proc.returncode != 0:
+        tail = "".join(stderr_lines)[-3000:]
+        raise MergeError(f"ffmpeg falhou (código {proc.returncode}):\n{tail}")
+
+
 # -------------------- merge principal --------------------
 
 def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
-          file2_is_target_dub: bool = True, log=print) -> MergeResult:
+          file2_is_target_dub: bool = True, log=print, on_progress=None) -> MergeResult:
     """Faz o merge de file1+file2 em `output`.
 
     target_lang: codigo curto (pt/es/...) ou ISO (por/spa/...) do idioma desejado.
     file2_is_target_dub: trata audios "und" do file2 como sendo do idioma alvo.
+    on_progress: callback(dict) chamado ~2x/s durante o ffmpeg com
+        {pct, out_s, duration_s, size, bitrate, speed, fps, eta}.
     """
     _check_tools()
     for f in (file1, file2):
@@ -447,7 +527,9 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
            if abs(result.offset_ms) >= ZERO_THRESHOLD_MS else "(~0, só conserto de PTS)"))
 
     # ---- comando ffmpeg ----
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-stats", "-y",
+    # -progress pipe:1: stream chave=valor no stdout para a barra de progresso
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats",
+           "-progress", "pipe:1", "-y",
            "-fflags", "+genpts", "-i", ref_path, "-i", oth_path]
 
     cmd += ["-map", f"0:v:{int(best_v['_type_index'])}"]
@@ -507,9 +589,9 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
     Path(output).parent.mkdir(parents=True, exist_ok=True)
     log("Executando ffmpeg...")
     log("+ " + " ".join(cmd))
-    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if p.returncode != 0:
-        raise MergeError(f"ffmpeg falhou (código {p.returncode}):\n{p.stderr[-3000:]}")
+    # duracao esperada da saida = duracao do arquivo de referencia (video em copy)
+    out_duration = _duration_of(probes[ref_input]) or duration
+    _run_ffmpeg_progress(cmd, out_duration, on_progress)
 
     log(f"OK: {output}")
     return result

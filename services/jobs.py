@@ -30,6 +30,17 @@ _jobs: dict[str, dict] = {}
 _tasks: dict[str, asyncio.Task] = {}
 _qbit = QbitClient()
 
+# fila de conversão: só 1 merge/entrega roda por vez (ffmpeg é pesado de CPU/IO).
+# lazy porque o event loop pode não existir no import.
+_merge_lock: asyncio.Lock | None = None
+
+
+def _get_merge_lock() -> asyncio.Lock:
+    global _merge_lock
+    if _merge_lock is None:
+        _merge_lock = asyncio.Lock()
+    return _merge_lock
+
 
 def load():
     store.init()
@@ -60,11 +71,11 @@ def list_jobs() -> list[dict]:
 
 
 def get_job(job_id: str) -> dict | None:
-    """Job completo, com os eventos vindos do banco (para a lupa)."""
+    """Job completo: eventos (para a lupa) + candidatos (para a escolha manual)."""
     job = _jobs.get(job_id)
     if not job:
         return None
-    return {**_public(job), "events": store.load_events(job_id)}
+    return {**_public(job), "events": store.load_events(job_id), "search": job.get("search")}
 
 
 def _event(job: dict, kind: str, message: str, data=None):
@@ -417,10 +428,16 @@ def _tag(job: dict, kind: str) -> str:
 async def _run_from_download(job: dict):
     try:
         paths = await _wait_downloads(job)
-        if len(_needed_torrents(job)) == 1:
-            await _deliver_single(job, paths)
-        else:
-            await _merge(job, paths["video"], paths["audio"])
+        # merge (ffmpeg) e entrega single (hardlink/cópia) entram na mesma fila:
+        # só 1 por vez, para uma cópia grande não concorrer com uma conversão.
+        lock = _get_merge_lock()
+        if lock.locked():
+            _set(job, "merging", "Na fila de conversão — aguardando a conversão anterior terminar...")
+        async with lock:
+            if len(_needed_torrents(job)) == 1:
+                await _deliver_single(job, paths)
+            else:
+                await _merge(job, paths["video"], paths["audio"])
     except asyncio.CancelledError:
         raise
     except Exception as e:  # noqa: BLE001
@@ -473,7 +490,12 @@ async def _wait_downloads(job: dict) -> dict:
                 continue
 
             st = stall[kind]
-            if pct > st["pct"] + 1e-4:
+            state = t.get("state") or ""
+            if state in ("stoppedDL", "pausedDL"):
+                # usuário parou o torrent manualmente: não conta o tempo de
+                # stall (o relógio recomeça do zero quando ele retomar)
+                st.update(since=time.monotonic(), warned=False)
+            elif pct > st["pct"] + 1e-4:
                 st.update(pct=pct, since=time.monotonic(), warned=False)
             elif (config.STALL_TIMEOUT_MINUTES > 0
                   and time.monotonic() - st["since"] > config.STALL_TIMEOUT_MINUTES * 60):
@@ -594,10 +616,22 @@ async def _merge(job: dict, video_content: str, audio_content: str):
         job["detail"] = str(msg)
         _event(job, "merge", str(msg))
 
+    # progresso do ffmpeg: atualiza em memória (a UI le via polling); persiste
+    # no banco só de vez em quando para não martelar o SQLite a cada tick
+    last_persist = [0.0]
+
+    def on_progress(info: dict):
+        job["progress"]["merge"] = info
+        now = time.monotonic()
+        if now - last_persist[0] > 15:
+            last_persist[0] = now
+            store.upsert_job(job)
+
     # merger.merge é bloqueante (ffmpeg/ffprobe); roda em thread para não travar a API
     result = await asyncio.to_thread(
         merger.merge, str(video_file), str(audio_file), str(output),
-        job["language"], log=log)
+        job["language"], log=log, on_progress=on_progress)
+    job["progress"]["merge"] = None  # terminou (com sucesso): some a barra
 
     job["output"] = result.output
     if result.linked:

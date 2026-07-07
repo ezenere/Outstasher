@@ -174,7 +174,10 @@ Cada card de download tem um botão de lupa que abre um painel ao vivo (atualiza
 cada 2s) com: barras de download com velocidade/ETA/seeds, **todos os candidatos
 avaliados** em cada busca (com score e motivo de rejeição — "sem seeders",
 "sem marcador de idioma", "título não bate"...), qual foi escolhido e por quê,
-e a timeline completa de eventos, incluindo o log do merge.
+e a timeline completa de eventos, incluindo o log do merge. Durante a conversão,
+uma **barra de progresso do ffmpeg** (via `-progress`) mostra a posição no filme,
+velocidade (x tempo real), fps, tamanho escrito, bitrate e ETA — no card da lista
+e no detalhe.
 
 ## Configurações
 

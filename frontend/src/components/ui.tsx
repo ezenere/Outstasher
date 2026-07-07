@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
-import type { Candidate, DiskInfo, Progress } from '../api'
-import { fmtDisk, fmtEta, fmtSize, fmtSpeed, STATUS_LABEL } from '../api'
+import type { Candidate, DiskInfo, MergeProgress, Progress } from '../api'
+import { fmtDisk, fmtEta, fmtSize, fmtSpeed, fmtTime, STATUS_LABEL } from '../api'
 import { Check } from 'iconoir-react'
 
 const BADGE_STYLES: Record<string, string> = {
@@ -38,6 +38,34 @@ export function ProgressBar({ label, p }: { label: string; p: Progress | null })
       </div>
       <div className="mt-1 text-xs text-zinc-400">
         {label}: {p.pct || 0}%{extra ? ` — ${extra}` : ''}
+      </div>
+    </div>
+  )
+}
+
+/** Barra de progresso da conversão (ffmpeg): tempo do filme, velocidade, tamanho... */
+export function MergeBar({ p }: { p?: MergeProgress | null }) {
+  if (!p) return null
+  const extra = [
+    p.duration_s ? `${fmtTime(p.out_s)} / ${fmtTime(p.duration_s)}` : fmtTime(p.out_s),
+    p.speed ? `${p.speed.toFixed(2)}x` : null,
+    p.fps ? `${Math.round(p.fps)} fps` : null,
+    p.size ? fmtSize(p.size) : null,
+    p.bitrate ? `${(p.bitrate / 1e6).toFixed(1)} Mb/s` : null,
+    p.eta != null && p.pct < 100 ? `ETA ${fmtEta(p.eta)}` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  return (
+    <div className="mt-2">
+      <div className="h-2 overflow-hidden rounded bg-zinc-800">
+        <div
+          className="h-full bg-purple-500 transition-all duration-500"
+          style={{ width: `${p.pct || 0}%` }}
+        />
+      </div>
+      <div className="mt-1 text-xs text-zinc-400">
+        Conversão: {p.pct || 0}%{extra ? ` — ${extra}` : ''}
       </div>
     </div>
   )
