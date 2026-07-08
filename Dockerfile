@@ -36,7 +36,6 @@ ENV HOST=0.0.0.0 \
     PORT=8008 \
     DB_DIR=/data
 
-RUN mkdir -p /data
 EXPOSE 8008
 
 CMD ["python", "main.py"]
