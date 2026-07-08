@@ -171,7 +171,7 @@ export default function JobDetail() {
         </button>
       </div>
 
-      <div className="mt-2 text-sm whitespace-pre-wrap text-zinc-400">{job.detail}</div>
+      <div className="mt-2 text-sm wrap-break-word whitespace-pre-wrap text-zinc-400">{job.detail}</div>
 
       {job.status === 'awaiting' && job.search && (
         <section className="mt-6 rounded-xl border border-purple-900/60 bg-purple-950/20 p-4">
@@ -246,7 +246,7 @@ export default function JobDetail() {
                   }`}
                 />
                 <span className="mr-2 text-zinc-500 tabular-nums">{ev.ts.slice(11, 19)}</span>
-                <span className="whitespace-pre-wrap">{ev.message}</span>
+                <span className="wrap-break-word whitespace-pre-wrap">{ev.message}</span>
               </div>
             ))}
           </div>
