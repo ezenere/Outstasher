@@ -6,7 +6,8 @@ Uso:
 - Escolhe o melhor video entre os dois; melhor audio por lingua entre os dois.
 - Se o arquivo de melhor video ja tiver audio no idioma alvo, nao faz merge:
   cria um hardlink no destino (fallback: copia — nunca symlink).
-- Alinha os audios do outro arquivo via GCC-PHAT (re-encodados em AAC/AC3);
+- Alinha os audios do outro arquivo via GCC-PHAT (re-encodados: AAC se
+  mono/estereo, AC3 se multicanal — preserva a ordem dos canais surround);
   o resto e stream copy.
 """
 import argparse

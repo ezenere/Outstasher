@@ -35,9 +35,13 @@ torrent para cada uma, e junta tudo em um único arquivo: **melhor imagem + todo
    - se o arquivo de melhor vídeo **já tem áudio no idioma alvo**, não faz merge —
      cria um **hardlink** no destino (fallback: cópia; nunca symlink);
    - senão: melhor áudio **por língua** entre os dois arquivos, legendas só das
-     línguas com áudio, capítulos, offset medido por **GCC-PHAT** e corrigido via
-     `-filter_complex` (áudios do segundo arquivo re-encodados em AAC/AC3; o resto
-     é stream copy).
+     línguas com áudio, capítulos, offset medido por **GCC-PHAT** em duas janelas:
+     - offset **constante** (o caso comum): sync aplicado no container via
+       `-itsoffset` com **stream copy total** — a trilha dublada
+       (TrueHD/DTS/EAC3...) sobrevive intacta, sem re-encode;
+     - offset com **drift** (janelas divergem): correção via `-filter_complex`
+       com re-encode (AAC se mono/estéreo, AC3 se multicanal — preserva a
+       ordem dos canais surround).
 
 ## Requisitos
 
@@ -248,9 +252,13 @@ python merge.py "filme.1080p.mkv" "filme.dublado.mkv" "resultado.mkv" --audio-la
 - Melhor áudio por língua entre os dois arquivos (se ambos têm a mesma língua,
   ganha o de melhor codec/canais/bitrate); tags como `pob`/`pt-br` são normalizadas.
 - Se o arquivo de melhor vídeo já tem o idioma alvo, sai com hardlink (fallback: cópia) em vez de merge.
-- Offset detectado por GCC-PHAT (janela de 5 min a partir de 30s — música e efeitos
-  coincidem mesmo com falas em idiomas diferentes); só os áudios do outro arquivo
-  são re-encodados, o resto é stream copy.
+- Offset detectado por GCC-PHAT em duas janelas (5 min a partir de 30s + outra no
+  meio do filme — música e efeitos coincidem mesmo com falas em idiomas diferentes).
+- Offset constante (janelas concordam): sync no container via `-itsoffset`, tudo em
+  stream copy — nenhum áudio é re-encodado. Com drift (janelas divergem): os áudios
+  do outro arquivo são re-encodados via filtros (AAC para mono/estéreo, AC3 para
+  multicanal — o AAC nativo do ffmpeg perde a sinalização do layout surround e os
+  players embaralham os canais), o resto é stream copy.
 
 ## Estrutura
 

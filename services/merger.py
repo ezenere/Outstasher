@@ -6,10 +6,14 @@
 - escolhe o melhor AUDIO por LINGUA entre os 2 arquivos
 - inclui LEGENDAS apenas nas linguas em que ha audio
 - copia CAPITULOS do arquivo de melhor video (ou do outro, se so ele tiver)
-- mede o OFFSET entre os arquivos via correlacao GCC-PHAT
-- ajusta somente os audios vindos do "outro" arquivo via -filter_complex
-  (aresample=async=1:first_pts=0, asetpts, adelay/atrim) — esses audios sao
-  re-encodados (AAC; AC3 se >6 canais); o resto e stream copy
+- mede o OFFSET entre os arquivos via correlacao GCC-PHAT (2 janelas)
+- offset CONSTANTE (janelas concordam — o caso comum): aplica o sync no
+  container via -itsoffset com stream copy TOTAL — a trilha dublada
+  (TrueHD/DTS/EAC3...) sobrevive intacta, sem re-encode
+- offset com DRIFT (janelas divergem): ajusta os audios do "outro" arquivo
+  via -filter_complex (aresample=async=1:first_pts=0, asetpts, adelay/atrim)
+  e re-encoda (AAC p/ mono-estereo; AC3 p/ multicanal, que preserva a ordem
+  dos canais — o AAC nativo do ffmpeg embaralha layouts surround)
 - flags plex-friendly: -fflags +genpts, -avoid_negative_ts make_zero,
   -max_interleave_delta 0; legendas mov_text/tx3g viram subrip no MKV
 
@@ -40,9 +44,8 @@ ZERO_THRESHOLD_MS = 0.5
 
 # ---------- codec dos audios filtrados ----------
 AAC_BITRATE_STEREO = "192k"
-AAC_BITRATE_SURROUND = "384k"
-AAC_MAX_CHANNELS = 6
 AC3_BITRATE = "640k"
+AC3_MAX_CHANNELS = 6  # ac3 vai ate 5.1; acima disso o ffmpeg faz downmix
 
 LANG_ISO = {"pt": "por", "es": "spa", "it": "ita", "de": "deu", "fr": "fra", "en": "eng"}
 LANG_ALIASES = {
@@ -322,10 +325,19 @@ def choose_alignment_pair(probes: list[dict], ref_input: int) -> tuple[int, int]
 # -------------------- filter / codec dos audios ajustados --------------------
 
 def filtered_codec_and_bitrate(channels: int) -> tuple[str, str]:
+    """Codec do áudio re-encodado (o que passa pelo conserto de PTS/offset).
+
+    AAC só para mono/estéreo: o encoder AAC nativo do ffmpeg embaralha a ordem
+    dos canais em layouts surround (5.1(side) de fontes DTS/E-AC3 etc.).
+    Multicanal vai de AC3: o encoder declara os layouts suportados, o ffmpeg
+    insere o remap correto na negociação do filtergraph, e é o codec surround
+    mais compatível (TVs, receivers, Plex/Jellyfin). Acima de 6 canais o
+    próprio ffmpeg faz downmix para 5.1 (limite do AC3).
+    """
     ch = channels or 2
-    if ch > AAC_MAX_CHANNELS:
-        return ("ac3", AC3_BITRATE)
-    return ("aac", AAC_BITRATE_STEREO if ch <= 2 else AAC_BITRATE_SURROUND)
+    if ch <= 2:
+        return ("aac", AAC_BITRATE_STEREO)
+    return ("ac3", AC3_BITRATE)
 
 
 def build_audio_fix_chain(input_spec: str, tau_s: float) -> str:
@@ -516,6 +528,7 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
 
     duration = min(d for d in (_duration_of(probes[0]), _duration_of(probes[1])) if d > 0) \
         if (_duration_of(probes[0]) and _duration_of(probes[1])) else 0.0
+    has_drift = False
     if duration > ALIGN_START + 2 * ALIGN_DURATION + 60:
         start2 = min(max(ALIGN_START + ALIGN_DURATION, duration * 0.6),
                      duration - ALIGN_DURATION - 30)
@@ -525,6 +538,7 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
             tau_s = (tau_1 + tau_2) / 2
             log("Offsets consistentes nas duas janelas — alinhamento validado ✓")
         else:
+            has_drift = True
             warn = (f"⚠️ Offsets divergem entre o início ({tau_1 * 1000:+.0f} ms) e o meio "
                     f"({tau_2 * 1000:+.0f} ms) do filme — possível corte diferente ou drift; "
                     f"o áudio pode dessincronizar. Usando o offset do início.")
@@ -534,15 +548,39 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
         log("Filme curto demais para validar o offset numa segunda janela — usando só a primeira.")
 
     result.offset_ms = round(tau_s * 1000.0, 2)
-    log(f"Offset aplicado: {result.offset_ms:+.2f} ms "
-        + (f"({'arquivo 2 atrasado, atrim' if tau_s > 0 else 'arquivo 2 adiantado, adelay'})"
-           if abs(result.offset_ms) >= ZERO_THRESHOLD_MS else "(~0, só conserto de PTS)"))
+
+    # Offset constante (sem drift, o caso comum): aplica no CONTAINER via
+    # -itsoffset com stream copy puro — a trilha dublada (TrueHD/DTS/EAC3...)
+    # sobrevive intacta, sem re-encode. O filter_complex com re-encode fica
+    # reservado para quando as janelas divergem (drift/corte), onde filtrar
+    # é inevitável de qualquer jeito.
+    container_sync = not has_drift
+    apply_offset = abs(result.offset_ms) >= ZERO_THRESHOLD_MS
+    if container_sync:
+        mode = ("sync no container via -itsoffset, sem re-encode" if apply_offset
+                else "~0: remux puro, sem re-encode")
+    else:
+        mode = "drift: re-encode com adelay/atrim"
+    log(f"Offset aplicado: {result.offset_ms:+.2f} ms ({mode})")
+
+    in_ref, in_oth = ["-i", ref_path], ["-i", oth_path]
+    if container_sync and apply_offset:
+        if tau_s < 0:
+            # arquivo 2 adiantado: atrasa o áudio dublado no container
+            in_oth = ["-itsoffset", f"{-tau_s:.6f}", *in_oth]
+        else:
+            # arquivo 2 atrasado: atrasa todo o resto (equivale a adiantá-lo)
+            in_ref = ["-itsoffset", f"{tau_s:.6f}", *in_ref]
+            if chapters_src is not None and tau_s > 1:
+                result.notes.append(
+                    f"capítulos podem ficar deslocados {tau_s:.1f}s "
+                    f"(offset aplicado no container)")
 
     # ---- comando ffmpeg ----
     # -progress pipe:1: stream chave=valor no stdout para a barra de progresso
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats",
            "-progress", "pipe:1", "-y",
-           "-fflags", "+genpts", "-i", ref_path, "-i", oth_path]
+           "-fflags", "+genpts", *in_ref, *in_oth]
 
     cmd += ["-map", f"0:v:{int(best_v['_type_index'])}"]
 
@@ -552,14 +590,16 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
         mapped.append({"lang": lang, "src_cmd": 0 if src_orig == ref_input else 1,
                        "a_idx": int(s["_type_index"]), "stream": s})
 
-    # audios do input 1 passam pelo conserto de PTS/offset (e re-encodam)
+    # só com drift os audios do input 1 passam pelo conserto de PTS/offset
+    # (re-encode); sem drift eles vão de stream copy com o sync no container
     filter_chains, filter_labels = [], {}
-    for item in mapped:
-        if item["src_cmd"] != 1:
-            continue
-        label = f"a_fix_{item['a_idx']}"
-        filter_labels[item["a_idx"]] = label
-        filter_chains.append(build_audio_fix_chain(f"[1:a:{item['a_idx']}]", tau_s) + f"[{label}]")
+    if not container_sync:
+        for item in mapped:
+            if item["src_cmd"] != 1:
+                continue
+            label = f"a_fix_{item['a_idx']}"
+            filter_labels[item["a_idx"]] = label
+            filter_chains.append(build_audio_fix_chain(f"[1:a:{item['a_idx']}]", tau_s) + f"[{label}]")
     if filter_chains:
         cmd += ["-filter_complex", "; ".join(filter_chains)]
 
@@ -568,11 +608,21 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
     default_audio_out = None
     for out_i, item in enumerate(mapped):
         s = item["stream"]
-        if item["src_cmd"] == 1:
+        if item["src_cmd"] == 1 and not container_sync:
             cmd += ["-map", f"[{filter_labels[item['a_idx']]}]"]
-            codec, bitrate = filtered_codec_and_bitrate(channels_of(s))
+            ch = channels_of(s)
+            codec, bitrate = filtered_codec_and_bitrate(ch)
             cmd += [f"-c:a:{out_i}", codec, f"-b:a:{out_i}", bitrate]
-            result.notes.append(f"áudio {item['lang']} re-encodado para {codec} {bitrate}")
+            note = f"áudio {item['lang']} re-encodado para {codec} {bitrate}"
+            if ch > AC3_MAX_CHANNELS:
+                note += f" (downmix {ch}ch → 5.1: ac3 vai até 6 canais)"
+            result.notes.append(note)
+        elif item["src_cmd"] == 1:
+            cmd += ["-map", f"1:a:{item['a_idx']}"]
+            result.notes.append(
+                f"áudio {item['lang']} copiado sem re-encode — codec original "
+                f"({(s.get('codec_name') or '?').upper()}) preservado"
+                + (f", sync {result.offset_ms:+.0f} ms no container" if apply_offset else ""))
         else:
             cmd += ["-map", f"0:a:{item['a_idx']}"]
         cmd += [f"-metadata:s:a:{out_i}", f"language={item['lang']}"]
