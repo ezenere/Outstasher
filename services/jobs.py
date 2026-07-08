@@ -32,7 +32,7 @@ from services.qbittorrent import QbitClient, QbitError
 _CONN_ERRORS = (httpx.HTTPError, QbitError, OSError)
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m2ts", ".mov", ".wmv", ".mpg", ".mpeg"}
-MAX_SELECTABLE = 30  # candidatos guardados por papel para selecao manual/fallback
+MAX_SELECTABLE = 60  # candidatos guardados por papel para selecao manual/fallback
 
 # estados: searching -> (awaiting ->) downloading -> merging -> done | error | cancelled
 _jobs: dict[str, dict] = {}
@@ -242,11 +242,19 @@ async def cancel(job_id: str, delete_torrents: bool = False) -> dict | None:
         except asyncio.CancelledError:
             pass
     if delete_torrents:
+        # limpeza no qBittorrent com teto de tempo: se ele estiver fora do ar,
+        # a remoção do job NÃO pode ficar travada esperando o timeout de rede
         for kind in ("video", "audio"):
             try:
-                await _qbit.delete_by_tag(_tag(job, kind), delete_files=True)
-            except Exception as e:  # noqa: BLE001
-                _event(job, "qbit", f"Falha ao remover torrent de {kind}: {e}")
+                await asyncio.wait_for(
+                    _qbit.delete_by_tag(_tag(job, kind), delete_files=True),
+                    timeout=10)
+            except (Exception, asyncio.TimeoutError) as e:  # noqa: BLE001
+                reason = "sem resposta (qBittorrent fora do ar?)" if isinstance(
+                    e, asyncio.TimeoutError) else str(e)
+                _event(job, "qbit",
+                       f"⚠️ Não removi o torrent de {kind}: {reason} — "
+                       f"apague manualmente no qBittorrent se precisar")
     if job["status"] not in ("done", "error", "cancelled"):
         _set(job, "cancelled",
              "Cancelado pelo usuário" + (" (torrents removidos)" if delete_torrents else ""))
