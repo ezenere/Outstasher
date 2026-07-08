@@ -5,7 +5,9 @@ import { authStatus, getToken, logout } from './api'
 import Movies from './pages/Movies'
 import Jobs from './pages/Jobs'
 import JobDetail from './pages/JobDetail'
-import Settings from './pages/Settings'
+import Settings, {
+  DestinationsSection, TorrentTargetsSection, ExtraSearchSection, LanguagesSection, SecuritySection,
+} from './pages/Settings'
 import Catalog from './pages/Catalog'
 import CatalogItem from './pages/CatalogItem'
 import Login from './pages/Login'
@@ -106,7 +108,14 @@ export default function App() {
             <Route path="/" element={<Movies />} />
             <Route path="/jobs" element={<Jobs />} />
             <Route path="/jobs/:id" element={<JobDetail />} />
-            <Route path="/settings" element={<Settings />} />
+            <Route path="/settings" element={<Settings />}>
+              <Route index element={<Navigate to="destinations" replace />} />
+              <Route path="destinations" element={<DestinationsSection />} />
+              <Route path="torrents" element={<TorrentTargetsSection />} />
+              <Route path="languages" element={<LanguagesSection />} />
+              <Route path="searches" element={<ExtraSearchSection />} />
+              <Route path="security" element={<SecuritySection />} />
+            </Route>
             <Route path="/destinations" element={<Navigate to="/settings" replace />} />
             <Route path="/catalog" element={<Catalog />} />
             <Route path="/catalog/item" element={<CatalogItem />} />

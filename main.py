@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 import config
-from services import auth, catalog, jobs, store, tmdb
+from services import auth, catalog, jackett, jobs, store, tmdb
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
 DIST_DIR = FRONTEND_DIR / "dist"
@@ -136,6 +136,72 @@ async def languages():
     return [{"code": code, "label": info["label"]} for code, info in config.LANGUAGES.items()]
 
 
+# -------------------- cadastro de idiomas (dublagem) --------------------
+
+@app.get("/api/language-config")
+async def get_language_config():
+    """Idiomas cadastrados + marcadores de legenda, para a tela de edição."""
+    return {
+        "languages": store.list_languages(),
+        "subtitle_markers": store.get_subtitle_markers(),
+    }
+
+
+class LanguageIn(BaseModel):
+    code: str
+    label: str
+    tmdb: str
+    markers_strong: list[str] = []
+    markers_weak: list[str] = []
+
+
+class LanguageConfigRequest(BaseModel):
+    languages: list[LanguageIn]
+    subtitle_markers: list[str] = []
+
+
+def _norm_markers(markers: list[str]) -> list[str]:
+    """Limpa marcadores: minúsculas, sem espaços nas pontas, sem vazios/duplicados."""
+    out, seen = [], set()
+    for m in markers:
+        m = (m or "").strip().lower()
+        if m and m not in seen:
+            seen.add(m)
+            out.append(m)
+    return out
+
+
+@app.put("/api/language-config")
+async def put_language_config(req: LanguageConfigRequest):
+    if not req.languages:
+        raise HTTPException(400, "Cadastre ao menos um idioma")
+    seen_codes = set()
+    langs = []
+    for lg in req.languages:
+        code = lg.code.strip().lower()
+        if not code:
+            raise HTTPException(400, "Código de idioma vazio")
+        if not code.isalnum():
+            raise HTTPException(400, f"Código inválido '{lg.code}' — use só letras/números (ex.: pt)")
+        if code in seen_codes:
+            raise HTTPException(400, f"Código duplicado: {code}")
+        seen_codes.add(code)
+        if not lg.label.strip():
+            raise HTTPException(400, f"Nome vazio para o idioma '{code}'")
+        if not lg.tmdb.strip():
+            raise HTTPException(400, f"Código TMDB vazio para o idioma '{code}'")
+        langs.append({
+            "code": code,
+            "label": lg.label.strip(),
+            "tmdb": lg.tmdb.strip(),
+            "markers_strong": _norm_markers(lg.markers_strong),
+            "markers_weak": _norm_markers(lg.markers_weak),
+        })
+    store.save_languages(langs, _norm_markers(req.subtitle_markers))
+    return {"ok": True, "languages": store.list_languages(),
+            "subtitle_markers": store.get_subtitle_markers()}
+
+
 @app.get("/api/movies")
 async def movies(q: str = "", page: int = 1):
     if not config.TMDB_API_KEY:
@@ -250,6 +316,51 @@ async def delete_torrent_target(target_id: int):
     if not store.delete_torrent_target(target_id):
         raise HTTPException(404, "Destino de torrents não encontrado")
     return {"ok": True}
+
+
+# -------------------- buscas extras (idioma x variante x indexers) --------------------
+
+@app.get("/api/jackett/indexers")
+async def jackett_indexers():
+    """Indexers configurados no Jackett, para montar as regras de busca extra."""
+    try:
+        return await jackett.list_indexers(configured_only=True)
+    except Exception as e:  # noqa: BLE001 - Jackett fora do ar não deve dar 500 feio
+        raise HTTPException(502, f"Falha ao listar indexers do Jackett: {e}")
+
+
+@app.get("/api/extra-search-rules")
+async def get_extra_search_rules():
+    return {
+        "rules": store.get_extra_search_rules(),
+        "variants": list(store.EXTRA_SEARCH_VARIANTS),
+        "languages": [{"code": c, "label": v["label"]}
+                      for c, v in config.LANGUAGES.items()],
+    }
+
+
+class ExtraSearchRulesRequest(BaseModel):
+    rules: dict
+
+
+@app.put("/api/extra-search-rules")
+async def put_extra_search_rules(req: ExtraSearchRulesRequest):
+    # sanitiza: só idiomas conhecidos, só variantes válidas, indexers como strings
+    clean: dict = {}
+    for lang, variants in (req.rules or {}).items():
+        if lang not in config.LANGUAGES or not isinstance(variants, dict):
+            continue
+        lang_rules: dict = {}
+        for variant, indexers in variants.items():
+            if variant not in store.EXTRA_SEARCH_VARIANTS or not isinstance(indexers, list):
+                continue
+            ids = [str(i) for i in indexers if i]
+            if ids:
+                lang_rules[variant] = ids
+        if lang_rules:
+            clean[lang] = lang_rules
+    store.set_extra_search_rules(clean)
+    return {"ok": True, "rules": clean}
 
 
 # -------------------- catalogo --------------------

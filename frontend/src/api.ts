@@ -23,6 +23,45 @@ export interface Language {
   label: string
 }
 
+// ---- cadastro de idiomas (editável) ----
+
+export interface LanguageEntry {
+  code: string
+  label: string
+  tmdb: string
+  markers_strong: string[]
+  markers_weak: string[]
+}
+
+export interface LanguageConfig {
+  languages: LanguageEntry[]
+  subtitle_markers: string[]
+}
+
+// ---- buscas extras (idioma x variante x indexers) ----
+
+export interface JackettIndexer {
+  id: string
+  name: string
+  language?: string
+  configured: boolean
+}
+
+// regras: { "<lang>": { "no_year": ["indexerId", ...], "roman": [...], "roman_no_year": [...] } }
+export type ExtraSearchRules = Record<string, Record<string, string[]>>
+
+export interface ExtraSearchConfig {
+  rules: ExtraSearchRules
+  variants: string[]
+  languages: Language[]
+}
+
+export const VARIANT_LABEL: Record<string, string> = {
+  no_year: 'Sem o ano',
+  roman: 'Trocando romanos (II → 2)',
+  roman_no_year: 'Trocando romanos e sem o ano',
+}
+
 export interface DiskInfo {
   total: number
   used: number

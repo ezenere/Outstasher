@@ -106,10 +106,34 @@ def _fold(text: str) -> str:
     return "".join(c for c in nfkd if not unicodedata.combining(c))
 
 
+# sequências de franquia: TMDB costuma usar romano ("De Volta para o Futuro II")
+# e os releases BR usam arábico ("De Volta para o Futuro 2"). Estas funções
+# alimentam tanto o matching (equiparar II==2) quanto as buscas extras.
+_ROMAN = {"i": "1", "ii": "2", "iii": "3", "iv": "4", "v": "5", "vi": "6",
+          "vii": "7", "viii": "8", "ix": "9", "x": "10", "xi": "11",
+          "xii": "12", "xiii": "13"}
+# romano solto (palavra inteira), sem casar o "I" de "IMAX" nem o "V" de "VS"
+_ROMAN_RE = re.compile(r"(?<![\w])(x{0,1}(?:ix|iv|v?i{1,3}|v|x))(?![\w])", re.I)
+
+
+def _roman_to_arabic(text: str) -> str:
+    """Troca numerais romanos soltos por arábicos (preserva o resto do texto)."""
+    return _ROMAN_RE.sub(lambda m: _ROMAN.get(m.group(1).lower(), m.group(1)), text)
+
+
+def has_roman_numeral(title: str) -> bool:
+    """True se o título tem um numeral romano solto (II, III, IV...)."""
+    return _roman_to_arabic(title) != title
+
+
 def _matches_movie(title: str, movie_title: str, year: str) -> bool:
-    """Confere se o resultado parece ser do filme certo (todas as palavras do titulo)."""
-    folded = _fold(title)
-    words = [w for w in re.split(r"\W+", _fold(movie_title)) if len(w) > 1]
+    """Confere se o resultado parece ser do filme certo (todas as palavras do titulo).
+
+    Numerais romanos e arábicos são equiparados (II == 2), então
+    'De Volta para o Futuro 2' casa com o título 'De Volta para o Futuro II'.
+    """
+    folded = _roman_to_arabic(_fold(title))
+    words = [w for w in re.split(r"\W+", _roman_to_arabic(_fold(movie_title))) if len(w) > 1]
     return not words or all(w in folded for w in words)
 
 
@@ -140,8 +164,18 @@ def has_language_marker(title: str, language: str) -> bool:
 
 # marcadores de legenda como PALAVRA inteira (\b) — "leg"/"ost" nao podem casar
 # dentro de "legiao"/"lost". Sem acento porque comparamos contra _fold().
-_SUBS_RE = re.compile(
-    r"\b(" + "|".join(re.escape(m) for m in config.SUBTITLE_MARKERS) + r")\b", re.I)
+# Compilado sob demanda e recacheado quando a lista muda (editavel pela UI).
+_subs_cache: tuple[tuple[str, ...], "re.Pattern"] | None = None
+
+
+def _subs_re() -> "re.Pattern":
+    global _subs_cache
+    markers = tuple(config.SUBTITLE_MARKERS)
+    if _subs_cache is None or _subs_cache[0] != markers:
+        pattern = (re.compile(r"\b(" + "|".join(re.escape(m) for m in markers) + r")\b", re.I)
+                   if markers else re.compile(r"(?!x)x"))  # nunca casa se vazio
+        _subs_cache = (markers, pattern)
+    return _subs_cache[1]
 
 
 def is_subs_only(title: str, language: str) -> bool:
@@ -152,7 +186,7 @@ def is_subs_only(title: str, language: str) -> bool:
     """
     if has_language_marker(title, language):
         return False  # tem dublado/dual: legenda junto não desqualifica
-    return bool(_SUBS_RE.search(_fold(title)))
+    return bool(_subs_re().search(_fold(title)))
 
 
 def score(result: dict, mode: str, language: str | None = None) -> float:

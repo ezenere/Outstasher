@@ -67,10 +67,22 @@ def init():
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         )""")
+    # idiomas da faixa dublada (editaveis pela UI). markers_* guardados como JSON.
+    _conn.execute("""
+        CREATE TABLE IF NOT EXISTS languages (
+            code TEXT PRIMARY KEY,
+            label TEXT NOT NULL,
+            tmdb TEXT NOT NULL,
+            markers_strong TEXT NOT NULL DEFAULT '[]',
+            markers_weak TEXT NOT NULL DEFAULT '[]',
+            sort_order INTEGER NOT NULL DEFAULT 0
+        )""")
     _conn.commit()
     _migrate_from_json()
     _seed_default_destination()
     _seed_default_torrent_target()
+    _seed_languages()
+    load_language_config()
 
 
 # -------------------- settings (chave/valor) --------------------
@@ -88,6 +100,29 @@ def set_setting(key: str, value: str):
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value))
         _conn.commit()
+
+
+# -------------------- regras de busca extra (idioma x variante x indexers) --------------------
+# Guardadas como um único JSON em settings. Formato:
+#   { "<lang>": { "no_year": ["indexerId", ...], "roman": [...], "roman_no_year": [...] } }
+# lang = código do idioma (pt/es/...); as chaves de variante são fixas.
+_EXTRA_SEARCH_KEY = "extra_search_rules"
+EXTRA_SEARCH_VARIANTS = ("no_year", "roman", "roman_no_year")
+
+
+def get_extra_search_rules() -> dict:
+    raw = get_setting(_EXTRA_SEARCH_KEY)
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def set_extra_search_rules(rules: dict):
+    set_setting(_EXTRA_SEARCH_KEY, json.dumps(rules, ensure_ascii=False))
 
 
 # -------------------- destinos (pastas de destino do arquivo final) --------------------
@@ -252,6 +287,83 @@ def _seed_default_torrent_target():
         local_path = dst
     if save_path or local_path:
         add_torrent_target("Padrão (.env)", save_path, local_path, is_default=True)
+
+
+# -------------------- idiomas da faixa dublada (editaveis) --------------------
+
+def _lang_row(r) -> dict:
+    return {"code": r[0], "label": r[1], "tmdb": r[2],
+            "markers_strong": json.loads(r[3] or "[]"),
+            "markers_weak": json.loads(r[4] or "[]"),
+            "sort_order": r[5]}
+
+
+def _seed_languages():
+    """Na primeira execução, popula a tabela com os idiomas padrão do config."""
+    with _lock:
+        count = _conn.execute("SELECT COUNT(*) FROM languages").fetchone()[0]
+    if count:
+        return
+    for i, (code, info) in enumerate(config._DEFAULT_LANGUAGES.items()):
+        with _lock:
+            _conn.execute(
+                "INSERT INTO languages (code, label, tmdb, markers_strong, "
+                "markers_weak, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+                (code, info["label"], info["tmdb"],
+                 json.dumps(info["markers_strong"], ensure_ascii=False),
+                 json.dumps(info["markers_weak"], ensure_ascii=False), i))
+            _conn.commit()
+    # marcadores de legenda: settings (lista unica, nao por idioma)
+    if get_setting("subtitle_markers") is None:
+        set_setting("subtitle_markers",
+                    json.dumps(config._DEFAULT_SUBTITLE_MARKERS, ensure_ascii=False))
+
+
+def list_languages() -> list[dict]:
+    with _lock:
+        rows = _conn.execute(
+            "SELECT code, label, tmdb, markers_strong, markers_weak, sort_order "
+            "FROM languages ORDER BY sort_order, code").fetchall()
+    return [_lang_row(r) for r in rows]
+
+
+def get_subtitle_markers() -> list[str]:
+    raw = get_setting("subtitle_markers")
+    if not raw:
+        return list(config._DEFAULT_SUBTITLE_MARKERS)
+    try:
+        val = json.loads(raw)
+        return [str(m) for m in val] if isinstance(val, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+def load_language_config():
+    """Lê idiomas + marcadores de legenda do banco e instala em config (runtime)."""
+    langs = {}
+    for row in list_languages():
+        langs[row["code"]] = {
+            "label": row["label"], "tmdb": row["tmdb"],
+            "markers_strong": row["markers_strong"],
+            "markers_weak": row["markers_weak"],
+        }
+    config.install_language_config(langs, get_subtitle_markers())
+
+
+def save_languages(languages: list[dict], subtitle_markers: list[str]):
+    """Substitui TODA a configuração de idiomas + marcadores e recarrega o runtime."""
+    with _lock:
+        _conn.execute("DELETE FROM languages")
+        for i, lg in enumerate(languages):
+            _conn.execute(
+                "INSERT INTO languages (code, label, tmdb, markers_strong, "
+                "markers_weak, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+                (lg["code"], lg["label"], lg["tmdb"],
+                 json.dumps(lg["markers_strong"], ensure_ascii=False),
+                 json.dumps(lg["markers_weak"], ensure_ascii=False), i))
+        _conn.commit()
+    set_setting("subtitle_markers", json.dumps(subtitle_markers, ensure_ascii=False))
+    load_language_config()
 
 
 def upsert_job(job: dict):

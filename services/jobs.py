@@ -308,6 +308,59 @@ def _slim(cand: dict, cid: str) -> dict:
             "magnet": cand.get("magnet"), "link": cand.get("link")}
 
 
+def _extra_searches(localized: str, year: str, lang: str) -> list[dict]:
+    """Buscas extras direcionadas conforme as regras (idioma x variante x indexers).
+
+    Cada variante só entra se produzir uma query DIFERENTE da localized normal e
+    se houver indexers configurados para ela no idioma. Retorna uma lista de
+    {query, indexer, variant} — uma entrada por indexer.
+    """
+    rules = store.get_extra_search_rules().get(lang) or {}
+    if not localized or not rules:
+        return []
+
+    base = f"{localized} {year}".strip()
+    arabic = selector._roman_to_arabic(localized)
+    has_roman = selector.has_roman_numeral(localized)
+
+    # cada variante -> a query que ela gera (ou None se não se aplica ao título)
+    variant_query = {
+        "no_year": localized if year else None,
+        "roman": f"{arabic} {year}".strip() if has_roman else None,
+        "roman_no_year": arabic if (has_roman and year) else None,
+    }
+
+    out: list[dict] = []
+    seen_queries = {base.lower()}
+    for variant, query in variant_query.items():
+        if not query:
+            continue
+        indexers = rules.get(variant) or []
+        if not indexers:
+            continue
+        if query.lower() in seen_queries:
+            continue  # não repete uma query que outra variante já cobriu
+        seen_queries.add(query.lower())
+        for idx in indexers:
+            out.append({"query": query, "indexer": idx, "variant": variant})
+    return out
+
+
+async def _run_extra_search(job: dict, spec: dict) -> list[dict]:
+    """Roda uma busca extra; falha de um indexer não derruba o job."""
+    try:
+        res = await jackett.search(spec["query"], spec["indexer"])
+        _event(job, "search",
+               f"Busca extra [{spec['variant']} @ {spec['indexer']}] '{spec['query']}' "
+               f"→ {len(res)} resultados")
+        return res
+    except Exception as e:  # noqa: BLE001
+        _event(job, "search",
+               f"⚠️ Busca extra [{spec['variant']} @ {spec['indexer']}] '{spec['query']}' "
+               f"falhou: {type(e).__name__}: {e}")
+        return []
+
+
 async def _search(job: dict):
     """Busca no Jackett e preenche job["search"] com os candidatos viáveis."""
     lang = job["language"]
@@ -321,26 +374,51 @@ async def _search(job: dict):
     want_video = "video" in needed
     want_audio = "audio" in needed
 
+    # buscas extras direcionadas (só afetam o áudio dublado): rodam em paralelo
+    extra_specs = _extra_searches(localized, year, lang) if want_audio else []
+
     query_original = f"{original} {year}".strip()
+    has_localized = bool(localized and localized.lower() != (original or "").lower())
+    query_localized = f"{localized} {year}".strip() if has_localized else None
     _set(job, "searching",
          f"Procurando '{query_original}' no Jackett (pode levar vários minutos)...")
-    results_original = await jackett.search(query_original)
+    if extra_specs:
+        _event(job, "search",
+               f"{len(extra_specs)} busca(s) extra(s) configurada(s) para {label} "
+               f"— rodando em paralelo")
+
+    # dispara TODAS as buscas em paralelo (all + localized + extras direcionadas)
+    tasks = [jackett.search(query_original)]
+    if query_localized:
+        tasks.append(jackett.search(query_localized))
+    for spec in extra_specs:
+        tasks.append(_run_extra_search(job, spec))
+    all_results = await asyncio.gather(*tasks)
+
+    results_original = all_results[0]
     _event(job, "search", f"Jackett devolveu {len(results_original)} resultados para '{query_original}'")
+    idx = 1
+    results_localized = []
+    if query_localized:
+        results_localized = all_results[idx]
+        idx += 1
+    extra_results = all_results[idx:]  # já logados dentro de _run_extra_search
 
     # ---- audio dublado: titulo traduzido + titulo original com marcador ----
     audio_viable = []
     if want_audio:
-        _set(job, "searching", f"Procurando versão em {label} no Jackett...")
+        _set(job, "searching", f"Avaliando versão em {label}...")
         audio_ranked = []
-        if localized and localized.lower() != (original or "").lower():
-            query_localized = f"{localized} {year}".strip()
-            results_localized = await jackett.search(query_localized)
-            _event(job, "search",
-                   f"Jackett devolveu {len(results_localized)} resultados para '{query_localized}'")
-            ranked, trace = selector.rank(results_localized, "audio", localized, year,
+        # resultados do título traduzido + das buscas extras entram como tier 0
+        # (título no idioma dublado tem preferência máxima)
+        localized_pool = list(results_localized)
+        for r in extra_results:
+            localized_pool.extend(r)
+        if localized_pool:
+            ranked, trace = selector.rank(localized_pool, "audio", localized, year,
                                           language=lang)
-            _event(job, "candidates", f"Avaliação para ÁUDIO — busca '{query_localized}'",
-                   {"role": "audio", "query": query_localized, "candidates": trace})
+            _event(job, "candidates", f"Avaliação para ÁUDIO — título em {label} (+ buscas extras)",
+                   {"role": "audio", "query": query_localized or localized, "candidates": trace})
             for c in ranked:
                 c["tier"] = 0  # titulo no idioma dublado: preferencia maxima
             audio_ranked.extend(ranked)

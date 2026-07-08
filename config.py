@@ -70,7 +70,13 @@ POLL_INTERVAL_SECONDS = 15
 #   como marcador só por falta de opção melhor, sem bônus.
 # Comparados em minúsculas, MANTENDO acentos: "dual áudio" (com acento) é sinal
 # de release brasileiro; "dual audio" (sem) pode ser Hindi+English.
-LANGUAGES = {
+#
+# ATENÇÃO: estes são apenas os valores PADRÃO usados para popular o banco na
+# primeira execução (store.seed_languages). Em runtime, LANGUAGES e
+# SUBTITLE_MARKERS são carregados do banco por store.load_language_config() e
+# podem ser editados pela UI. Não leia _DEFAULT_* diretamente no código —
+# use config.LANGUAGES / config.SUBTITLE_MARKERS.
+_DEFAULT_LANGUAGES = {
     "pt": {
         "label": "Português",
         "tmdb": "pt-BR",
@@ -109,9 +115,29 @@ LANGUAGES = {
 # Marcadores de LEGENDA (universais). Se o titulo tem algum destes e NENHUM
 # marcador de dublagem/dual do idioma alvo, o video tem audio ORIGINAL (so
 # legendado) — nao serve como faixa dublada. Comparados sem acento (_fold).
-SUBTITLE_MARKERS = [
+_DEFAULT_SUBTITLE_MARKERS = [
     "legendado", "legenda", "legendas", "leg",
     "subbed", "subtitled", "subtitle", "subtitles", "subs",
     "subtitulado", "subtitulada", "sottotitolato", "untertitel",
     "vose", "vostfr", "ost",  # versao original + legenda (es/fr)
 ]
+
+# ---- valores em runtime (populados do banco em store.load_language_config) ----
+# começam com os padrões para o caso raro de algo ler antes do load (ex.: testes
+# que não chamam store.init()); o load real substitui pelos valores do banco.
+LANGUAGES = {k: dict(v, markers_strong=list(v["markers_strong"]),
+                     markers_weak=list(v["markers_weak"]))
+             for k, v in _DEFAULT_LANGUAGES.items()}
+SUBTITLE_MARKERS = list(_DEFAULT_SUBTITLE_MARKERS)
+
+
+def install_language_config(languages: dict, subtitle_markers: list):
+    """Substitui os valores em runtime (chamado pelo store após ler/editar o banco).
+
+    Muta os objetos LANGUAGES/SUBTITLE_MARKERS no lugar para que quem importou
+    `from config import LANGUAGES` continue enxergando os valores atualizados.
+    """
+    LANGUAGES.clear()
+    LANGUAGES.update(languages)
+    SUBTITLE_MARKERS.clear()
+    SUBTITLE_MARKERS.extend(subtitle_markers)
