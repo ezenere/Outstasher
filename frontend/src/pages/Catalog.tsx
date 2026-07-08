@@ -1,8 +1,18 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Folder, MediaVideoList, NavArrowRight, WarningTriangle } from 'iconoir-react'
-import { api, type CatalogList, type Destination } from '../api'
+import { Folder, MediaVideoList, NavArrowRight, Search, WarningTriangle, Xmark } from 'iconoir-react'
+import { api, type CatalogItem, type CatalogList, type Destination } from '../api'
 import { DiskBar, Empty } from '../components/ui'
+
+// critérios de ordenação disponíveis no catálogo
+type SortKey = 'title' | 'year' | 'size'
+type SortDir = 'asc' | 'desc'
+
+const SORTS: { key: SortKey; label: string }[] = [
+  { key: 'title', label: 'Título' },
+  { key: 'year', label: 'Ano' },
+  { key: 'size', label: 'Tamanho' },
+]
 
 export default function Catalog() {
   const [destinations, setDestinations] = useState<Destination[]>([])
@@ -10,6 +20,9 @@ export default function Catalog() {
   const [data, setData] = useState<CatalogList | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [query, setQuery] = useState('')
+  const [sortKey, setSortKey] = useState<SortKey>('title')
+  const [sortDir, setSortDir] = useState<SortDir>('asc')
 
   useEffect(() => {
     api<Destination[]>('/api/destinations')
@@ -29,6 +42,27 @@ export default function Catalog() {
       .catch((e) => setError((e as Error).message))
       .finally(() => setLoading(false))
   }, [destId])
+
+  // filtra pelo texto (título ou pasta) e ordena pelo critério escolhido
+  const items = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    const filtered = (data?.items ?? []).filter(
+      (it) => !q || it.title.toLowerCase().includes(q) || it.folder.toLowerCase().includes(q),
+    )
+    const dir = sortDir === 'asc' ? 1 : -1
+    const cmp = (a: CatalogItem, b: CatalogItem) => {
+      if (sortKey === 'title') return a.title.localeCompare(b.title, 'pt-BR') * dir
+      if (sortKey === 'size') return (a.size - b.size) * dir
+      // ano: itens sem ano vão sempre para o fim, independente da direção
+      const ay = a.year ? Number(a.year) : null
+      const by = b.year ? Number(b.year) : null
+      if (ay == null && by == null) return a.title.localeCompare(b.title, 'pt-BR')
+      if (ay == null) return 1
+      if (by == null) return -1
+      return (ay - by) * dir || a.title.localeCompare(b.title, 'pt-BR')
+    }
+    return [...filtered].sort(cmp)
+  }, [data, query, sortKey, sortDir])
 
   return (
     <div>
@@ -56,6 +90,54 @@ export default function Catalog() {
         </div>
       )}
 
+      {data?.exists && data.items.length > 0 && (
+        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
+          <div className="relative flex-1">
+            <Search width={15} height={15} className="absolute top-1/2 left-3 -translate-y-1/2 text-zinc-500" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Buscar por título ou pasta..."
+              className="w-full rounded-lg border border-zinc-700 bg-zinc-900 py-2 pr-8 pl-9 text-sm outline-none focus:border-blue-500"
+            />
+            {query && (
+              <button
+                onClick={() => setQuery('')}
+                className="absolute top-1/2 right-2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
+                title="Limpar"
+              >
+                <Xmark width={15} height={15} />
+              </button>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-sm text-zinc-500">Ordenar:</span>
+            {SORTS.map((s) => {
+              const active = sortKey === s.key
+              return (
+                <button
+                  key={s.key}
+                  onClick={() => {
+                    if (active) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+                    else {
+                      setSortKey(s.key)
+                      setSortDir('asc')
+                    }
+                  }}
+                  title={active ? (sortDir === 'asc' ? 'crescente — clique para inverter' : 'decrescente — clique para inverter') : `Ordenar por ${s.label.toLowerCase()}`}
+                  className={`rounded-lg px-2.5 py-1.5 text-sm transition-colors ${
+                    active ? 'bg-blue-600 font-semibold text-white' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
+                  }`}
+                >
+                  {s.label}
+                  {active && <span className="ml-1">{sortDir === 'asc' ? '↑' : '↓'}</span>}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
       {loading && <Empty>Carregando...</Empty>}
       {error && <Empty>Erro: {error}</Empty>}
       {data && !data.exists && (
@@ -65,9 +147,12 @@ export default function Catalog() {
         </div>
       )}
       {data?.exists && data.items.length === 0 && <Empty>Nenhum filme neste destino.</Empty>}
+      {data?.exists && data.items.length > 0 && items.length === 0 && (
+        <Empty>Nenhum filme corresponde à busca.</Empty>
+      )}
 
       <div className="mt-5 flex flex-col gap-2">
-        {data?.items.map((it) => (
+        {items.map((it) => (
           <Link
             key={it.folder}
             to={`/catalog/item?destination_id=${destId}&folder=${encodeURIComponent(it.folder)}`}
