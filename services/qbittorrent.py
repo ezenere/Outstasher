@@ -1,4 +1,6 @@
 """Cliente da Web API do qBittorrent (v2)."""
+import re
+
 import httpx
 
 import config
@@ -6,6 +8,17 @@ import config
 
 class QbitError(Exception):
     pass
+
+
+def _hash_from_magnet(magnet: str) -> str | None:
+    """Extrai o infohash de um magnet (xt=urn:btih:...). None se não achar."""
+    m = re.search(r"xt=urn:btih:([0-9a-zA-Z]+)", magnet or "")
+    if not m:
+        return None
+    h = m.group(1)
+    # btih pode vir em base32 (32 chars) — o qBittorrent indexa por hex (40).
+    # aqui só normalizamos o hex; base32 fica como veio (raro em trackers atuais).
+    return h.lower() if len(h) == 40 else h
 
 
 class QbitClient:
@@ -133,6 +146,11 @@ class QbitClient:
         r = await self._post("/api/v2/torrents/add", data, files=files)
         # 200 = adicionado; 202 = aceito mas ainda buscando metadados (tipico de
         # magnet: o qBittorrent responde antes de ter o .torrent completo).
+        # 409 = torrent JA existe (mesmo hash). Nao e erro: so garantimos que ele
+        # carrega a tag deste job, para o watchdog achar via info_by_tag.
+        if r.status_code == 409:
+            await self._ensure_tag_on_existing(payload if kind != "file" else None, tag)
+            return
         if r.status_code not in (200, 202):
             raise QbitError(f"Falha ao adicionar torrent: {r.status_code} {r.text!r}")
         # qBittorrent 5.x devolve JSON {success_count, failure_count, pending_count, ...};
@@ -151,6 +169,25 @@ class QbitClient:
         accepted = result.get("success_count", 0) + result.get("pending_count", 0)
         if failed > 0 or accepted == 0:
             raise QbitError(f"qBittorrent não adicionou o torrent: {body!r}")
+
+    async def add_tags(self, hashes: str, tag: str):
+        r = await self._post("/api/v2/torrents/addTags", {"hashes": hashes, "tags": tag})
+        r.raise_for_status()
+
+    async def _ensure_tag_on_existing(self, magnet: str | None, tag: str):
+        """Após um 409 (torrent já existe), garante a tag do job no torrent existente.
+
+        Se der para achar o hash pelo magnet, adiciona a tag por hash. Se já tiver
+        a tag, o addTags é idempotente. Sem hash (link .torrent/http), não dá para
+        localizar com segurança: deixa passar — o watchdog reinsere/espera.
+        """
+        h = _hash_from_magnet(magnet) if magnet else None
+        if not h:
+            return
+        try:
+            await self.add_tags(h, tag)
+        except httpx.HTTPError:
+            pass  # melhor-esforço; o torrent existe, é o que importa
 
     async def info_by_tag(self, tag: str) -> list[dict]:
         r = await self._get("/api/v2/torrents/info", {"tag": tag})

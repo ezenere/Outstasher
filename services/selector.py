@@ -129,12 +129,24 @@ def has_roman_numeral(title: str) -> bool:
 def _matches_movie(title: str, movie_title: str, year: str) -> bool:
     """Confere se o resultado parece ser do filme certo (todas as palavras do titulo).
 
-    Numerais romanos e arábicos são equiparados (II == 2), então
-    'De Volta para o Futuro 2' casa com o título 'De Volta para o Futuro II'.
+    - Numerais romanos e arábicos são equiparados (II == 2), então
+      'De Volta para o Futuro 2' casa com 'De Volta para o Futuro II'.
+    - Números do título CONTAM (o '9' de 'Velozes & Furiosos 9' é obrigatório,
+      senão a franquia inteira casa) e são comparados como PALAVRA inteira —
+      substring casaria o '9' de '2019'/'x265', e o 'f9' do hash 'F98D9609'.
+    - Palavras só de letras seguem por substring ('spider' casa 'spiderman').
     """
     folded = _roman_to_arabic(_fold(title))
-    words = [w for w in re.split(r"\W+", _roman_to_arabic(_fold(movie_title))) if len(w) > 1]
-    return not words or all(w in folded for w in words)
+    words = [w for w in re.split(r"\W+", _roman_to_arabic(_fold(movie_title)))
+             if len(w) > 1 or w.isdigit()]
+    for w in words:
+        if any(ch.isdigit() for ch in w):
+            # numero (9, 007) ou palavra com digito (f9, u2): palavra inteira
+            if not re.search(rf"(?<![0-9a-z]){re.escape(w)}(?![0-9a-z])", folded):
+                return False
+        elif w not in folded:
+            return False
+    return True
 
 
 def matches_title(title: str, movie_title: str) -> bool:
