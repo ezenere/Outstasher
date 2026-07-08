@@ -137,12 +137,13 @@ async def languages():
 
 
 @app.get("/api/movies")
-async def movies(q: str = ""):
+async def movies(q: str = "", page: int = 1):
     if not config.TMDB_API_KEY:
         raise HTTPException(500, "TMDB_API_KEY não configurada no .env")
+    page = max(1, min(page, 500))  # TMDB aceita no máximo 500 páginas
     if q.strip():
-        return await tmdb.search(q.strip())
-    return await tmdb.popular()
+        return await tmdb.search(q.strip(), page)
+    return await tmdb.popular(page)
 
 
 class JobRequest(BaseModel):
@@ -157,6 +158,11 @@ class JobRequest(BaseModel):
 class SelectRequest(BaseModel):
     audio_id: str | None = None
     video_id: str | None = None
+
+
+class SwitchRequest(BaseModel):
+    kind: str  # video | audio
+    candidate_id: str | None = None  # vazio = "Tentar próximo" (primeiro reserva)
 
 
 class CancelRequest(BaseModel):
@@ -326,6 +332,22 @@ async def select_job(job_id: str, req: SelectRequest):
         raise HTTPException(400, str(e))
     if not job:
         raise HTTPException(409, "Job não está aguardando escolha")
+    return job
+
+
+@app.post("/api/jobs/{job_id}/switch")
+async def switch_job(job_id: str, req: SwitchRequest):
+    """Troca o torrent de um download em andamento (próximo reserva ou escolhido)."""
+    if req.kind not in ("video", "audio"):
+        raise HTTPException(400, f"kind inválido: {req.kind}")
+    try:
+        job = await jobs.switch(job_id, req.kind, req.candidate_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:  # qBittorrent fora do ar etc.
+        raise HTTPException(502, f"Falha ao trocar o torrent: {e}")
+    if not job:
+        raise HTTPException(404, "Job não encontrado")
     return job
 
 

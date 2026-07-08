@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { Search, Xmark } from 'iconoir-react'
 import {
   api, MOVIE_STATE_LABEL, movieStates, post,
-  type Destination, type Job, type Language, type Movie, type TorrentTarget,
+  type Destination, type Job, type Language, type Movie, type MoviePage, type TorrentTarget,
 } from '../api'
 import { DiskFree, Empty, MovieStateBadge, MovieStateIcon } from '../components/ui'
 
@@ -22,6 +22,11 @@ export default function Movies() {
   const [starting, setStarting] = useState(false)
   const [jobs, setJobs] = useState<Job[]>([])
   const [justStarted, setJustStarted] = useState<number | null>(null)
+  // paginação: guarda o termo buscado, a página atual e o total de páginas
+  const [searched, setSearched] = useState('')
+  const [page, setPage] = useState(1)
+  const [totalPages, setTotalPages] = useState(1)
+  const [loadingMore, setLoadingMore] = useState(false)
 
   // estado de cada filme (tmdb_id -> convertendo/baixando/... ) a partir dos jobs
   const states = useMemo(() => movieStates(jobs), [jobs])
@@ -56,13 +61,39 @@ export default function Movies() {
     void search('')
   }, [])
 
+  // nova busca: reseta a lista e carrega a página 1
   async function search(q: string) {
     setMovies(null)
     setError(null)
+    setSearched(q)
     try {
-      setMovies(await api<Movie[]>(`/api/movies?q=${encodeURIComponent(q)}`))
+      const p = await api<MoviePage>(`/api/movies?q=${encodeURIComponent(q)}&page=1`)
+      setMovies(p.results)
+      setPage(p.page)
+      setTotalPages(p.total_pages)
     } catch (e) {
       setError((e as Error).message)
+    }
+  }
+
+  // carrega a próxima página e anexa aos resultados atuais
+  async function loadMore() {
+    if (loadingMore || page >= totalPages) return
+    setLoadingMore(true)
+    try {
+      const next = page + 1
+      const p = await api<MoviePage>(`/api/movies?q=${encodeURIComponent(searched)}&page=${next}`)
+      // dedup por id (o TMDB às vezes repete títulos entre páginas)
+      setMovies((cur) => {
+        const seen = new Set((cur ?? []).map((m) => m.id))
+        return [...(cur ?? []), ...p.results.filter((m) => !seen.has(m.id))]
+      })
+      setPage(p.page)
+      setTotalPages(p.total_pages)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setLoadingMore(false)
     }
   }
 
@@ -167,6 +198,18 @@ export default function Movies() {
           )
         })}
       </div>
+
+      {movies && movies.length > 0 && page < totalPages && (
+        <div className="mt-6 flex justify-center pb-4">
+          <button
+            onClick={loadMore}
+            disabled={loadingMore}
+            className="rounded-lg border border-zinc-700 px-5 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+          >
+            {loadingMore ? 'Carregando…' : `Carregar mais (${page}/${totalPages})`}
+          </button>
+        </div>
+      )}
 
       {selected && (
         <div className="fixed inset-x-0 bottom-0 z-20 border-t border-zinc-800 bg-zinc-900/95 backdrop-blur">

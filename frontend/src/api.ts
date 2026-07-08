@@ -10,6 +10,14 @@ export interface Movie {
   rating: number | null
 }
 
+/** Página de resultados de filmes do TMDB (/api/movies). */
+export interface MoviePage {
+  results: Movie[]
+  page: number
+  total_pages: number
+  total_results: number
+}
+
 export interface Language {
   code: string
   label: string

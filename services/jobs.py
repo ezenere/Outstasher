@@ -8,8 +8,11 @@ Modos:
 - manual: para em "awaiting" com os candidatos viáveis; o usuário escolhe
   pela UI e o job continua via select().
 
-Watchdog: download sem progresso por STALL_TIMEOUT_MINUTES é trocado pelo
-próximo candidato viável do mesmo corte (job["fallbacks"]).
+Watchdog: download sem progresso é trocado pelo próximo candidato viável do
+mesmo corte (job["fallbacks"]). O timeout depende do estado do torrent:
+metaDL espera mais (30 min) e stalledDL muito mais (2 h). Perder a conexão
+com o qBittorrent nunca falha o job — ele avisa e fica tentando reconectar;
+torrent que sumiu do qBittorrent é reinserido automaticamente.
 """
 import asyncio
 import re
@@ -18,9 +21,15 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+import httpx
+
 import config
 from services import jackett, merger, selector, store, tmdb
-from services.qbittorrent import QbitClient
+from services.qbittorrent import QbitClient, QbitError
+
+# problemas de comunicação com o qBittorrent que NÃO devem falhar o job
+# durante o download: rede fora, sessão caída, restart do qBittorrent...
+_CONN_ERRORS = (httpx.HTTPError, QbitError, OSError)
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m2ts", ".mov", ".wmv", ".mpg", ".mpeg"}
 MAX_SELECTABLE = 30  # candidatos guardados por papel para selecao manual/fallback
@@ -154,6 +163,7 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "search": None,     # candidatos viaveis {audio: [...], video: [...]}
         "fallbacks": None,  # reservas do mesmo corte para o watchdog
+        "current": None,    # candidato ativo por kind (com magnet/link p/ reinserir)
     }
     _jobs[job["id"]] = job
     tinfo = f" — torrents: {target['label']}" if target else ""
@@ -185,6 +195,38 @@ async def select(job_id: str, audio_id: str | None, video_id: str | None) -> dic
             raise ValueError("Candidato de vídeo não encontrado (a busca pode ter sido refeita)")
     _event(job, "chosen", "Seleção manual do usuário")
     _tasks[job["id"]] = asyncio.create_task(_download_and_merge(job, a, v))
+    return _public(job)
+
+
+async def switch(job_id: str, kind: str, candidate_id: str | None = None) -> dict | None:
+    """Troca manual de torrent durante o download.
+
+    Sem candidate_id: "Tentar próximo" — pega o primeiro candidato reserva.
+    Com candidate_id: troca para o candidato escolhido na lista da busca.
+    """
+    job = _jobs.get(job_id)
+    if not job:
+        return None
+    if job["status"] != "downloading":
+        raise ValueError("O job não está baixando — só dá para trocar torrent durante o download")
+    if kind not in _needed_torrents(job):
+        raise ValueError(f"Este job não baixa {kind}")
+    if candidate_id:
+        cands = (job.get("search") or {}).get(kind) or []
+        nxt = next((c for c in cands if c["id"] == candidate_id), None)
+        if not nxt:
+            raise ValueError("Candidato não encontrado (a busca pode ter sido refeita)")
+    else:
+        fb = (job.get("fallbacks") or {}).get(kind) or []
+        if not fb:
+            raise ValueError(f"Sem candidato reserva de {kind} para tentar")
+        nxt = fb[0]
+    cur = (job.get("current") or {}).get(kind)
+    if cur and cur.get("id") == nxt["id"]:
+        raise ValueError("Este já é o torrent atual")
+    torrents = await _qbit.info_by_tag(_tag(job, kind))
+    current = torrents[0] if torrents else None
+    await _replace_torrent(job, kind, current, nxt, "🔁 Troca manual pelo usuário")
     return _public(job)
 
 
@@ -398,6 +440,9 @@ async def _start_download(job: dict, a: dict | None, v: dict | None):
         "video": [x for x in search["video"]
                   if v and x["edition"] == v["edition"] and x["id"] != v["id"]],
     }
+    # candidato ativo (com magnet/link): usado para reinserir se o torrent
+    # sumir do qBittorrent e para a troca manual saber o que está rodando
+    job["current"] = {"video": v, "audio": a}
 
     _set(job, "searching", "Enviando torrents para o qBittorrent...")
     save_path = job.get("torrent_save_path") or config.QBIT_SAVE_PATH or None
@@ -428,6 +473,10 @@ def _tag(job: dict, kind: str) -> str:
 async def _run_from_download(job: dict):
     try:
         paths = await _wait_downloads(job)
+        # localiza os arquivos ANTES de entrar na fila de conversão (com retry:
+        # o qBittorrent pode segurar o arquivo recém-concluído por um tempo)
+        files = {kind: await _resolve_video_file(job, content, kind)
+                 for kind, content in paths.items()}
         # merge (ffmpeg) e entrega single (hardlink/cópia) entram na mesma fila:
         # só 1 por vez, para uma cópia grande não concorrer com uma conversão.
         lock = _get_merge_lock()
@@ -435,110 +484,220 @@ async def _run_from_download(job: dict):
             _set(job, "merging", "Na fila de conversão — aguardando a conversão anterior terminar...")
         async with lock:
             if len(_needed_torrents(job)) == 1:
-                await _deliver_single(job, paths)
+                await _deliver_single(job, files)
             else:
-                await _merge(job, paths["video"], paths["audio"])
+                await _merge(job, files["video"], files["audio"])
     except asyncio.CancelledError:
         raise
     except Exception as e:  # noqa: BLE001
         _fail(job, f"{type(e).__name__}: {e}")
 
 
+async def _resolve_video_file(job: dict, content_path: str, kind: str) -> Path:
+    """Localiza o arquivo de vídeo com retry para erros transitórios de I/O.
+
+    No WSL, stat/listagem em /mnt/* (drvfs/9p) falha com EINVAL enquanto um
+    processo Windows (o qBittorrent, logo após concluir) ainda segura o
+    arquivo. Espera com backoff em vez de falhar o job.
+    """
+    delays = (5, 15, 30, 60, 120, 300, 600)  # ~19 min no total
+    for i, delay in enumerate(delays):
+        try:
+            return await asyncio.to_thread(_find_video_file, job, content_path)
+        except OSError as e:
+            if i == 0:
+                _event(job, "info",
+                       f"⚠️ Arquivo de {kind} ainda inacessível ({e}) — o qBittorrent "
+                       f"pode estar verificando/movendo o download; aguardando...")
+            job["detail"] = (f"Aguardando o arquivo de {kind} ficar acessível "
+                             f"(tentativa {i + 1}/{len(delays) + 1})...")
+            await asyncio.sleep(delay)
+    # última tentativa: se ainda falhar, o erro real sobe e o job falha
+    return await asyncio.to_thread(_find_video_file, job, content_path)
+
+
+def _stall_limit_minutes(state: str) -> int:
+    """Timeout de stall conforme o estado do torrent.
+
+    metaDL (ainda buscando metadados do magnet) merece mais paciência: 30 min.
+    stalledDL (sem seed disponível AGORA) pode voltar sozinho: 2 h.
+    Os valores nunca ficam abaixo do STALL_TIMEOUT_MINUTES configurado.
+    """
+    s = state.lower()
+    if "metadl" in s:       # metaDL / forcedMetaDL
+        return max(config.STALL_TIMEOUT_MINUTES, 30)
+    if "stalleddl" in s:    # stalledDL
+        return max(config.STALL_TIMEOUT_MINUTES, 120)
+    return config.STALL_TIMEOUT_MINUTES
+
+
 async def _wait_downloads(job: dict) -> dict:
-    """Espera os torrents necessários terminarem; watchdog troca torrent travado."""
+    """Espera os torrents necessários terminarem; watchdog troca torrent travado.
+
+    Perder a conexão com o qBittorrent NUNCA falha o job: avisa uma vez,
+    mantém o estado "baixando" e fica tentando reconectar. Torrent que sumiu
+    do qBittorrent é reinserido automaticamente — só para de reinserir se o
+    job for cancelado/excluído.
+    """
     needed = _needed_torrents(job)
     paths = {}
-    stall = {k: {"pct": -1.0, "since": time.monotonic(), "warned": False}
+    stall = {k: {"pct": -1.0, "since": time.monotonic(), "warned": False, "hash": None}
              for k in needed}
     # magnet adicionado pode levar alguns segundos ate aparecer em /info
     # (qBittorrent ainda buscando metadados). so tratamos como "removido" se
     # sumir por um bom tempo, nao na primeira consulta.
-    missing = {k: {"since": None, "warned": False} for k in needed}
+    missing = {k: {"since": None} for k in needed}
     METADATA_GRACE = max(config.STALL_TIMEOUT_MINUTES, 5) * 60
+    conn_lost = False
     while len(paths) < len(needed):
-        for kind in needed:
-            if kind in paths:
-                continue
-            torrents = await _qbit.info_by_tag(_tag(job, kind))
-            if not torrents:
-                miss = missing[kind]
-                if miss["since"] is None:
-                    miss["since"] = time.monotonic()
-                    _event(job, "qbit",
-                           f"Torrent de {kind} ainda não aparece no qBittorrent "
-                           f"(buscando metadados do magnet)...")
-                elif time.monotonic() - miss["since"] > METADATA_GRACE:
-                    raise RuntimeError(
-                        f"Torrent de {kind} não apareceu no qBittorrent após "
-                        f"{METADATA_GRACE // 60} min (sem seeds para os metadados do "
-                        f"magnet, ou foi removido?)")
-                continue
-            missing[kind]["since"] = None
-            t = torrents[0]
-            pct = t.get("progress", 0)
-            job["progress"][kind] = {
-                "pct": round(pct * 100, 1),
-                "speed": t.get("dlspeed", 0),
-                "eta": t.get("eta"),
-                "state": t.get("state"),
-                "seeds": t.get("num_seeds", 0),
-                "name": t.get("name"),
-            }
-            if pct >= 1:
-                paths[kind] = t["content_path"]
-                _event(job, "qbit", f"Download de {kind} concluído: {t['content_path']}")
-                continue
+        try:
+            for kind in needed:
+                if kind in paths:
+                    continue
+                torrents = await _qbit.info_by_tag(_tag(job, kind))
+                if conn_lost:
+                    conn_lost = False
+                    _event(job, "qbit", "✅ Conexão com o qBittorrent restabelecida")
+                    job["detail"] = ("Baixando torrent..." if len(needed) == 1
+                                     else "Baixando torrents...")
+                    # o tempo desconectado não conta como stall nem como sumiço
+                    now = time.monotonic()
+                    for st_ in stall.values():
+                        st_["since"] = now
+                    for m_ in missing.values():
+                        m_["since"] = None
+                if not torrents:
+                    miss = missing[kind]
+                    if miss["since"] is None:
+                        miss["since"] = time.monotonic()
+                        _event(job, "qbit",
+                               f"Torrent de {kind} ainda não aparece no qBittorrent "
+                               f"(buscando metadados do magnet)...")
+                    elif time.monotonic() - miss["since"] > METADATA_GRACE:
+                        # sumiu (removido à mão?) ou magnet nunca materializou:
+                        # reinsere e recomeça a espera, sem falhar o job
+                        await _readd_torrent(job, kind)
+                        miss["since"] = time.monotonic()
+                    continue
+                missing[kind]["since"] = None
+                t = torrents[0]
+                pct = t.get("progress", 0)
+                job["progress"][kind] = {
+                    "pct": round(pct * 100, 1),
+                    "speed": t.get("dlspeed", 0),
+                    "eta": t.get("eta"),
+                    "state": t.get("state"),
+                    "seeds": t.get("num_seeds", 0),
+                    "name": t.get("name"),
+                }
+                if pct >= 1:
+                    paths[kind] = t["content_path"]
+                    _event(job, "qbit", f"Download de {kind} concluído: {t['content_path']}")
+                    continue
 
-            st = stall[kind]
-            state = t.get("state") or ""
-            if state in ("stoppedDL", "pausedDL"):
-                # usuário parou o torrent manualmente: não conta o tempo de
-                # stall (o relógio recomeça do zero quando ele retomar)
-                st.update(since=time.monotonic(), warned=False)
-            elif pct > st["pct"] + 1e-4:
-                st.update(pct=pct, since=time.monotonic(), warned=False)
-            elif (config.STALL_TIMEOUT_MINUTES > 0
-                  and time.monotonic() - st["since"] > config.STALL_TIMEOUT_MINUTES * 60):
-                if await _switch_torrent(job, kind, t):
-                    st.update(pct=-1.0, since=time.monotonic(), warned=False)
-                elif not st["warned"]:
-                    _event(job, "qbit",
-                           f"⚠️ Download de {kind} sem progresso há "
-                           f"{config.STALL_TIMEOUT_MINUTES} min e sem candidato reserva — "
-                           f"continuando a esperar (cancele o job se quiser desistir)")
-                    st["warned"] = True
-        store.upsert_job(job)
+                st = stall[kind]
+                state = t.get("state") or ""
+                if t.get("hash") != st["hash"]:
+                    # torrent trocado (watchdog ou troca manual): zera o relógio
+                    st.update(hash=t.get("hash"), pct=-1.0,
+                              since=time.monotonic(), warned=False)
+                limit_min = _stall_limit_minutes(state)
+                if state in ("stoppedDL", "pausedDL"):
+                    # usuário parou o torrent manualmente: não conta o tempo de
+                    # stall (o relógio recomeça do zero quando ele retomar)
+                    st.update(since=time.monotonic(), warned=False)
+                elif pct > st["pct"] + 1e-4:
+                    st.update(pct=pct, since=time.monotonic(), warned=False)
+                elif (config.STALL_TIMEOUT_MINUTES > 0
+                      and time.monotonic() - st["since"] > limit_min * 60):
+                    if await _switch_torrent(job, kind, t, limit_min):
+                        st.update(pct=-1.0, since=time.monotonic(), warned=False)
+                    elif not st["warned"]:
+                        _event(job, "qbit",
+                               f"⚠️ Download de {kind} sem progresso há "
+                               f"{limit_min} min e sem candidato reserva — "
+                               f"continuando a esperar (cancele o job se quiser desistir)")
+                        st["warned"] = True
+            store.upsert_job(job)
+        except _CONN_ERRORS as e:
+            # qBittorrent fora do ar / rede caiu: avisa uma vez e segue tentando
+            if not conn_lost:
+                conn_lost = True
+                _event(job, "qbit",
+                       f"⚠️ Perdi a conexão com o qBittorrent ({type(e).__name__}: {e}) — "
+                       f"mantendo o download e tentando reconectar...")
+            job["detail"] = "Sem conexão com o qBittorrent — tentando reconectar..."
         if len(paths) < len(needed):
             await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
     return paths
 
 
-async def _switch_torrent(job: dict, kind: str, current: dict) -> bool:
-    """Troca um download travado pelo próximo candidato do mesmo corte."""
+async def _readd_torrent(job: dict, kind: str):
+    """Reinsere o torrent atual de `kind` que sumiu do qBittorrent."""
+    cand = (job.get("current") or {}).get(kind)
+    if not cand:
+        # jobs antigos (sem "current"): tenta achar o candidato pelo título escolhido
+        title = (job.get(f"{kind}_torrent") or {}).get("title")
+        cands = (job.get("search") or {}).get(kind) or []
+        cand = next((c for c in cands if c["title"] == title), None)
+    if not cand or not (cand.get("magnet") or cand.get("link")):
+        _event(job, "qbit",
+               f"⚠️ Torrent de {kind} sumiu do qBittorrent e não tenho o link para "
+               f"reinserir — continuando a esperar")
+        return
+    save_path = job.get("torrent_save_path") or config.QBIT_SAVE_PATH or None
+    await _qbit.add(cand.get("magnet") or cand["link"], _tag(job, kind), save_path)
+    _event(job, "qbit",
+           f"🔁 Torrent de {kind} não está mais no qBittorrent — reinserido: {cand['title']}")
+
+
+async def _switch_torrent(job: dict, kind: str, current: dict, limit_min: int) -> bool:
+    """Watchdog: troca um download travado pelo próximo candidato do mesmo corte."""
     fallbacks = (job.get("fallbacks") or {}).get(kind) or []
     if not fallbacks:
         return False
-    nxt = fallbacks.pop(0)
-    store.upsert_job(job)
+    nxt = fallbacks[0]
+    await _replace_torrent(job, kind, current, nxt,
+                           f"⏳ Download de {kind} travado há {limit_min} min — trocado por")
+    return True
+
+
+async def _replace_torrent(job: dict, kind: str, current: dict | None, nxt: dict, reason: str):
+    """Substitui o torrent ativo de `kind` por `nxt` (watchdog ou troca manual).
+
+    `current` é o torrent como reportado pelo qBittorrent (pode ser None se ele
+    nem chegou a aparecer). O candidato substituído volta para o FIM da lista
+    de reservas — dá para tentar de novo mais tarde.
+    """
+    if not job.get("fallbacks"):
+        job["fallbacks"] = {}
+    fb = job["fallbacks"].get(kind) or []
+    job["fallbacks"][kind] = [c for c in fb if c["id"] != nxt["id"]]
+    cur_cand = (job.get("current") or {}).get(kind)
+    if cur_cand and cur_cand["id"] != nxt["id"]:
+        job["fallbacks"][kind].append(cur_cand)
 
     tag = _tag(job, kind)
-    other = "audio" if kind == "video" else "video"
-    other_torrents = await _qbit.info_by_tag(_tag(job, other))
-    shared = bool(other_torrents) and other_torrents[0].get("hash") == current.get("hash")
-
-    await _qbit.remove_tag(current["hash"], tag)
-    if not shared:
-        await _qbit.delete(current["hash"], delete_files=True)
+    if current:
+        # se o mesmo torrent serve para os dois papéis (dual audio), só tira a tag
+        other = "audio" if kind == "video" else "video"
+        shared = False
+        if other in _needed_torrents(job):
+            other_torrents = await _qbit.info_by_tag(_tag(job, other))
+            shared = bool(other_torrents) and other_torrents[0].get("hash") == current.get("hash")
+        await _qbit.remove_tag(current["hash"], tag)
+        if not shared:
+            await _qbit.delete(current["hash"], delete_files=True)
     save_path = job.get("torrent_save_path") or config.QBIT_SAVE_PATH or None
     await _qbit.add(nxt.get("magnet") or nxt["link"], tag, save_path)
 
     job[f"{kind}_torrent"] = {"title": nxt["title"], "seeders": nxt["seeders"],
                               "size": nxt["size"], "score": nxt["score"],
                               "edition": nxt["edition"]}
-    _event(job, "qbit",
-           f"⏳ Download de {kind} travado há {config.STALL_TIMEOUT_MINUTES} min — "
-           f"trocado por: {nxt['title']} ({nxt['seeders']} seeds)")
-    return True
+    if not job.get("current"):
+        job["current"] = {}
+    job["current"][kind] = nxt
+    _event(job, "qbit", f"{reason}: {nxt['title']} ({nxt['seeders']} seeds)")
 
 
 def _map_qbit_path(job: dict, path: str) -> Path:
@@ -572,10 +731,10 @@ def _find_video_file(job: dict, content_path: str) -> Path:
     return max(files, key=lambda f: f.stat().st_size)
 
 
-async def _deliver_single(job: dict, paths: dict):
+async def _deliver_single(job: dict, files: dict):
     """Job de um torrent só: entrega o arquivo direto no destino, sem merge."""
-    kind = "video" if "video" in paths else "audio"
-    src_file = _find_video_file(job, paths[kind])
+    kind = "video" if "video" in files else "audio"
+    src_file = files[kind]
     _event(job, "info", f"Arquivo baixado: {src_file}")
 
     movie = job["movie"]
@@ -598,9 +757,7 @@ async def _deliver_single(job: dict, paths: dict):
     await _cleanup_torrents(job)
 
 
-async def _merge(job: dict, video_content: str, audio_content: str):
-    video_file = _find_video_file(job, video_content)
-    audio_file = _find_video_file(job, audio_content)
+async def _merge(job: dict, video_file: Path, audio_file: Path):
     _event(job, "merge", f"Arquivo de vídeo: {video_file}")
     _event(job, "merge", f"Arquivo de áudio: {audio_file}")
 

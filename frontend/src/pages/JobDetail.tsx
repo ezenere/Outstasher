@@ -13,6 +13,9 @@ export default function JobDetail() {
   const [selAudio, setSelAudio] = useState<string | undefined>()
   const [selVideo, setSelVideo] = useState<string | undefined>()
   const [submitting, setSubmitting] = useState(false)
+  // troca de torrent durante o download: qual lista está aberta + trava anti-duplo-clique
+  const [pickKind, setPickKind] = useState<'video' | 'audio' | null>(null)
+  const [switching, setSwitching] = useState(false)
   const navigate = useNavigate()
 
   const reload = useCallback(async () => {
@@ -76,6 +79,68 @@ export default function JobDetail() {
     } finally {
       setSubmitting(false)
     }
+  }
+
+  // troca o torrent em andamento: sem candidateId = "Tentar próximo" (reserva)
+  async function trySwitch(kind: 'video' | 'audio', candidateId?: string) {
+    if (!job || switching) return
+    const what = candidateId ? 'o torrent selecionado' : 'o próximo candidato reserva'
+    // em jobs de merge, avisa se o corte escolhido não bate com o do outro torrent
+    let warn = ''
+    if (candidateId && job.kind !== 'original' && job.kind !== 'dubbed') {
+      const cand = (kind === 'video' ? job.search?.video : job.search?.audio)?.find((c) => c.id === candidateId)
+      const other = kind === 'video' ? job.audio_torrent : job.video_torrent
+      if (cand && other && (cand.edition ?? null) !== (other.edition ?? null)) {
+        warn = `\n⚠ Corte diferente do outro torrent (${cand.edition ?? 'normal'} ≠ ${other.edition ?? 'normal'}) — os áudios podem NÃO alinhar.`
+      }
+    }
+    if (!confirm(`Trocar para ${what}?\nO download atual de ${kind === 'video' ? 'vídeo' : 'áudio'} será descartado.${warn}`)) return
+    setSwitching(true)
+    try {
+      await post(`/api/jobs/${job.id}/switch`, { kind, candidate_id: candidateId ?? null })
+      setPickKind(null)
+      void reload()
+    } catch (e) {
+      alert(`Erro: ${(e as Error).message}`)
+    } finally {
+      setSwitching(false)
+    }
+  }
+
+  // controles de troca exibidos sob a barra de progresso enquanto baixa
+  function switchControls(kind: 'video' | 'audio') {
+    if (job?.status !== 'downloading') return null
+    const list = kind === 'video' ? job.search?.video : job.search?.audio
+    return (
+      <div className="mt-1.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => trySwitch(kind)}
+            disabled={switching}
+            title="Descarta o download atual e troca pelo próximo candidato reserva"
+            className="rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+          >
+            ⏭ Tentar próximo
+          </button>
+          {(list?.length ?? 0) > 0 && (
+            <button
+              onClick={() => setPickKind(pickKind === kind ? null : kind)}
+              className="rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+            >
+              {pickKind === kind ? 'Fechar lista' : 'Escolher outro torrent…'}
+            </button>
+          )}
+        </div>
+        {pickKind === kind && list && (
+          <div className="mt-2">
+            <div className="mb-1 text-xs text-zinc-500">
+              Clique em um torrent para trocar imediatamente:
+            </div>
+            <CandidatesTable candidates={list} selectable onSelect={(cid) => trySwitch(kind, cid)} />
+          </div>
+        )}
+      </div>
+    )
   }
 
   return (
@@ -149,12 +214,14 @@ export default function JobDetail() {
             <>
               {pv.name && <div className="truncate text-xs text-zinc-500">{pv.name}</div>}
               <ProgressBar label="Vídeo" p={pv} />
+              {switchControls('video')}
             </>
           )}
           {pa && (
             <div className="mt-3">
               {pa.name && <div className="truncate text-xs text-zinc-500">{pa.name}</div>}
               <ProgressBar label="Áudio" p={pa} />
+              {switchControls('audio')}
             </div>
           )}
         </section>

@@ -356,7 +356,19 @@ def _link_or_copy(src: Path, dst: Path, notes: list[str]):
         return
     except OSError as e:
         notes.append(f"hardlink falhou ({e}); copiando arquivo")
-    shutil.copy2(src, dst)
+    try:
+        shutil.copy2(src, dst)
+    except OSError as e:
+        # shutil.copy2 usa os.sendfile/copy_file_range no Linux, que falham com
+        # EINVAL em alguns filesystems (drvfs/9p do WSL em /mnt/*, SMB...).
+        # Refaz a cópia em blocos com read/write puro, que funciona em qualquer FS.
+        notes.append(f"cópia rápida falhou ({e}); copiando em modo compatível")
+        with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+            shutil.copyfileobj(fsrc, fdst, length=16 * 1024 * 1024)
+        try:
+            shutil.copystat(src, dst)
+        except OSError:
+            pass  # metadados (mtime/permissões) são melhor-esforço
     notes.append(f"cópia criada: {dst}")
 
 

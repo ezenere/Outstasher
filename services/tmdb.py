@@ -40,14 +40,24 @@ def _slim(movie: dict) -> dict:
     }
 
 
-async def popular(page: int = 1) -> list[dict]:
+def _page(data: dict) -> dict:
+    """Empacota resultados + metadados de paginação do TMDB."""
+    return {
+        "results": [_slim(m) for m in data.get("results", [])],
+        "page": data.get("page", 1),
+        "total_pages": data.get("total_pages", 1),
+        "total_results": data.get("total_results", 0),
+    }
+
+
+async def popular(page: int = 1) -> dict:
     data = await _get("/movie/popular", {"page": page, "language": "pt-BR"})
-    return [_slim(m) for m in data.get("results", [])]
+    return _page(data)
 
 
-async def search(query: str, page: int = 1) -> list[dict]:
+async def search(query: str, page: int = 1) -> dict:
     data = await _get("/search/movie", {"query": query, "page": page, "language": "pt-BR"})
-    return [_slim(m) for m in data.get("results", [])]
+    return _page(data)
 
 
 async def match(title: str, year: str | None = None) -> dict | None:
