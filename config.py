@@ -60,7 +60,15 @@ STALL_TIMEOUT_MINUTES = int(os.getenv("STALL_TIMEOUT_MINUTES", "15") or "15")
 # O que fazer com os torrents apos o merge: keep | remove | remove_data
 QBIT_CLEANUP = (os.getenv("QBIT_CLEANUP", "keep").strip() or "keep").lower()
 
-POLL_INTERVAL_SECONDS = 15
+# quão rápido o watchdog consulta o qBittorrent (atualiza o progresso em
+# memória; a UI faz polling nesse mesmo ritmo)
+POLL_INTERVAL_SECONDS = 1.5
+# de quanto em quanto tempo o progresso é PERSISTIDO no banco. Consultar o
+# qBittorrent é barato, mas gravar no SQLite a cada 1.5s é desperdício — o
+# progresso é só um número que a UI já lê do backend em memória. Eventos reais
+# (download concluído, troca de torrent, warning...) persistem na hora via
+# _event; aqui é só o "mero progresso" que fica throttled.
+PROGRESS_PERSIST_SECONDS = 60
 
 # Idiomas suportados para a faixa dublada.
 # tmdb: codigo de idioma usado para buscar o titulo traduzido no TMDB.

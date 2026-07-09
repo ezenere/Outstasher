@@ -668,6 +668,11 @@ async def _wait_downloads(job: dict) -> dict:
     missing = {k: {"since": None} for k in needed}
     METADATA_GRACE = max(config.STALL_TIMEOUT_MINUTES, 5) * 60
     conn_lost = False
+    # o progresso muda a cada consulta, mas persistir a cada ciclo (1.5s) é
+    # desperdício: gravamos o "mero progresso" no máximo 1x por PROGRESS_PERSIST_
+    # SECONDS. Eventos reais (concluído, troca, warning...) já persistem sozinhos
+    # via _event, então nunca dependem deste relógio.
+    last_persist = 0.0
     while len(paths) < len(needed):
         try:
             for kind in needed:
@@ -737,7 +742,11 @@ async def _wait_downloads(job: dict) -> dict:
                                f"{limit_min} min e sem candidato reserva — "
                                f"continuando a esperar (cancele o job se quiser desistir)")
                         st["warned"] = True
-            store.upsert_job(job)
+            # persiste o progresso no banco só de tempos em tempos (eventos
+            # reais já persistiram na hora, via _event)
+            if time.monotonic() - last_persist >= config.PROGRESS_PERSIST_SECONDS:
+                store.upsert_job(job)
+                last_persist = time.monotonic()
         except _CONN_ERRORS as e:
             # qBittorrent fora do ar / rede caiu: avisa uma vez e segue tentando
             if not conn_lost:

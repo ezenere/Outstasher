@@ -30,7 +30,7 @@ export default function JobDetail() {
 
   useEffect(() => {
     void reload()
-    const t = setInterval(reload, 2000)
+    const t = setInterval(reload, 1500)
     return () => clearInterval(t)
   }, [reload])
 
