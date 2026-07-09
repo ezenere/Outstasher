@@ -154,6 +154,58 @@ def matches_title(title: str, movie_title: str) -> bool:
     return _matches_movie(title, movie_title, "")
 
 
+def title_variants(title: str, include_and: bool = True) -> list[str]:
+    """Variantes de grafia de caracteres especiais para buscas adicionais.
+
+    Trackers grafam o mesmo filme de formas diferentes: "Velozes & Furiosos"
+    vs "Velozes e Furiosos", "M*A*S*H" vs "MASH", "WALL·E" vs "WALL-E".
+    Gera as variações trocando/removendo esses caracteres. Retorna só as
+    variantes DIFERENTES do título original, sem duplicatas.
+
+    include_and: se o "&" também vira "and". Ligado só para o título ORIGINAL
+    (inglês); num título localizado em português "and" é ruído — usa-se "e".
+    """
+    if not title:
+        return []
+    base = title
+
+    def apply(text: str, repls: list[tuple[str, str]]) -> str:
+        for a, b in repls:
+            text = text.replace(a, b)
+        return re.sub(r"\s{2,}", " ", text).strip()
+
+    # grafias possíveis do "&": "e" (pt), "and" (só no título original), removido.
+    # Só convertemos "&" -> texto (não o inverso): o TMDB é canônico, então se
+    # ele traz "e"/"and" é porque o nome é assim — forçar "&" só traria outro
+    # filme que genuinamente usa "&".
+    amp_options = [" e ", " "] + ([" and "] if include_and else [])
+    variants: list[str] = []
+    if "&" in base:
+        for opt in amp_options:
+            variants.append(apply(base, [("&", opt)]))
+
+    # outros caracteres que os trackers costumam remover/normalizar
+    misc = apply(base, [("@", "a"), ("+", " "), ("·", " "), ("*", " "),
+                        ("’", "'"), ("“", ""), ("”", "")])
+    if misc != base:
+        variants.append(misc)
+    # versão totalmente sem pontuação especial (mantém letras/números/espaço)
+    stripped = re.sub(r"[^\w\s]", " ", base)
+    stripped = re.sub(r"\s{2,}", " ", stripped).strip()
+    if stripped:
+        variants.append(stripped)
+
+    # dedup preservando ordem, removendo o próprio título
+    seen = {base.lower()}
+    out = []
+    for v in variants:
+        vl = v.lower()
+        if v and vl not in seen:
+            seen.add(vl)
+            out.append(v)
+    return out
+
+
 # Bônus (modo audio) para marcador forte: dublagem confirmada no idioma vence
 # "dual"/"multi" genérico mesmo com release de qualidade um pouco menor.
 STRONG_MARKER_BONUS = 25

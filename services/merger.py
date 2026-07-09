@@ -5,6 +5,10 @@
   cria um hardlink no destino (fallback: copia — nunca symlink)
 - escolhe o melhor AUDIO por LINGUA entre os 2 arquivos
 - inclui LEGENDAS apenas nas linguas em que ha audio
+- LIMPA os titulos das faixas: descarta ruido de release (codec, canais,
+  grupo, resolucao — o Plex/Jellyfin ja mostram isso do stream) e so mantem
+  o que os metadados nao expressam: comentario, audiodescricao, SDH, forcada,
+  ou o titulo enxuto quando o idioma e desconhecido
 - copia CAPITULOS do arquivo de melhor video (ou do outro, se so ele tiver)
 - mede o OFFSET entre os arquivos via correlacao GCC-PHAT (2 janelas)
 - offset CONSTANTE (janelas concordam — o caso comum): aplica o sync no
@@ -150,6 +154,77 @@ def is_forced(s: dict) -> bool:
 
 def is_default(s: dict) -> bool:
     return (s.get("disposition") or {}).get("default") == 1
+
+
+# -------------------- titulo limpo da faixa --------------------
+
+# Coisas que o Plex/Jellyfin JA derivam do proprio stream (codec, canais,
+# layout, resolucao, HDR, idioma) — nao precisam virar titulo. Tudo isso e
+# "ruido" de nome de release e e descartado. So mantemos o que os metadados
+# NAO expressam: comentarios, audiodescricao, SDH, "dublado"/"legendado", etc.
+
+# padroes que, se aparecerem no titulo original, indicam algo RELEVANTE de manter
+_MEANINGFUL_TITLE_PATTERNS = [
+    (re.compile(r"\bcomment", re.I), "Comentários"),
+    (re.compile(r"coment[aá]rio", re.I), "Comentários"),
+    (re.compile(r"\bdescri|audio\s*descri|\bAD\b|described|narrat", re.I), "Audiodescrição"),
+    (re.compile(r"\bSDH\b|hearing.?impaired|surdos|deficient", re.I), "SDH"),
+    (re.compile(r"\bforced\b|foun?[çc]ad|forçad", re.I), "Forçada"),
+    (re.compile(r"\bkaraoke\b|\bsign[s]?\b|letreir", re.I), "Sinais/Letreiros"),
+]
+
+
+def clean_stream_title(stream: dict, lang: str, from_disposition_forced: bool = False) -> str | None:
+    """Devolve um titulo LIMPO para a faixa, ou None para deixar sem titulo.
+
+    - Descarta ruido de release (codec, canais, grupo, resolucao...).
+    - Mantem so o que os metadados nao expressam: comentario, audiodescricao,
+      SDH, forcada, sinais/letreiros.
+    - Se o idioma for desconhecido (und), preserva o titulo original enxuto como
+      unica pista de idioma (mas ainda sem as tags tecnicas).
+    """
+    raw = (tags_of(stream).get("title") or "").strip()
+
+    tags_found = []
+    for pattern, label in _MEANINGFUL_TITLE_PATTERNS:
+        if pattern.search(raw) and label not in tags_found:
+            tags_found.append(label)
+    # a disposition forced tambem conta como "Forçada", mesmo sem estar no texto
+    if from_disposition_forced and "Forçada" not in tags_found:
+        tags_found.append("Forçada")
+
+    if tags_found:
+        return " · ".join(tags_found)
+
+    # idioma desconhecido: mantem o titulo original, mas so se ele parecer
+    # informativo (algo alfabetico), removido de tokens claramente tecnicos
+    if lang in ("und", "unknown", "", None) and raw:
+        cleaned = _strip_technical_tokens(raw)
+        if cleaned:
+            return cleaned
+
+    return None
+
+
+# tokens puramente tecnicos (codec/canais/fonte/grupo) que nao viram titulo
+_TECH_TOKEN_RE = re.compile(
+    r"\b("
+    r"truehd|dts[\-\. ]?hd|dts[\-\. ]?x|dts|e?a?c[\-\. ]?3|eac3|ddp?\+?|dd\+|"
+    r"dolby|atmos|aac|flac|opus|mp3|pcm|lpcm|"
+    r"7\.1|5\.1|2\.0|stereo|mono|surround|"
+    r"1080p|2160p|720p|480p|4k|uhd|hdr10?\+?|dolby.?vision|dv|hevc|x26[45]|h\.?26[45]|"
+    r"bluray|blu-ray|bdrip|brrip|web-?dl|webrip|remux|hdtv|"
+    r"\d{3,4}kbps|\d+kbps|kbps|mkv|mp4"
+    r")\b", re.I)
+
+
+def _strip_technical_tokens(text: str) -> str:
+    """Remove tokens tecnicos e separadores, sobrando so texto informativo."""
+    out = _TECH_TOKEN_RE.sub(" ", text)
+    out = re.sub(r"[._\-\[\]\(\)]+", " ", out)
+    out = re.sub(r"\s{2,}", " ", out).strip(" -·")
+    # se sobrou so lixo curto (uma sigla solta, um numero), nao vale a pena
+    return out if len(out) >= 3 and re.search(r"[a-zA-ZÀ-ÿ]{3}", out) else ""
 
 
 # -------------------- heuristicas de "melhor" --------------------
@@ -626,9 +701,10 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
         else:
             cmd += ["-map", f"0:a:{item['a_idx']}"]
         cmd += [f"-metadata:s:a:{out_i}", f"language={item['lang']}"]
-        title = (tags_of(s).get("title") or "").strip()
-        if title:
-            cmd += [f"-metadata:s:a:{out_i}", f"title={title}"]
+        # limpa o titulo: fora ruido de release; so mantem comentario/AD/und etc.
+        # sempre sobrescreve (inclusive vazio) para nao herdar o titulo antigo.
+        title = clean_stream_title(s, item["lang"]) or ""
+        cmd += [f"-metadata:s:a:{out_i}", f"title={title}"]
         if default_audio_out is None and target_iso and item["lang"] == target_iso:
             default_audio_out = out_i
     if default_audio_out is None:
@@ -641,7 +717,11 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
         cmd += ["-map", f"{src_cmd}:s:{int(s['_type_index'])}"]
         if sub_needs_reencode_to_mkv(s.get("codec_name")):
             cmd += [f"-c:s:{out_s}", "subrip"]
-        cmd += [f"-metadata:s:s:{out_s}", f"language={canonical_lang(raw_lang_of(s))}"]
+        sub_lang = canonical_lang(raw_lang_of(s))
+        cmd += [f"-metadata:s:s:{out_s}", f"language={sub_lang}"]
+        # mesmo tratamento das legendas: só título relevante (SDH/forçada/und)
+        sub_title = clean_stream_title(s, sub_lang, from_disposition_forced=is_forced(s)) or ""
+        cmd += [f"-metadata:s:s:{out_s}", f"title={sub_title}"]
 
     cmd += ["-map_chapters", "-1" if chapters_src is None else str(0 if chapters_src == ref_input else 1)]
     cmd += ["-map_metadata", "0",

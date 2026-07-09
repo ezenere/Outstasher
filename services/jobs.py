@@ -388,17 +388,35 @@ async def _search(job: dict):
     query_original = f"{original} {year}".strip()
     has_localized = bool(localized and localized.lower() != (original or "").lower())
     query_localized = f"{localized} {year}".strip() if has_localized else None
+
+    # variantes de caracteres especiais (& vs "e", @ vs a, ...): SÓ para o título
+    # localizado (dublado), onde os trackers BR bagunçam a grafia. O título
+    # original fica como o TMDB dá (buscar "Fast e Furious" não faz sentido).
+    # include_and=False: em português "and" seria ruído.
+    loc_variants = ([f"{v} {year}".strip()
+                     for v in selector.title_variants(localized or "", include_and=False)]
+                    if has_localized and want_audio else [])
+
     _set(job, "searching",
          f"Procurando '{query_original}' no Jackett (pode levar vários minutos)...")
     if extra_specs:
         _event(job, "search",
                f"{len(extra_specs)} busca(s) extra(s) configurada(s) para {label} "
                f"— rodando em paralelo")
+    if loc_variants:
+        _event(job, "search",
+               f"Variantes de grafia do título em {label} — buscando também: "
+               f"{', '.join(repr(v) for v in loc_variants)}")
 
-    # dispara TODAS as buscas em paralelo (all + localized + extras direcionadas)
+    # dispara TODAS as buscas em paralelo. Guardamos os índices de cada grupo
+    # para separar os resultados depois.
     tasks = [jackett.search(query_original)]
     if query_localized:
         tasks.append(jackett.search(query_localized))
+    i_loc_var = len(tasks)
+    for q in loc_variants:
+        tasks.append(jackett.search(q))
+    i_extra = len(tasks)
     for spec in extra_specs:
         tasks.append(_run_extra_search(job, spec))
     all_results = await asyncio.gather(*tasks)
@@ -410,16 +428,21 @@ async def _search(job: dict):
     if query_localized:
         results_localized = all_results[idx]
         idx += 1
-    extra_results = all_results[idx:]  # já logados dentro de _run_extra_search
+    loc_variant_results = all_results[i_loc_var:i_extra]
+    extra_results = all_results[i_extra:]  # já logados dentro de _run_extra_search
+    for q, r in zip(loc_variants, loc_variant_results):
+        _event(job, "search", f"Variante '{q}' → {len(r)} resultados")
 
     # ---- audio dublado: titulo traduzido + titulo original com marcador ----
     audio_viable = []
     if want_audio:
         _set(job, "searching", f"Avaliando versão em {label}...")
         audio_ranked = []
-        # resultados do título traduzido + das buscas extras entram como tier 0
-        # (título no idioma dublado tem preferência máxima)
+        # resultados do título traduzido + variantes de grafia + buscas extras
+        # entram como tier 0 (título no idioma dublado tem preferência máxima)
         localized_pool = list(results_localized)
+        for r in loc_variant_results:
+            localized_pool.extend(r)
         for r in extra_results:
             localized_pool.extend(r)
         if localized_pool:
