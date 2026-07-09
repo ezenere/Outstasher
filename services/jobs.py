@@ -157,6 +157,22 @@ def _movie_title(job: dict) -> str:
     return f"TMDB #{job.get('tmdb_id')}"
 
 
+def _download_pct(job: dict) -> float | None:
+    """Progresso do DOWNLOAD do job, 0-100, como média dos torrents que ele baixa.
+
+    Um job dublado baixa dois torrents (vídeo original + áudio dublado) e só
+    termina quando os DOIS chegam a 100%, então cada um vale 50%. Torrent ainda
+    sem leitura do qBittorrent conta como 0% — o denominador é o que o job
+    PRECISA baixar, não o que já reportou (senão o vídeo sozinho em 40% viraria
+    "40% do job", e a barra andaria para trás quando o áudio aparecesse).
+    """
+    needed = _needed_torrents(job)
+    read = [_pct(job["progress"].get(k)) for k in needed]
+    if not any(p is not None for p in read):
+        return None  # nenhum torrent reportou ainda (searching/awaiting): sem barra
+    return sum(p or 0.0 for p in read) / len(read)
+
+
 def summary() -> list[dict]:
     """Lista mínima de processos EM ANDAMENTO + erros, para o dropdown do
     cabeçalho. Só o essencial para o item da lista (sem candidatos/eventos)."""
@@ -165,8 +181,8 @@ def summary() -> list[dict]:
         state = _STATE_OF.get(j["status"])
         if state in (None, "done"):  # dropdown ignora concluídos e cancelados
             continue
-        pct = j["progress"].get("merge", {}).get("pct") if state == "converting" else (
-            _pct(j["progress"].get("video")) or _pct(j["progress"].get("audio")))
+        pct = ((j["progress"].get("merge") or {}).get("pct") if state == "converting"
+               else _download_pct(j))
         out.append({"id": j["id"], "tmdb_id": j.get("tmdb_id"),
                     "title": _movie_title(j), "status": j["status"],
                     "state": state, "pct": pct})
