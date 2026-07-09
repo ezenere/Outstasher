@@ -101,9 +101,16 @@ def _clean(text: str) -> str:
 
 
 def _fold(text: str) -> str:
-    """_clean + sem acentos, para comparar títulos ('Tóquio' == 'Toquio')."""
+    """_clean + sem acentos, para comparar títulos ('Tóquio' == 'Toquio').
+
+    O "_" vira espaço: para o Python ele é caractere de PALAVRA, então `\\W+`
+    não separa por ele e 'Ex_Machina' (grafia que o TMDB usa) viraria um token
+    único que nenhum torrent contém. Trackers e TMDB trocam "_", "." e "-" por
+    espaço livremente — aqui todos viram separador.
+    """
     nfkd = unicodedata.normalize("NFKD", _clean(text))
-    return "".join(c for c in nfkd if not unicodedata.combining(c))
+    stripped = "".join(c for c in nfkd if not unicodedata.combining(c))
+    return stripped.replace("_", " ")
 
 
 # sequências de franquia: TMDB costuma usar romano ("De Volta para o Futuro II")
