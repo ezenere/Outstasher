@@ -61,10 +61,11 @@ STALL_TIMEOUT_MINUTES = int(os.getenv("STALL_TIMEOUT_MINUTES", "15") or "15")
 QBIT_CLEANUP = (os.getenv("QBIT_CLEANUP", "keep").strip() or "keep").lower()
 
 # quão rápido o watchdog consulta o qBittorrent (atualiza o progresso em
-# memória; a UI faz polling nesse mesmo ritmo)
-POLL_INTERVAL_SECONDS = 1.5
+# memória). Fica abaixo do tick de 1s do detalhe do job na UI, para a barra
+# sempre ler um valor fresco.
+POLL_INTERVAL_SECONDS = 0.9
 # de quanto em quanto tempo o progresso é PERSISTIDO no banco. Consultar o
-# qBittorrent é barato, mas gravar no SQLite a cada 1.5s é desperdício — o
+# qBittorrent é barato, mas gravar no SQLite a cada tick é desperdício — o
 # progresso é só um número que a UI já lê do backend em memória. Eventos reais
 # (download concluído, troca de torrent, warning...) persistem na hora via
 # _event; aqui é só o "mero progresso" que fica throttled.
