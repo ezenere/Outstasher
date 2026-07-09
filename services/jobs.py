@@ -316,41 +316,48 @@ def _slim(cand: dict, cid: str) -> dict:
             "magnet": cand.get("magnet"), "link": cand.get("link")}
 
 
-def _extra_searches(localized: str, year: str, lang: str) -> list[dict]:
+def _extra_searches(spellings: list[str], year: str, lang: str) -> list[dict]:
     """Buscas extras direcionadas conforme as regras (idioma x variante x indexers).
 
-    Cada variante só entra se produzir uma query DIFERENTE da localized normal e
-    se houver indexers configurados para ela no idioma. Retorna uma lista de
-    {query, indexer, variant} — uma entrada por indexer.
+    Cruza cada GRAFIA do título localizado (o título base + as variantes de
+    caractere especial de title_variants: "&"->"e", pontuação removida...) com
+    cada REGRA ESPECIAL (tirar o ano, romano->arábico). Ou seja, para cada
+    grafia geramos também a versão sem ano e a versão com o numeral em arábico,
+    combinando as duas coisas (ex.: "Velozes e Furiosos IX" -> "Velozes e
+    Furiosos 9", "Velozes Furiosos 9" sem ano, etc.).
+
+    Cada combinação só entra se produzir uma query DIFERENTE das buscas normais
+    (as grafias já buscadas com ano) e se houver indexers configurados para
+    aquela regra no idioma. Retorna uma lista de {query, indexer, variant} —
+    uma entrada por indexer.
     """
     rules = store.get_extra_search_rules().get(lang) or {}
-    if not localized or not rules:
+    if not spellings or not rules:
         return []
 
-    base = f"{localized} {year}".strip()
-    arabic = selector._roman_to_arabic(localized)
-    has_roman = selector.has_roman_numeral(localized)
-
-    # cada variante -> a query que ela gera (ou None se não se aplica ao título)
-    variant_query = {
-        "no_year": localized if year else None,
-        "roman": f"{arabic} {year}".strip() if has_roman else None,
-        "roman_no_year": arabic if (has_roman and year) else None,
-    }
-
     out: list[dict] = []
-    seen_queries = {base.lower()}
-    for variant, query in variant_query.items():
-        if not query:
-            continue
-        indexers = rules.get(variant) or []
-        if not indexers:
-            continue
-        if query.lower() in seen_queries:
-            continue  # não repete uma query que outra variante já cobriu
-        seen_queries.add(query.lower())
-        for idx in indexers:
-            out.append({"query": query, "indexer": idx, "variant": variant})
+    # as grafias já são buscadas COM ano nas buscas normais — não repetir
+    seen_queries = {f"{s} {year}".strip().lower() for s in spellings}
+    for spelling in spellings:
+        arabic = selector._roman_to_arabic(spelling)
+        has_roman = arabic != spelling
+        # cada regra -> a query que ela gera para ESTA grafia (ou None se n/a)
+        variant_query = {
+            "no_year": spelling if year else None,
+            "roman": f"{arabic} {year}".strip() if has_roman else None,
+            "roman_no_year": arabic if (has_roman and year) else None,
+        }
+        for variant, query in variant_query.items():
+            if not query:
+                continue
+            indexers = rules.get(variant) or []
+            if not indexers:
+                continue
+            if query.lower() in seen_queries:
+                continue  # não repete uma query que outra combinação já cobriu
+            seen_queries.add(query.lower())
+            for idx in indexers:
+                out.append({"query": query, "indexer": idx, "variant": variant})
     return out
 
 
@@ -382,20 +389,23 @@ async def _search(job: dict):
     want_video = "video" in needed
     want_audio = "audio" in needed
 
-    # buscas extras direcionadas (só afetam o áudio dublado): rodam em paralelo
-    extra_specs = _extra_searches(localized, year, lang) if want_audio else []
-
     query_original = f"{original} {year}".strip()
     has_localized = bool(localized and localized.lower() != (original or "").lower())
     query_localized = f"{localized} {year}".strip() if has_localized else None
 
-    # variantes de caracteres especiais (& vs "e", @ vs a, ...): SÓ para o título
-    # localizado (dublado), onde os trackers BR bagunçam a grafia. O título
-    # original fica como o TMDB dá (buscar "Fast e Furious" não faz sentido).
-    # include_and=False: em português "and" seria ruído.
-    loc_variants = ([f"{v} {year}".strip()
-                     for v in selector.title_variants(localized or "", include_and=False)]
-                    if has_localized and want_audio else [])
+    # grafias do título localizado: o próprio + variantes de caractere especial
+    # (& vs "e", @ vs a, ...). SÓ para o localizado (dublado), onde os trackers
+    # BR bagunçam a grafia. O original fica como o TMDB dá (buscar "Fast e
+    # Furious" não faz sentido). include_and=False: em português "and" é ruído.
+    loc_spellings = ([localized] + selector.title_variants(localized, include_and=False)
+                     if has_localized and want_audio else [])
+    # as variantes (sem o título base, que já vira query_localized) buscadas com ano
+    loc_variants = [f"{v} {year}".strip() for v in loc_spellings[1:]]
+
+    # buscas extras direcionadas (só afetam o áudio dublado): cruzam CADA grafia
+    # acima com as regras especiais (tirar ano, romano->arábico) e rodam em
+    # paralelo por indexer configurado.
+    extra_specs = _extra_searches(loc_spellings, year, lang) if want_audio else []
 
     _set(job, "searching",
          f"Procurando '{query_original}' no Jackett (pode levar vários minutos)...")
