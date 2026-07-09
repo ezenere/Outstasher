@@ -211,19 +211,29 @@ def title_variants(title: str, include_and: bool = True) -> list[str]:
 STRONG_MARKER_BONUS = 25
 
 
-def marker_strength(title: str, language: str) -> int:
-    """2 = marcador forte (dublagem confirmada), 1 = fraco ('dual'...), 0 = nenhum."""
+def marker_strength(title: str, language: str, dubbed_title: str | None = None) -> int:
+    """2 = marcador forte (dublagem confirmada), 1 = fraco ('dual'...), 0 = nenhum.
+
+    dubbed_title: título do filme no idioma dublado, passado SÓ quando difere do
+    original (senão não distingue nada). Se o release traz esse título junto de
+    um marcador fraco ('dual'), promovemos a FORTE: título localizado + dual é
+    indício forte de que a 2ª faixa é a dublagem no idioma alvo (um "dual"
+    solto seria ambíguo — Hindi+English etc.).
+    """
     t = " " + _clean(title) + " "
     info = config.LANGUAGES[language]
     if any(m in t for m in info["markers_strong"]):
         return 2
     if any(m in t for m in info["markers_weak"]):
+        # título dublado (≠ original) + dual => dublagem no idioma alvo confirmada
+        if dubbed_title and matches_title(title, dubbed_title):
+            return 2
         return 1
     return 0
 
 
-def has_language_marker(title: str, language: str) -> bool:
-    return marker_strength(title, language) > 0
+def has_language_marker(title: str, language: str, dubbed_title: str | None = None) -> bool:
+    return marker_strength(title, language, dubbed_title) > 0
 
 
 # marcadores de legenda como PALAVRA inteira (\b) — "leg"/"ost" nao podem casar
@@ -242,18 +252,19 @@ def _subs_re() -> "re.Pattern":
     return _subs_cache[1]
 
 
-def is_subs_only(title: str, language: str) -> bool:
+def is_subs_only(title: str, language: str, dubbed_title: str | None = None) -> bool:
     """True se o título indica LEGENDA sem nenhuma indicação de dublagem/dual.
 
     Nesse caso o vídeo tem áudio ORIGINAL (só legendado) e não serve como faixa
     dublada — mesmo que o título esteja no idioma alvo.
     """
-    if has_language_marker(title, language):
+    if has_language_marker(title, language, dubbed_title):
         return False  # tem dublado/dual: legenda junto não desqualifica
     return bool(_subs_re().search(_fold(title)))
 
 
-def score(result: dict, mode: str, language: str | None = None) -> float:
+def score(result: dict, mode: str, language: str | None = None,
+          dubbed_title: str | None = None) -> float:
     t = " " + _clean(result["title"]) + " "
     s = _seeders_score(result["seeders"])
     s += _keyword_score(t, SOURCE_SCORES)
@@ -263,7 +274,7 @@ def score(result: dict, mode: str, language: str | None = None) -> float:
     else:  # audio
         s += _keyword_score(t, AUDIO_SCORES) * 2
         s += _keyword_score(t, RESOLUTION_SCORES) * 0.5
-        if language and marker_strength(result["title"], language) == 2:
+        if language and marker_strength(result["title"], language, dubbed_title) == 2:
             s += STRONG_MARKER_BONUS
     return s
 
@@ -271,13 +282,16 @@ def score(result: dict, mode: str, language: str | None = None) -> float:
 def rank(results: list[dict], mode: str, movie_title: str, year: str,
          language: str | None = None,
          require_language: bool = False,
-         required_edition: str | None = ANY_EDITION) -> tuple[list[dict], list[dict]]:
+         required_edition: str | None = ANY_EDITION,
+         dubbed_title: str | None = None) -> tuple[list[dict], list[dict]]:
     """Retorna (viáveis ordenados por score desc, trace de todos os avaliados).
 
     Cada viável é o resultado completo (magnet/link) + score + edition.
     required_edition: ANY_EDITION libera qualquer corte; None exige corte normal;
     uma string ("extended", ...) exige aquele corte — para as duas versões
     baixadas serem do MESMO corte e os áudios alinharem.
+    dubbed_title: título no idioma dublado (passar só se ≠ do original) — junto
+    de 'dual' vira marcador forte (ver marker_strength).
     """
     pairs: list[tuple[dict, dict]] = []
     for r in results:
@@ -296,9 +310,9 @@ def rank(results: list[dict], mode: str, movie_title: str, year: str,
             cand["rejected"] = "sem magnet/link"
         elif not _matches_movie(r["title"], movie_title, year):
             cand["rejected"] = "título não bate"
-        elif require_language and language and not has_language_marker(r["title"], language):
+        elif require_language and language and not has_language_marker(r["title"], language, dubbed_title):
             cand["rejected"] = f"sem marcador de idioma ({config.LANGUAGES[language]['label']})"
-        elif mode == "audio" and language and is_subs_only(r["title"], language):
+        elif mode == "audio" and language and is_subs_only(r["title"], language, dubbed_title):
             cand["rejected"] = "só legendado (áudio original, sem dublagem)"
         elif required_edition != ANY_EDITION and edition != required_edition:
             cand["rejected"] = (f"corte diferente da outra versão "
@@ -306,7 +320,7 @@ def rank(results: list[dict], mode: str, movie_title: str, year: str,
         elif r["seeders"] <= 0:
             cand["rejected"] = "sem seeders"
         else:
-            s = score(r, mode, language)
+            s = score(r, mode, language, dubbed_title)
             cand["score"] = round(s, 1)
             if s <= -30:
                 cand["rejected"] = "qualidade muito baixa (CAM/TS)"

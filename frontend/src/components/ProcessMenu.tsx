@@ -1,40 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { NavArrowDown } from 'iconoir-react'
-import { api, MOVIE_STATE_LABEL, prog, type Job, type MovieState } from '../api'
+import { MOVIE_STATE_LABEL, type JobSummary, type MovieState } from '../api'
 import { MovieStateIcon } from './ui'
-import { jobTitle } from '../pages/Jobs'
-
-// mapeia o status do job para o estado visual (mesma paleta do card de filme).
-// só considera o que está "em andamento" — done/cancelled ficam de fora do menu.
-function jobToState(status: string): MovieState | null {
-  if (status === 'merging') return 'converting'
-  if (status === 'downloading') return 'downloading'
-  if (status === 'searching') return 'searching'
-  if (status === 'awaiting') return 'awaiting'
-  if (status === 'error') return 'error'
-  return null
-}
 
 /** Dropdown de processos em andamento no cabeçalho + bolinha de pendência.
- *  onPending informa ao App se algum job manual aguarda resposta (bolinha na aba). */
-export default function ProcessMenu({ onPending }: { onPending?: (has: boolean) => void }) {
-  const [jobs, setJobs] = useState<Job[]>([])
+ *  O App é a fonte do summary (polling de 5s) e passa `items` aqui; este
+ *  componente só renderiza. onPending informa ao App se algum job manual
+ *  aguarda resposta (bolinha na aba). */
+export default function ProcessMenu({
+  items,
+  onPending,
+}: {
+  items: JobSummary[]
+  onPending?: (has: boolean) => void
+}) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    async function load() {
-      try {
-        setJobs(await api<Job[]>('/api/jobs'))
-      } catch {
-        /* servidor reiniciando; próxima tentativa no tick */
-      }
-    }
-    void load()
-    const t = setInterval(load, 4000)
-    return () => clearInterval(t)
-  }, [])
 
   // fecha ao clicar fora
   useEffect(() => {
@@ -46,12 +28,8 @@ export default function ProcessMenu({ onPending }: { onPending?: (has: boolean) 
     return () => document.removeEventListener('mousedown', onClick)
   }, [open])
 
-  // só os que estão "em andamento", com prioridade convertendo > baixando > aguardando > erro
-  const active = jobs
-    .map((j) => ({ j, state: jobToState(j.status) }))
-    .filter((x): x is { j: Job; state: MovieState } => x.state !== null)
-    .sort((a, b) => RANK[a.state] - RANK[b.state])
-
+  // o backend já devolve só o que interessa (em andamento + erro), ordenado
+  const active = items
   const pending = active.some((x) => x.state === 'awaiting')
 
   useEffect(() => {
@@ -81,44 +59,31 @@ export default function ProcessMenu({ onPending }: { onPending?: (has: boolean) 
             <div className="px-4 py-3 text-sm text-zinc-500">Nenhum processo em andamento.</div>
           ) : (
             <ul className="max-h-96 overflow-auto">
-              {active.map(({ j, state }) => {
-                const p = prog(j.progress?.video) ?? prog(j.progress?.audio)
-                const pct = state === 'converting' ? j.progress?.merge?.pct : p?.pct
-                return (
-                  <li key={j.id} className="border-b border-zinc-800/60 last:border-0">
-                    <Link
-                      to={`/jobs/${j.id}`}
-                      onClick={() => setOpen(false)}
-                      className="flex items-start gap-2 px-3 py-2.5 hover:bg-zinc-800/50"
-                    >
-                      <MovieStateIcon state={state} className="mt-0.5 shrink-0" />
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium text-zinc-200">{jobTitle(j)}</div>
-                        <div className="flex items-center gap-1.5 text-xs text-zinc-400">
-                          {MOVIE_STATE_LABEL[state]}
-                          {pct != null && <span className="tabular-nums">· {Math.round(pct)}%</span>}
-                          {state === 'awaiting' && (
-                            <span className="font-semibold text-red-400">· precisa de resposta</span>
-                          )}
-                        </div>
+              {active.map((j) => (
+                <li key={j.id} className="border-b border-zinc-800/60 last:border-0">
+                  <Link
+                    to={`/jobs/${j.id}`}
+                    onClick={() => setOpen(false)}
+                    className="flex items-start gap-2 px-3 py-2.5 hover:bg-zinc-800/50"
+                  >
+                    <MovieStateIcon state={j.state as MovieState} className="mt-0.5 shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium text-zinc-200">{j.title}</div>
+                      <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+                        {MOVIE_STATE_LABEL[j.state as MovieState]}
+                        {j.pct != null && <span className="tabular-nums">· {Math.round(j.pct)}%</span>}
+                        {j.state === 'awaiting' && (
+                          <span className="font-semibold text-red-400">· precisa de resposta</span>
+                        )}
                       </div>
-                    </Link>
-                  </li>
-                )
-              })}
+                    </div>
+                  </Link>
+                </li>
+              ))}
             </ul>
           )}
         </div>
       )}
     </div>
   )
-}
-
-const RANK: Record<MovieState, number> = {
-  converting: 0,
-  downloading: 1,
-  searching: 2,
-  awaiting: 3,
-  done: 4,
-  error: 5,
 }

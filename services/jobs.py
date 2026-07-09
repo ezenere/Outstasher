@@ -20,6 +20,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote_plus
 
 import httpx
 
@@ -35,6 +36,12 @@ VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m2ts", ".mov", ".wmv", ".mpg", ".m
 MAX_SELECTABLE = 60  # candidatos guardados por papel para selecao manual/fallback
 
 # estados: searching -> (awaiting ->) downloading -> merging -> done | error | cancelled
+# TERMINAL: já são só histórico (não precisam de acesso rápido). Ficam SÓ no
+# banco; não ocupam memória. ACTIVE: em andamento — precisam de polling de
+# progresso e ações rápidas, então vivem em _jobs (espelhados no banco).
+_TERMINAL_STATUSES = ("done", "error", "cancelled")
+_ACTIVE_STATUSES = ("searching", "awaiting", "downloading", "merging")
+# _jobs guarda APENAS os jobs ativos. Terminais são lidos do banco sob demanda.
 _jobs: dict[str, dict] = {}
 _tasks: dict[str, asyncio.Task] = {}
 _qbit = QbitClient()
@@ -51,9 +58,20 @@ def _get_merge_lock() -> asyncio.Lock:
     return _merge_lock
 
 
+def _spawn(job_id: str, coro):
+    """Cria a task do pipeline e garante que ela sai de _tasks ao terminar
+    (senão Tasks concluídas vazariam para sempre, como os jobs vazavam)."""
+    task = asyncio.create_task(coro)
+    _tasks[job_id] = task
+    task.add_done_callback(
+        lambda t: _tasks.pop(job_id, None) if _tasks.get(job_id) is t else None)
+    return task
+
+
 def load():
     store.init()
-    for job in store.load_jobs():
+    # só os ativos entram em memória; terminais ficam no banco (histórico)
+    for job in store.load_jobs_by_status(_ACTIVE_STATUSES):
         _jobs[job["id"]] = job
 
 
@@ -63,7 +81,7 @@ def resume_pending():
         if job["status"] in ("downloading", "merging"):
             job["status"] = "downloading"
             _event(job, "status", "Servidor reiniciado — retomando acompanhamento dos downloads")
-            _tasks[job["id"]] = asyncio.create_task(_run_from_download(job))
+            _spawn(job["id"], _run_from_download(job))
         elif job["status"] == "searching":
             _set(job, "error", "Servidor reiniciado durante a busca — use ↻ para tentar de novo")
         # awaiting: candidatos estao persistidos; segue esperando a escolha
@@ -73,18 +91,156 @@ def _public(job: dict) -> dict:
     return {k: v for k, v in job.items() if k not in ("events", "search")}
 
 
+def _lookup(job_id: str) -> dict | None:
+    """Job ativo (memória) ou terminal (banco). Para leitura/ações que também
+    valem em histórico (ver detalhe, retry, remover). O dict do banco é uma
+    cópia — mutar não afeta memória (correto: terminais são imutáveis)."""
+    return _jobs.get(job_id) or store.get_job(job_id)
+
+
 def list_jobs() -> list[dict]:
-    """Lista leve (sem eventos nem candidatos) para o polling da pagina."""
-    ordered = sorted(_jobs.values(), key=lambda j: j["created_at"], reverse=True)
+    """Lista leve (sem eventos nem candidatos) para o polling da pagina.
+
+    Junta os ativos (memória, com progresso ao vivo) com os terminais (banco,
+    histórico) e ordena por data de criação.
+    """
+    terminal = store.load_jobs_by_status(_TERMINAL_STATUSES)
+    combined = list(_jobs.values()) + terminal
+    ordered = sorted(combined, key=lambda j: j["created_at"], reverse=True)
     return [_public(j) for j in ordered]
 
 
 def get_job(job_id: str) -> dict | None:
-    """Job completo: eventos (para a lupa) + candidatos (para a escolha manual)."""
-    job = _jobs.get(job_id)
+    """Job completo: eventos (para a lupa) + candidatos (para a escolha manual).
+
+    Ativo vem da memória (progresso ao vivo); terminal vem do banco.
+    """
+    job = _lookup(job_id)
     if not job:
         return None
     return {**_public(job), "events": store.load_events(job_id), "search": job.get("search")}
+
+
+# -------------------- leituras enxutas (polling granular) --------------------
+# O frontend faz polling em ritmos diferentes por tela; cada rota traz SÓ o
+# mínimo que aquela tela renderiza, em vez da lista completa de jobs.
+
+def _pct(p) -> float | None:
+    """Extrai o percentual (0-100) de um valor de progresso (objeto ou número)."""
+    if p is None:
+        return None
+    if isinstance(p, (int, float)):
+        return float(p)
+    if isinstance(p, dict):
+        return p.get("pct")
+    return None
+
+
+# status -> estado visual do filme/processo (menor rank = maior prioridade).
+# cancelled não vira estado (some da UI). done/error contam como histórico.
+_STATE_OF = {"merging": "converting", "downloading": "downloading",
+             "searching": "searching", "awaiting": "awaiting",
+             "done": "done", "error": "error"}
+_STATE_RANK = {"converting": 0, "downloading": 1, "searching": 2,
+               "awaiting": 3, "done": 4, "error": 5}
+
+
+def _all_jobs() -> list[dict]:
+    """Ativos (memória) + terminais (banco), sem duplicar."""
+    return list(_jobs.values()) + store.load_jobs_by_status(_TERMINAL_STATUSES)
+
+
+def _movie_title(job: dict) -> str:
+    m = job.get("movie")
+    if m and m.get("original_title"):
+        return f"{m['original_title']} ({m.get('year', '')})".strip()
+    return f"TMDB #{job.get('tmdb_id')}"
+
+
+def summary() -> list[dict]:
+    """Lista mínima de processos EM ANDAMENTO + erros, para o dropdown do
+    cabeçalho. Só o essencial para o item da lista (sem candidatos/eventos)."""
+    out = []
+    for j in _all_jobs():
+        state = _STATE_OF.get(j["status"])
+        if state in (None, "done"):  # dropdown ignora concluídos e cancelados
+            continue
+        pct = j["progress"].get("merge", {}).get("pct") if state == "converting" else (
+            _pct(j["progress"].get("video")) or _pct(j["progress"].get("audio")))
+        out.append({"id": j["id"], "tmdb_id": j.get("tmdb_id"),
+                    "title": _movie_title(j), "status": j["status"],
+                    "state": state, "pct": pct})
+    out.sort(key=lambda x: _STATE_RANK[x["state"]])
+    return out
+
+
+# grupos de status expostos no filtro da tela de Downloads
+_GROUPS = {
+    "active": ("searching", "awaiting", "downloading", "merging"),
+    "error": ("error", "cancelled"),
+    "done": ("done",),
+}
+
+
+def counts() -> dict[str, int]:
+    """Contagem por grupo (active/error/done/all) para os badges do filtro.
+
+    O banco é a fonte: todo job (ativo ou terminal) tem uma linha lá e as
+    transições de status persistem na hora (via _event), então o `status` no
+    banco está sempre atualizado — não precisa somar a memória por cima.
+    """
+    by_status = store.count_jobs_by_status()
+    c = {"all": sum(by_status.values()), "active": 0, "error": 0, "done": 0}
+    for group, statuses in _GROUPS.items():
+        c[group] = sum(by_status.get(s, 0) for s in statuses)
+    return c
+
+
+def _slim_job(job: dict) -> dict:
+    """Job enxuto para os cards da lista de Downloads: sem search/eventos/
+    candidatos. Progresso vem só como percentual (a lista não mostra ETA/velo-
+    cidade detalhados — isso é o detalhe do job)."""
+    return {
+        "id": job["id"], "tmdb_id": job.get("tmdb_id"), "language": job["language"],
+        "mode": job.get("mode"), "kind": job.get("kind", "both"),
+        "status": job["status"], "detail": job.get("detail", ""),
+        "movie": job.get("movie"), "created_at": job["created_at"],
+        "destination_label": job.get("destination_label"),
+        "video_torrent": job.get("video_torrent"),
+        "audio_torrent": job.get("audio_torrent"),
+        "output": job.get("output"),
+        "progress": {
+            "video": _pct(job["progress"].get("video")),
+            "audio": _pct(job["progress"].get("audio")),
+            "merge": (job["progress"].get("merge") or {}).get("pct")
+            if job["progress"].get("merge") else None,
+        },
+    }
+
+
+def list_group(group: str = "active") -> list[dict]:
+    """Cards enxutos da tela de Downloads, filtrados por grupo NO BACKEND."""
+    if group == "all":
+        jobs_ = _all_jobs()
+    elif group == "active":
+        # ativos vivem todos em memória
+        jobs_ = [j for j in _jobs.values() if j["status"] in _GROUPS["active"]]
+    else:
+        statuses = _GROUPS.get(group)
+        if not statuses:
+            raise ValueError(f"grupo inválido: {group!r}")
+        jobs_ = store.load_jobs_by_status(statuses)
+    jobs_.sort(key=lambda j: j["created_at"], reverse=True)
+    return [_slim_job(j) for j in jobs_]
+
+
+def progress(job_id: str) -> dict | None:
+    """Só status + detail + progresso, para o tick de 1s do detalhe do job."""
+    job = _lookup(job_id)
+    if not job:
+        return None
+    return {"id": job["id"], "status": job["status"], "detail": job.get("detail", ""),
+            "progress": job["progress"], "output": job.get("output")}
 
 
 def _event(job: dict, kind: str, message: str, data=None):
@@ -98,7 +254,11 @@ def _event(job: dict, kind: str, message: str, data=None):
 def _set(job: dict, status: str, detail: str = ""):
     job["status"] = status
     job["detail"] = detail
-    _event(job, "status", detail or status)
+    _event(job, "status", detail or status)  # persiste o estado final no banco
+    if status in _TERMINAL_STATUSES:
+        # virou histórico: tira da memória (quem chamou ainda tem a referência
+        # do dict para terminar o que estava fazendo; o banco já está atualizado)
+        _jobs.pop(job["id"], None)
 
 
 def _fail(job: dict, message: str):
@@ -128,6 +288,11 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
                  kind: str = "both") -> dict:
     if kind not in KINDS:
         raise ValueError(f"kind inválido: {kind!r}")
+    # readicionar o filme descarta erro anterior da MESMA variante (tmdb+idioma+
+    # kind). Concluído/cancelado persistem (não são apagados na readição).
+    for old_id in store.error_jobs_for(tmdb_id, language, kind):
+        _jobs.pop(old_id, None)
+        store.delete_job(old_id)
     dest = store.get_destination(destination_id) if destination_id else None
     if dest is None:
         dest = store.default_destination()
@@ -171,7 +336,7 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
                   "original": "só original", "dubbed": "só dublado"}[kind]
     _event(job, "status",
            f"Job criado ({kind_label}, modo {mode}) — destino: {dest['label']} ({dest['path']}){tinfo}")
-    _tasks[job["id"]] = asyncio.create_task(_run(job))
+    _spawn(job["id"], _run(job))
     return _public(job)
 
 
@@ -194,7 +359,7 @@ async def select(job_id: str, audio_id: str | None, video_id: str | None) -> dic
         if not v:
             raise ValueError("Candidato de vídeo não encontrado (a busca pode ter sido refeita)")
     _event(job, "chosen", "Seleção manual do usuário")
-    _tasks[job["id"]] = asyncio.create_task(_download_and_merge(job, a, v))
+    _spawn(job["id"], _download_and_merge(job, a, v))
     return _public(job)
 
 
@@ -231,17 +396,21 @@ async def switch(job_id: str, kind: str, candidate_id: str | None = None) -> dic
 
 
 async def cancel(job_id: str, delete_torrents: bool = False) -> dict | None:
-    job = _jobs.get(job_id)
+    # ativo: memória; terminal (histórico): banco. Cancelar/limpar só faz sentido
+    # no ativo — no terminal só devolvemos o job (para o remove seguir).
+    job = _lookup(job_id)
     if not job:
         return None
-    task = _tasks.pop(job_id, None)
-    if task and not task.done():
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-    if delete_torrents:
+    is_active = job_id in _jobs
+    if is_active:
+        task = _tasks.pop(job_id, None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+    if delete_torrents and is_active:
         # limpeza no qBittorrent com teto de tempo: se ele estiver fora do ar,
         # a remoção do job NÃO pode ficar travada esperando o timeout de rede
         for kind in ("video", "audio"):
@@ -255,7 +424,7 @@ async def cancel(job_id: str, delete_torrents: bool = False) -> dict | None:
                 _event(job, "qbit",
                        f"⚠️ Não removi o torrent de {kind}: {reason} — "
                        f"apague manualmente no qBittorrent se precisar")
-    if job["status"] not in ("done", "error", "cancelled"):
+    if job["status"] not in _TERMINAL_STATUSES:
         _set(job, "cancelled",
              "Cancelado pelo usuário" + (" (torrents removidos)" if delete_torrents else ""))
     return job
@@ -271,7 +440,7 @@ async def remove(job_id: str, delete_torrents: bool = False) -> bool:
 
 
 async def retry(job_id: str) -> dict | None:
-    old = _jobs.get(job_id)
+    old = _lookup(job_id)  # jobs em erro/cancelados vivem só no banco agora
     if not old or old["status"] not in ("error", "cancelled"):
         return None
     return await create(old["tmdb_id"], old["language"], old.get("mode", "auto"),
@@ -314,6 +483,54 @@ def _slim(cand: dict, cid: str) -> dict:
             "seeders": cand["seeders"], "size": cand["size"],
             "edition": cand.get("edition"), "score": cand["score"],
             "magnet": cand.get("magnet"), "link": cand.get("link")}
+
+
+def _torrent_identity(r: dict) -> str | None:
+    """Identidade ESTÁVEL do torrent para dedup, ignorando tokens voláteis.
+
+    - magnet: usa o hash btih (canônico; ignora trackers/dn do magnet).
+    - link do Jackett (/dl/...): a URL inteira NÃO serve — o parâmetro `path`
+      é um token efêmero, diferente a cada busca do MESMO release. Usamos o
+      parâmetro `file` (nome do release), que é estável. Sem `file`, cai para o
+      link sem a query string.
+    Retorna None quando não há magnet nem link (o rank rejeita depois)."""
+    mag = r.get("magnet")
+    if mag:
+        m = re.search(r"btih:([0-9a-zA-Z]+)", mag)
+        return f"hash:{m.group(1).lower()}" if m else f"magnet:{mag}"
+    link = r.get("link")
+    if link:
+        m = re.search(r"[?&]file=([^&]+)", link)
+        if m:
+            return f"file:{unquote_plus(m.group(1)).lower()}"
+        return f"link:{link.split('?', 1)[0]}"  # sem query volátil
+    return None
+
+
+def _dedup_results(results: list[dict]) -> list[dict]:
+    """Remove torrents repetidos mantendo a 1ª ocorrência.
+
+    As buscas adicionais (variantes de grafia × regras × indexers) retornam
+    muito o MESMO release, então o pool combinado vem cheio de duplicatas. Sem
+    isso, o rank processa/mostra N cópias de cada torrent.
+
+    Chaveia por (identidade estável × PROVIDER): o mesmo torrent vindo de
+    trackers diferentes é MANTIDO, porque um tracker às vezes nomeia melhor que
+    o outro (mais info no título) — deixamos os dois concorrerem no rank. Só
+    colapsa duplicatas do mesmo torrent NO MESMO tracker. Sem identidade, passa
+    direto (o rank rejeita depois)."""
+    seen = set()
+    out = []
+    for r in results:
+        ident = _torrent_identity(r)
+        if ident is not None:
+            provider = r.get("tracker_id") or r.get("tracker")
+            key = (ident, provider)
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(r)
+    return out
 
 
 def _extra_searches(spellings: list[str], year: str, lang: str) -> list[dict]:
@@ -431,7 +648,7 @@ async def _search(job: dict):
         tasks.append(_run_extra_search(job, spec))
     all_results = await asyncio.gather(*tasks)
 
-    results_original = all_results[0]
+    results_original = _dedup_results(all_results[0])
     _event(job, "search", f"Jackett devolveu {len(results_original)} resultados para '{query_original}'")
     idx = 1
     results_localized = []
@@ -449,15 +666,20 @@ async def _search(job: dict):
         _set(job, "searching", f"Avaliando versão em {label}...")
         audio_ranked = []
         # resultados do título traduzido + variantes de grafia + buscas extras
-        # entram como tier 0 (título no idioma dublado tem preferência máxima)
+        # entram como tier 0 (título no idioma dublado tem preferência máxima).
+        # dedup: essas buscas repetem MUITO o mesmo release entre si.
         localized_pool = list(results_localized)
         for r in loc_variant_results:
             localized_pool.extend(r)
         for r in extra_results:
             localized_pool.extend(r)
+        localized_pool = _dedup_results(localized_pool)
+        # dubbed_title: passa o localizado só quando ≠ do original — aí
+        # "título dublado + dual" conta como marcador forte (ver marker_strength)
+        dubbed_title = localized if has_localized else None
         if localized_pool:
             ranked, trace = selector.rank(localized_pool, "audio", localized, year,
-                                          language=lang)
+                                          language=lang, dubbed_title=dubbed_title)
             _event(job, "candidates", f"Avaliação para ÁUDIO — título em {label} (+ buscas extras)",
                    {"role": "audio", "query": query_localized or localized, "candidates": trace})
             for c in ranked:
@@ -465,7 +687,8 @@ async def _search(job: dict):
             audio_ranked.extend(ranked)
 
         ranked, trace = selector.rank(results_original, "audio", original, year,
-                                      language=lang, require_language=True)
+                                      language=lang, require_language=True,
+                                      dubbed_title=dubbed_title)
         _event(job, "candidates",
                f"Avaliação para ÁUDIO — busca '{query_original}' exigindo marcador de {label}",
                {"role": "audio", "query": query_original, "candidates": trace})
@@ -477,11 +700,13 @@ async def _search(job: dict):
 
         # dedupe (o mesmo torrent pode aparecer nas duas buscas) e ordena:
         # titulo dublado (tier 0) SEMPRE antes de ingles+marcador (tier 1);
-        # score decide dentro de cada tier
+        # score decide dentro de cada tier. Mesma chave (identidade × provider)
+        # do _dedup_results: mesmo torrent em trackers diferentes continua concorrendo.
         seen = set()
         for c in sorted(audio_ranked, key=lambda r: (r.get("tier", 1), -r["score"])):
-            key = c.get("magnet") or c.get("link")
-            if key in seen:
+            ident = _torrent_identity(c)
+            key = (ident, c.get("tracker_id") or c.get("tracker"))
+            if ident is not None and key in seen:
                 continue
             seen.add(key)
             audio_viable.append(c)

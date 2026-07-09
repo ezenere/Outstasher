@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { NavArrowLeft, Refresh, Trash } from 'iconoir-react'
-import { post, prog, type Job } from '../api'
+import { post, prog, type Job, type JobProgress } from '../api'
 import { api } from '../api'
 import { Badge, CandidatesTable, Empty, MergeBar, ProgressBar } from '../components/ui'
 import { jobTitle, kindLabel, removeJob } from './Jobs'
@@ -18,6 +18,7 @@ export default function JobDetail() {
   const [switching, setSwitching] = useState(false)
   const navigate = useNavigate()
 
+  // detalhe completo (eventos, candidatos, destinos): recarrega a cada 5s
   const reload = useCallback(async () => {
     if (!id) return
     try {
@@ -30,9 +31,34 @@ export default function JobDetail() {
 
   useEffect(() => {
     void reload()
-    const t = setInterval(reload, 1500)
+    const t = setInterval(reload, 5000)
     return () => clearInterval(t)
   }, [reload])
+
+  // progresso (download/conversão): tick rápido de 1s, sem puxar os eventos.
+  // Só ativo quando há progresso mudando (baixando/convertendo); em outros
+  // estados o reload de 5s já basta. Só remenda status/detail/progress/output.
+  const live = job?.status === 'downloading' || job?.status === 'merging'
+  useEffect(() => {
+    if (!id || !live) return
+    let stop = false
+    async function tick() {
+      try {
+        const p = await api<JobProgress>(`/api/jobs/${id}/progress`)
+        if (stop) return
+        setJob((cur) =>
+          cur ? { ...cur, status: p.status, detail: p.detail, progress: p.progress, output: p.output } : cur,
+        )
+      } catch {
+        /* 404 quando o job some / servidor reiniciando: o reload de 5s trata */
+      }
+    }
+    const t = setInterval(tick, 1000)
+    return () => {
+      stop = true
+      clearInterval(t)
+    }
+  }, [id, live])
 
   // pre-seleciona os melhores quando o job esta aguardando escolha
   useEffect(() => {

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { BrowserRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom'
 import { Bookmark, Download, LogOut, MediaVideo, Settings as SettingsIcon } from 'iconoir-react'
-import { authStatus, getToken, logout } from './api'
+import { api, authStatus, getToken, logout, type JobSummary } from './api'
+import { JobsSummaryContext } from './jobsSummary'
 import Movies from './pages/Movies'
 import Jobs from './pages/Jobs'
 import JobDetail from './pages/JobDetail'
@@ -38,6 +39,8 @@ type Gate = 'loading' | 'setup' | 'login' | 'ok'
 export default function App() {
   const [gate, setGate] = useState<Gate>('loading')
   const [pending, setPending] = useState(false)
+  // fonte única do summary de processos (cabeçalho + tela de Filmes)
+  const [summary, setSummary] = useState<JobSummary[]>([])
 
   const check = useCallback(async () => {
     try {
@@ -58,6 +61,22 @@ export default function App() {
     return () => window.removeEventListener('auth-expired', onExpired)
   }, [check])
 
+  // polling do summary de processos a cada 5s (só autenticado). Fonte única
+  // consumida pelo dropdown do cabeçalho e pela tela de Filmes (via Context).
+  useEffect(() => {
+    if (gate !== 'ok') return
+    async function load() {
+      try {
+        setSummary(await api<JobSummary[]>('/api/jobs/summary'))
+      } catch {
+        /* servidor reiniciando; próximo tick */
+      }
+    }
+    void load()
+    const t = setInterval(load, 5000)
+    return () => clearInterval(t)
+  }, [gate])
+
   async function doLogout() {
     await logout()
     setGate('login')
@@ -71,6 +90,7 @@ export default function App() {
   }
 
   return (
+    <JobsSummaryContext.Provider value={summary}>
     <BrowserRouter>
       <div className="min-h-screen">
         <header className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/90 backdrop-blur">
@@ -93,7 +113,7 @@ export default function App() {
                 <SettingsIcon width={16} height={16} /> Configurações
               </Tab>
             </nav>
-            <ProcessMenu onPending={setPending} />
+            <ProcessMenu items={summary} onPending={setPending} />
             <button
               onClick={doLogout}
               title="Sair"
@@ -123,5 +143,6 @@ export default function App() {
         </main>
       </div>
     </BrowserRouter>
+    </JobsSummaryContext.Provider>
   )
 }

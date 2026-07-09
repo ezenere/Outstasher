@@ -392,6 +392,57 @@ def load_jobs() -> list[dict]:
     return [json.loads(r[0]) for r in rows]
 
 
+def load_jobs_by_status(statuses: tuple[str, ...]) -> list[dict]:
+    """Carrega os jobs cujo status está na lista (ex.: só os ativos, ou só os
+    terminais). Usa a coluna `status` indexada em vez de ler tudo."""
+    if not statuses:
+        return []
+    ph = ",".join("?" for _ in statuses)
+    with _lock:
+        rows = _conn.execute(
+            f"SELECT data FROM jobs WHERE status IN ({ph})", statuses).fetchall()
+    return [json.loads(r[0]) for r in rows]
+
+
+def get_job(job_id: str) -> dict | None:
+    """Carrega um único job do banco (usado para jobs terminais que não ficam
+    mais em memória)."""
+    with _lock:
+        row = _conn.execute(
+            "SELECT data FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def count_jobs_by_status() -> dict[str, int]:
+    """{status: quantidade} — para os badges de contagem sem baixar as listas."""
+    with _lock:
+        rows = _conn.execute(
+            "SELECT status, COUNT(*) FROM jobs GROUP BY status").fetchall()
+    return {status: n for status, n in rows}
+
+
+def error_jobs_for(tmdb_id: int, language: str, kind: str) -> list[str]:
+    """IDs dos jobs em 'error' que casam tmdb_id + idioma + kind.
+
+    Usado ao (re)adicionar um filme: um erro anterior daquela mesma variante é
+    descartado (o novo job o substitui). Concluído/cancelado NÃO entram aqui —
+    persistem mesmo com readição.
+    """
+    with _lock:
+        rows = _conn.execute(
+            "SELECT id, data FROM jobs WHERE status = 'error'").fetchall()
+    out = []
+    for jid, raw in rows:
+        try:
+            d = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if (d.get("tmdb_id") == tmdb_id and d.get("language") == language
+                and d.get("kind", "both") == kind):
+            out.append(jid)
+    return out
+
+
 def load_events(job_id: str) -> list[dict]:
     with _lock:
         rows = _conn.execute(

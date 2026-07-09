@@ -169,6 +169,53 @@ export interface Job {
   events?: JobEvent[]
 }
 
+// ---- shapes enxutos das rotas de polling granular ----
+
+/** Item do dropdown de processos (/api/jobs/summary). Só o mínimo. */
+export interface JobSummary {
+  id: string
+  tmdb_id: number
+  title: string
+  status: string
+  state: MovieState
+  pct: number | null
+}
+
+/** Contagem por grupo (/api/jobs/counts) para os badges do filtro. */
+export interface JobCounts {
+  all: number
+  active: number
+  error: number
+  done: number
+}
+
+/** Card enxuto da lista de Downloads (/api/jobs/list). Progresso já é % puro. */
+export interface JobListItem {
+  id: string
+  tmdb_id: number
+  language: string
+  mode: string
+  kind: string
+  status: string
+  detail: string
+  movie: MovieRef | null
+  created_at: string
+  destination_label?: string | null
+  video_torrent: TorrentInfo | null
+  audio_torrent: TorrentInfo | null
+  output: string | null
+  progress: { video: number | null; audio: number | null; merge: number | null }
+}
+
+/** Tick de 1s do detalhe do job (/api/jobs/{id}/progress). */
+export interface JobProgress {
+  id: string
+  status: string
+  detail: string
+  progress: Job['progress']
+  output: string | null
+}
+
 // ---------- catálogo ----------
 
 export interface CatalogItem {
@@ -386,44 +433,11 @@ export const STATUS_LABEL: Record<string, string> = {
 }
 
 // ---------- estado de um filme derivado dos jobs ----------
-// Um mesmo filme (tmdb_id) pode ter vários jobs. Reduzimos todos os jobs
-// daquele filme a um único estado, com a prioridade pedida:
-// CONVERTENDO > BAIXANDO > AGUARDANDO > FINALIZADO > ERRO.
+// A tela de Filmes deriva o estado de cada filme do summary compartilhado do
+// cabeçalho (JobSummary[], via JobsSummaryContext), sem cruzar jobs no cliente.
+// Aqui ficam só o tipo e os rótulos.
 
 export type MovieState = 'converting' | 'downloading' | 'searching' | 'awaiting' | 'done' | 'error'
-
-// menor número = maior prioridade
-const STATE_RANK: Record<MovieState, number> = {
-  converting: 0,
-  downloading: 1,
-  searching: 2,
-  awaiting: 3,
-  done: 4,
-  error: 5,
-}
-
-/** Mapeia o status de um job para o estado de filme (null = ignorar, ex: cancelado). */
-function jobState(status: string): MovieState | null {
-  if (status === 'merging') return 'converting'
-  if (status === 'downloading') return 'downloading'
-  if (status === 'searching') return 'searching'
-  if (status === 'awaiting') return 'awaiting'
-  if (status === 'done') return 'done'
-  if (status === 'error') return 'error'
-  return null // cancelled
-}
-
-/** Reduz todos os jobs a um mapa tmdb_id -> estado de maior prioridade. */
-export function movieStates(jobs: Job[]): Map<number, MovieState> {
-  const m = new Map<number, MovieState>()
-  for (const j of jobs) {
-    const s = jobState(j.status)
-    if (!s) continue
-    const cur = m.get(j.tmdb_id)
-    if (cur === undefined || STATE_RANK[s] < STATE_RANK[cur]) m.set(j.tmdb_id, s)
-  }
-  return m
-}
 
 export const MOVIE_STATE_LABEL: Record<MovieState, string> = {
   converting: 'Convertendo',

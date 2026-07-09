@@ -1,11 +1,17 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Search, Xmark } from 'iconoir-react'
 import {
-  api, MOVIE_STATE_LABEL, movieStates, post,
-  type Destination, type Job, type Language, type Movie, type MoviePage, type TorrentTarget,
+  api, MOVIE_STATE_LABEL, post,
+  type Destination, type Job, type Language, type Movie, type MovieState, type MoviePage,
+  type TorrentTarget,
 } from '../api'
+import { useJobsSummary } from '../jobsSummary'
 import { DiskFree, Empty, MovieStateBadge, MovieStateIcon } from '../components/ui'
+
+// estados "em progresso": se um filme estava num destes e sumiu do summary,
+// entendemos que terminou -> marca como 'done' (Baixado) localmente.
+const IN_PROGRESS = new Set<MovieState>(['converting', 'downloading', 'searching', 'awaiting'])
 
 export default function Movies() {
   const [movies, setMovies] = useState<Movie[] | null>(null)
@@ -20,7 +26,6 @@ export default function Movies() {
   const [targetId, setTargetId] = useState<number | null>(null)
   const [selected, setSelected] = useState<Movie | null>(null)
   const [starting, setStarting] = useState(false)
-  const [jobs, setJobs] = useState<Job[]>([])
   const [justStarted, setJustStarted] = useState<number | null>(null)
   // paginação: guarda o termo buscado, a página atual e o total de páginas
   const [searched, setSearched] = useState('')
@@ -28,21 +33,36 @@ export default function Movies() {
   const [totalPages, setTotalPages] = useState(1)
   const [loadingMore, setLoadingMore] = useState(false)
 
-  // estado de cada filme (tmdb_id -> convertendo/baixando/... ) a partir dos jobs
-  const states = useMemo(() => movieStates(jobs), [jobs])
+  // estado de cada filme (tmdb_id -> convertendo/baixando/...). Deriva do
+  // summary compartilhado do cabeçalho (fonte única, atualizado a cada 5s).
+  const summary = useJobsSummary()
+  // filmes que já vimos "em progresso" e sumiram do summary -> terminaram.
+  // Guardamos localmente pois o summary não traz 'done'.
+  const finished = useRef<Set<number>>(new Set())
+  const prevSummary = useRef<Map<number, MovieState>>(new Map())
+  const [states, setStates] = useState<Map<number, MovieState>>(new Map())
 
+  // reduz o summary a um mapa tmdb_id -> state a cada atualização; aplica a
+  // regra "sumiu de em-progresso -> done".
   useEffect(() => {
-    async function loadJobs() {
-      try {
-        setJobs(await api<Job[]>('/api/jobs'))
-      } catch {
-        /* servidor reiniciando; proxima tentativa no tick */
-      }
+    const cur = new Map<number, MovieState>()
+    for (const s of summary) {
+      const prev = cur.get(s.tmdb_id)
+      // o backend já ordena por prioridade; o 1º de cada tmdb_id vence
+      if (prev === undefined) cur.set(s.tmdb_id, s.state)
     }
-    void loadJobs()
-    const t = setInterval(loadJobs, 4000)
-    return () => clearInterval(t)
-  }, [])
+    // detecta término: estava em progresso no tick anterior e sumiu agora
+    for (const [tid, st] of prevSummary.current) {
+      if (IN_PROGRESS.has(st) && !cur.has(tid)) finished.current.add(tid)
+    }
+    // se voltou a aparecer no summary (readicionado), deixa de ser "finished"
+    for (const tid of cur.keys()) finished.current.delete(tid)
+    prevSummary.current = cur
+
+    const next = new Map(cur)
+    for (const tid of finished.current) if (!next.has(tid)) next.set(tid, 'done')
+    setStates(next)
+  }, [summary])
 
   useEffect(() => {
     api<Language[]>('/api/languages').then(setLanguages).catch(() => {})
@@ -108,7 +128,7 @@ export default function Movies() {
     const tmdbId = selected.id
     setStarting(true)
     try {
-      const job = await post<Job>('/api/jobs', {
+      await post<Job>('/api/jobs', {
         tmdb_id: tmdbId,
         language,
         mode: manual ? 'manual' : 'auto',
@@ -116,11 +136,12 @@ export default function Movies() {
         destination_id: destId,
         torrent_target_id: targetId,
       })
-      // some com a seleção e sinaliza que começou (sem trocar de tela)
+      // some com a seleção e sinaliza que começou (sem trocar de tela). O
+      // estado real chega no próximo tick do summary (≤5s); até lá o overlay
+      // "Iniciando..." cobre o intervalo.
       setSelected(null)
-      setJobs((js) => [job, ...js])
       setJustStarted(tmdbId)
-      setTimeout(() => setJustStarted((cur) => (cur === tmdbId ? null : cur)), 4000)
+      setTimeout(() => setJustStarted((cur) => (cur === tmdbId ? null : cur)), 5000)
     } catch (e) {
       alert(`Erro ao criar job: ${(e as Error).message}`)
     } finally {

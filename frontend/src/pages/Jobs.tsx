@@ -1,35 +1,32 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Refresh, Search, Trash, Xmark } from 'iconoir-react'
-import { api, fmtSize, post, prog, type Job } from '../api'
-import { Badge, Empty, MergeBar, ProgressBar } from '../components/ui'
+import { api, fmtSize, post, type JobCounts, type JobListItem } from '../api'
+import { Badge, Empty } from '../components/ui'
 
-export function jobTitle(j: Job): string {
+// jobTitle/kindLabel aceitam tanto o job completo quanto o item enxuto da lista
+type JobLike = { movie: JobListItem['movie']; tmdb_id: number; kind?: string; language: string }
+
+export function jobTitle(j: JobLike): string {
   return j.movie ? `${j.movie.original_title} (${j.movie.year})` : `TMDB #${j.tmdb_id}`
 }
 
 // rótulo curto do tipo do job para exibir junto do idioma
-export function kindLabel(j: Job): string {
+export function kindLabel(j: JobLike): string {
   if (j.kind === 'original') return 'só original'
   if (j.kind === 'dubbed') return `só dublado (${j.language})`
   return `${j.language} + orig`
 }
 
-// agrupa os status internos nas categorias que o filtro oferece
+// grupos do filtro; o backend filtra por grupo (não trazemos a lista toda)
 type Filter = 'all' | 'active' | 'error' | 'done'
 
 const FILTERS: { key: Filter; label: string }[] = [
-  { key: 'all', label: 'Todos' },
   { key: 'active', label: 'Em andamento' },
   { key: 'error', label: 'Erro' },
   { key: 'done', label: 'Finalizado' },
+  { key: 'all', label: 'Todos' },
 ]
-
-function statusGroup(status: string): Exclude<Filter, 'all'> {
-  if (status === 'done') return 'done'
-  if (status === 'error' || status === 'cancelled') return 'error'
-  return 'active' // searching, awaiting, downloading, merging
-}
 
 export async function removeJob(id: string, reload: () => void) {
   if (!confirm('Remover este job?')) return
@@ -44,53 +41,72 @@ export async function removeJob(id: string, reload: () => void) {
   }
 }
 
+const EMPTY_COUNTS: JobCounts = { all: 0, active: 0, error: 0, done: 0 }
+
 export default function Jobs() {
-  const [jobs, setJobs] = useState<Job[] | null>(null)
-  const [filter, setFilter] = useState<Filter>('all')
+  const [jobs, setJobs] = useState<JobListItem[] | null>(null)
+  const [counts, setCounts] = useState<JobCounts>(EMPTY_COUNTS)
+  // abre em "Em andamento": a tela foca no que está rodando
+  const [filter, setFilter] = useState<Filter>('active')
   const [query, setQuery] = useState('')
   const navigate = useNavigate()
+  // guarda a contagem do grupo aberto no último tick, para detectar mudança
+  const lastGroupCount = useRef<number | null>(null)
 
-  async function reload() {
+  // busca a lista do grupo atual no backend (filtro feito lá)
+  const reload = useCallback(async (group: Filter) => {
     try {
-      setJobs(await api<Job[]>('/api/jobs'))
+      const list = await api<JobListItem[]>(`/api/jobs/list?group=${group}`)
+      setJobs(list)
+      lastGroupCount.current = list.length
     } catch {
-      /* servidor reiniciando; proxima tentativa no tick */
+      /* servidor reiniciando; próximo tick */
     }
-  }
-
-  useEffect(() => {
-    void reload()
-    const t = setInterval(reload, 4000)
-    return () => clearInterval(t)
   }, [])
+
+  // ao trocar de filtro, recarrega a lista daquele grupo
+  useEffect(() => {
+    setJobs(null)
+    void reload(filter)
+  }, [filter, reload])
+
+  // poll de contagens a cada 15s (badges sempre certos, sem baixar as listas).
+  // Recarrega a lista atual quando:
+  //  - o grupo aberto é 'active'/'all': o progresso/status muda ao vivo, então
+  //    atualiza a cada tick de qualquer forma;
+  //  - grupo terminal (error/done): só quando a contagem daquele grupo mudou
+  //    (mudam só por ação — remover/retry/concluir), evitando requests à toa.
+  useEffect(() => {
+    async function tick() {
+      try {
+        const c = await api<JobCounts>('/api/jobs/counts')
+        setCounts(c)
+        const liveGroup = filter === 'active' || filter === 'all'
+        const changed = lastGroupCount.current !== null && c[filter] !== lastGroupCount.current
+        if (liveGroup || changed) void reload(filter)
+      } catch {
+        /* servidor reiniciando; próximo tick */
+      }
+    }
+    void tick()
+    const t = setInterval(tick, 15000)
+    return () => clearInterval(t)
+  }, [filter, reload])
 
   async function retry(id: string) {
     try {
       await post(`/api/jobs/${id}/retry`)
-      void reload()
+      void reload(filter)
     } catch (e) {
       alert(`Erro: ${(e as Error).message}`)
     }
   }
 
-  // contagem por categoria (para os badges) e lista filtrada
-  const counts = useMemo(() => {
-    const c = { all: jobs?.length ?? 0, active: 0, error: 0, done: 0 }
-    for (const j of jobs ?? []) c[statusGroup(j.status)]++
-    return c
-  }, [jobs])
-
-  const filtered = useMemo(() => {
+  // a lista já vem filtrada por grupo do backend; aqui só o filtro de texto
+  const filtered = (jobs ?? []).filter((j) => {
     const q = query.trim().toLowerCase()
-    return (jobs ?? []).filter((j) => {
-      if (filter !== 'all' && statusGroup(j.status) !== filter) return false
-      if (q && !jobTitle(j).toLowerCase().includes(q)) return false
-      return true
-    })
-  }, [jobs, filter, query])
-
-  if (jobs === null) return <Empty>Carregando...</Empty>
-  if (!jobs.length) return <Empty>Nenhum job ainda. Escolha um filme na aba Filmes.</Empty>
+    return !q || jobTitle(j).toLowerCase().includes(q)
+  })
 
   return (
     <div className="flex flex-col gap-3">
@@ -133,13 +149,13 @@ export default function Jobs() {
         </div>
       </div>
 
-      {filtered.length === 0 && (
+      {jobs === null ? (
+        <Empty>Carregando...</Empty>
+      ) : filtered.length === 0 ? (
         <Empty>Nenhum job com esse filtro.</Empty>
-      )}
+      ) : null}
 
       {filtered.map((j) => {
-        const pv = prog(j.progress?.video)
-        const pa = prog(j.progress?.audio)
         return (
           <div key={j.id} className="flex gap-3 rounded-xl bg-zinc-900 px-4 py-3.5">
             {j.movie?.poster ? (
@@ -181,7 +197,7 @@ export default function Jobs() {
                 className="rounded-lg border border-zinc-700 p-1.5 text-zinc-400 hover:text-zinc-200">
                 <Search width={15} height={15} />
               </Link>
-              <IconBtn title="Remover job" onClick={() => removeJob(j.id, reload)}>
+              <IconBtn title="Remover job" onClick={() => removeJob(j.id, () => reload(filter))}>
                 <Trash width={15} height={15} />
               </IconBtn>
             </div>
@@ -202,15 +218,36 @@ export default function Jobs() {
             )}
             {j.status === 'downloading' && (
               <>
-                <ProgressBar label="Vídeo" p={pv} />
-                <ProgressBar label="Áudio" p={pa} />
+                <MiniBar label="Vídeo" pct={j.progress.video} />
+                <MiniBar label="Áudio" pct={j.progress.audio} />
               </>
             )}
-            {j.status === 'merging' && <MergeBar p={j.progress?.merge} />}
+            {j.status === 'merging' && <MiniBar label="Conversão" pct={j.progress.merge} color="purple" />}
             </div>
           </div>
         )
       })}
+    </div>
+  )
+}
+
+// barra de progresso enxuta (só %) para os cards da lista. Velocidade/ETA/seeds
+// ficam no detalhe do job, não aqui.
+function MiniBar({ label, pct, color = 'blue' }: {
+  label: string
+  pct: number | null
+  color?: 'blue' | 'purple'
+}) {
+  if (pct == null) return null
+  const bar = color === 'purple' ? 'bg-purple-500' : 'bg-blue-500'
+  return (
+    <div className="mt-2">
+      <div className="h-2 overflow-hidden rounded bg-zinc-800">
+        <div className={`h-full ${bar} transition-all duration-500`} style={{ width: `${pct}%` }} />
+      </div>
+      <div className="mt-1 text-xs text-zinc-400">
+        {label}: {Math.round(pct)}%
+      </div>
     </div>
   )
 }

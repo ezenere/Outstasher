@@ -207,9 +207,7 @@ async def movies(q: str = "", page: int = 1):
     if not config.TMDB_API_KEY:
         raise HTTPException(500, "TMDB_API_KEY não configurada no .env")
     page = max(1, min(page, 500))  # TMDB aceita no máximo 500 páginas
-    if q.strip():
-        return await tmdb.search(q.strip(), page)
-    return await tmdb.popular(page)
+    return await (tmdb.search(q.strip(), page) if q.strip() else tmdb.popular(page))
 
 
 class JobRequest(BaseModel):
@@ -427,12 +425,44 @@ async def list_jobs():
     return jobs.list_jobs()
 
 
+# --- rotas enxutas para polling granular (declaradas ANTES de /{job_id}) ---
+
+@app.get("/api/jobs/summary")
+async def jobs_summary():
+    """Processos em andamento + erros (mínimo) para o dropdown do cabeçalho."""
+    return jobs.summary()
+
+
+@app.get("/api/jobs/counts")
+async def jobs_counts():
+    """Contagem por grupo (active/error/done/all) para os badges do filtro."""
+    return jobs.counts()
+
+
+@app.get("/api/jobs/list")
+async def jobs_list(group: str = "active"):
+    """Cards enxutos da tela de Downloads, filtrados por grupo no backend."""
+    try:
+        return jobs.list_group(group)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/api/jobs/{job_id}")
 async def job_detail(job_id: str):
     job = jobs.get_job(job_id)
     if not job:
         raise HTTPException(404, "Job não encontrado")
     return job
+
+
+@app.get("/api/jobs/{job_id}/progress")
+async def job_progress(job_id: str):
+    """Só status/detail/progresso — tick de 1s do detalhe do job."""
+    p = jobs.progress(job_id)
+    if not p:
+        raise HTTPException(404, "Job não encontrado")
+    return p
 
 
 @app.post("/api/jobs/{job_id}/select")
