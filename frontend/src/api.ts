@@ -167,6 +167,9 @@ export interface Job {
   created_at: string
   search?: { audio: Candidate[]; video: Candidate[] } | null
   events?: JobEvent[]
+  /** Presente quando a conversão pausou por offsets divergentes (possível
+   *  versão/corte diferente) e espera o usuário clicar em Continuar. */
+  drift_confirm?: { video_file: string; audio_file: string; tau1_ms: number; tau2_ms: number } | null
 }
 
 // ---- shapes enxutos das rotas de polling granular ----

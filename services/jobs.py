@@ -36,6 +36,9 @@ VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m2ts", ".mov", ".wmv", ".mpg", ".m
 MAX_SELECTABLE = 60  # candidatos guardados por papel para selecao manual/fallback
 
 # estados: searching -> (awaiting ->) downloading -> merging -> done | error | cancelled
+# merging pode voltar a awaiting: se a validação do offset em duas janelas
+# divergir (possível versão/corte diferente), o job para com `drift_confirm` e
+# espera o usuário mandar Continuar (proceed) em vez de gastar o re-encode.
 # TERMINAL: já são só histórico (não precisam de acesso rápido). Ficam SÓ no
 # banco; não ocupam memória. ACTIVE: em andamento — precisam de polling de
 # progresso e ações rápidas, então vivem em _jobs (espelhados no banco).
@@ -374,6 +377,9 @@ async def select(job_id: str, audio_id: str | None, video_id: str | None) -> dic
         v = next((c for c in search.get("video", []) if c["id"] == video_id), None)
         if not v:
             raise ValueError("Candidato de vídeo não encontrado (a busca pode ter sido refeita)")
+    # awaiting também acontece na pausa de drift (possível versão diferente);
+    # se o usuário preferiu outro torrent em vez de Continuar, a pausa caduca
+    job.pop("drift_confirm", None)
     _event(job, "chosen", "Seleção manual do usuário")
     _spawn(job["id"], _download_and_merge(job, a, v))
     return _public(job)
@@ -849,6 +855,53 @@ async def _run_from_download(job: dict):
                 await _merge(job, files["video"], files["audio"])
     except asyncio.CancelledError:
         raise
+    except merger.VersionMismatch as e:
+        _pause_for_drift(job, files, e)  # já fora do lock: a fila fica livre
+    except Exception as e:  # noqa: BLE001
+        _fail(job, f"{type(e).__name__}: {e}")
+
+
+def _pause_for_drift(job: dict, files: dict, e: "merger.VersionMismatch"):
+    """Conversão abortada antes do ffmpeg pesado: as duas janelas de offset
+    divergem, então o áudio provavelmente é de outro corte/versão e o resultado
+    sairia dessincronizado. Em vez de gastar CPU à toa, o job para em
+    'awaiting' (bolinha vermelha de resposta pendente) e o usuário decide:
+    Continuar mesmo assim (proceed), escolher outro torrent ou cancelar."""
+    job["progress"]["merge"] = None
+    job["drift_confirm"] = {
+        "video_file": str(files["video"]), "audio_file": str(files["audio"]),
+        "tau1_ms": e.tau1_ms, "tau2_ms": e.tau2_ms,
+    }
+    _set(job, "awaiting",
+         f"⚠️ Possível versão/corte diferente: os offsets divergem entre o início "
+         f"({e.tau1_ms:+.0f} ms) e o meio ({e.tau2_ms:+.0f} ms) do filme. "
+         f"Conversão pausada — clique em Continuar para converter mesmo assim, "
+         f"escolha outro torrent ou cancele.")
+
+
+async def proceed(job_id: str) -> dict | None:
+    """'Continuar' após a pausa de drift: converte mesmo com offsets divergentes."""
+    job = _jobs.get(job_id)
+    if not job or job["status"] != "awaiting" or not job.get("drift_confirm"):
+        return None
+    info = job.pop("drift_confirm")
+    _event(job, "chosen", "Usuário mandou converter mesmo com offsets divergentes")
+    _spawn(job["id"], _resume_merge(job, Path(info["video_file"]),
+                                    Path(info["audio_file"])))
+    return _public(job)
+
+
+async def _resume_merge(job: dict, video_file: Path, audio_file: Path):
+    """Retoma o merge pausado pelo drift, agora com allow_drift=True (a medição
+    das janelas se repete, mas isso custa segundos — o caro é o re-encode)."""
+    try:
+        lock = _get_merge_lock()
+        if lock.locked():
+            _set(job, "merging", "Na fila de conversão — aguardando a conversão anterior terminar...")
+        async with lock:
+            await _merge(job, video_file, audio_file, allow_drift=True)
+    except asyncio.CancelledError:
+        raise
     except Exception as e:  # noqa: BLE001
         _fail(job, f"{type(e).__name__}: {e}")
 
@@ -1126,7 +1179,8 @@ async def _deliver_single(job: dict, files: dict):
     await _cleanup_torrents(job)
 
 
-async def _merge(job: dict, video_file: Path, audio_file: Path):
+async def _merge(job: dict, video_file: Path, audio_file: Path,
+                 allow_drift: bool = False):
     _event(job, "merge", f"Arquivo de vídeo: {video_file}")
     _event(job, "merge", f"Arquivo de áudio: {audio_file}")
 
@@ -1156,7 +1210,8 @@ async def _merge(job: dict, video_file: Path, audio_file: Path):
     # merger.merge é bloqueante (ffmpeg/ffprobe); roda em thread para não travar a API
     result = await asyncio.to_thread(
         merger.merge, str(video_file), str(audio_file), str(output),
-        job["language"], log=log, on_progress=on_progress)
+        job["language"], log=log, on_progress=on_progress,
+        allow_drift=allow_drift)
     job["progress"]["merge"] = None  # terminou (com sucesso): some a barra
 
     job["output"] = result.output

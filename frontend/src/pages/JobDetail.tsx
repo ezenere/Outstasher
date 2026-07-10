@@ -107,6 +107,20 @@ export default function JobDetail() {
     }
   }
 
+  // pausa de drift: converte mesmo com offsets divergentes (possível outra versão)
+  async function proceedAnyway() {
+    if (!job || submitting) return
+    setSubmitting(true)
+    try {
+      await post(`/api/jobs/${job.id}/proceed`)
+      void reload()
+    } catch (e) {
+      alert(`Erro: ${(e as Error).message}`)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   // troca o torrent em andamento: sem candidateId = "Tentar próximo" (reserva)
   async function trySwitch(kind: 'video' | 'audio', candidateId?: string) {
     if (!job || switching) return
@@ -198,6 +212,31 @@ export default function JobDetail() {
       </div>
 
       <div className="mt-2 text-sm wrap-break-word whitespace-pre-wrap text-zinc-400">{job.detail}</div>
+
+      {job.status === 'awaiting' && job.drift_confirm && (
+        <section className="mt-6 rounded-xl border border-amber-900/60 bg-amber-950/20 p-4">
+          <h2 className="mb-2 font-semibold text-amber-300">⚠️ Possível versão/corte diferente</h2>
+          <p className="text-sm text-zinc-300">
+            O offset entre os áudios não é o mesmo no início (
+            <span className="tabular-nums">{job.drift_confirm.tau1_ms.toFixed(0)} ms</span>) e no meio (
+            <span className="tabular-nums">{job.drift_confirm.tau2_ms.toFixed(0)} ms</span>) do filme — os
+            dois arquivos podem ser de cortes diferentes e o áudio dublado tende a dessincronizar. A
+            conversão foi pausada para não gastar processamento à toa.
+          </p>
+          <button
+            onClick={proceedAnyway}
+            disabled={submitting}
+            className="mt-3 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-zinc-950 hover:bg-amber-500 disabled:opacity-50"
+          >
+            ▶ Continuar mesmo assim
+          </button>
+          {job.search && (
+            <p className="mt-2 text-xs text-zinc-500">
+              Ou escolha outro torrent abaixo e baixe de novo — ou cancele o job.
+            </p>
+          )}
+        </section>
+      )}
 
       {job.status === 'awaiting' && job.search && (
         <section className="mt-6 rounded-xl border border-purple-900/60 bg-purple-950/20 p-4">

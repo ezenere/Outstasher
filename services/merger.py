@@ -87,6 +87,20 @@ class MergeError(RuntimeError):
     pass
 
 
+class VersionMismatch(MergeError):
+    """Offsets divergem entre as duas janelas de validação: os arquivos parecem
+    ser de cortes/versões diferentes e o merge tende a sair dessincronizado.
+    Levantada ANTES do ffmpeg pesado, para o chamador poder perguntar ao usuário
+    se vale a pena gastar a conversão mesmo assim (merge(allow_drift=True))."""
+
+    def __init__(self, tau1_ms: float, tau2_ms: float):
+        super().__init__(
+            f"offsets divergem entre o início ({tau1_ms:+.0f} ms) e o meio "
+            f"({tau2_ms:+.0f} ms) do filme — possível corte/versão diferente")
+        self.tau1_ms = tau1_ms
+        self.tau2_ms = tau2_ms
+
+
 # -------------------- ffprobe helpers --------------------
 
 def _check_tools():
@@ -538,13 +552,17 @@ def _run_ffmpeg_progress(cmd: list[str], duration_s: float,
 # -------------------- merge principal --------------------
 
 def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
-          file2_is_target_dub: bool = True, log=print, on_progress=None) -> MergeResult:
+          file2_is_target_dub: bool = True, log=print, on_progress=None,
+          allow_drift: bool = True) -> MergeResult:
     """Faz o merge de file1+file2 em `output`.
 
     target_lang: codigo curto (pt/es/...) ou ISO (por/spa/...) do idioma desejado.
     file2_is_target_dub: trata audios "und" do file2 como sendo do idioma alvo.
     on_progress: callback(dict) chamado ~2x/s durante o ffmpeg com
         {pct, out_s, duration_s, size, bitrate, speed, fps, eta}.
+    allow_drift: False = levanta VersionMismatch quando as duas janelas de
+        offset divergem (possível corte diferente), ANTES do ffmpeg pesado —
+        em vez de seguir com um merge provavelmente dessincronizado.
     """
     _check_tools()
     for f in (file1, file2):
@@ -614,6 +632,10 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
             log("Offsets consistentes nas duas janelas — alinhamento validado ✓")
         else:
             has_drift = True
+            if not allow_drift:
+                # aborta antes do re-encode (a parte cara): o chamador decide se
+                # vale gastar a conversão num áudio que tende a dessincronizar
+                raise VersionMismatch(round(tau_1 * 1000, 1), round(tau_2 * 1000, 1))
             warn = (f"⚠️ Offsets divergem entre o início ({tau_1 * 1000:+.0f} ms) e o meio "
                     f"({tau_2 * 1000:+.0f} ms) do filme — possível corte diferente ou drift; "
                     f"o áudio pode dessincronizar. Usando o offset do início.")

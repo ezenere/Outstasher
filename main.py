@@ -476,6 +476,15 @@ async def select_job(job_id: str, req: SelectRequest):
     return job
 
 
+@app.post("/api/jobs/{job_id}/proceed")
+async def proceed_job(job_id: str):
+    """Continua a conversão pausada por suspeita de versão/corte diferente."""
+    job = await jobs.proceed(job_id)
+    if not job:
+        raise HTTPException(409, "Job não está aguardando confirmação de conversão")
+    return job
+
+
 @app.post("/api/jobs/{job_id}/switch")
 async def switch_job(job_id: str, req: SwitchRequest):
     """Troca o torrent de um download em andamento (próximo reserva ou escolhido)."""
