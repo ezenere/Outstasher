@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Folder, MediaVideoList, NavArrowRight, Search, WarningTriangle, Xmark } from 'iconoir-react'
+import { Folder, MediaVideoList, NavArrowRight, Plus, Search, WarningTriangle, Xmark } from 'iconoir-react'
 import { api, type CatalogItem, type CatalogList, type Destination } from '../api'
+import AddMovieModal from '../components/AddMovieModal'
 import { DiskBar, Empty } from '../components/ui'
 
 // critérios de ordenação disponíveis no catálogo
@@ -23,6 +24,7 @@ export default function Catalog() {
   const [query, setQuery] = useState('')
   const [sortKey, setSortKey] = useState<SortKey>('title')
   const [sortDir, setSortDir] = useState<SortDir>('asc')
+  const [adding, setAdding] = useState(false)
 
   useEffect(() => {
     api<Destination[]>('/api/destinations')
@@ -68,6 +70,13 @@ export default function Catalog() {
     <div>
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="flex-1 text-lg font-semibold">Catálogo</h1>
+        <button
+          onClick={() => setAdding(true)}
+          title="Conversão manual: merge de dois arquivos que já estão no disco"
+          className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-semibold hover:bg-blue-500"
+        >
+          <Plus width={16} height={16} /> Adicionar filme
+        </button>
         <label className="flex items-center gap-2 text-sm">
           Destino:
           <select
@@ -178,6 +187,10 @@ export default function Catalog() {
           </Link>
         ))}
       </div>
+
+      {adding && (
+        <AddMovieModal destinations={destinations} defaultDestId={destId} onClose={() => setAdding(false)} />
+      )}
     </div>
   )
 }

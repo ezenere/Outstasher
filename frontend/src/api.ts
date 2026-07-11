@@ -170,6 +170,8 @@ export interface Job {
   /** Presente quando a conversão pausou por offsets divergentes (possível
    *  versão/corte diferente) e espera o usuário clicar em Continuar. */
   drift_confirm?: { video_file: string; audio_file: string; tau1_ms: number; tau2_ms: number } | null
+  /** Conversão manual (mode 'files'): os dois arquivos locais de origem. */
+  manual_files?: { video: string; audio: string } | null
 }
 
 // ---- shapes enxutos das rotas de polling granular ----

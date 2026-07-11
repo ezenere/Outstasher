@@ -80,14 +80,33 @@ def load():
 
 def resume_pending():
     """Retoma jobs interrompidos por um restart do servidor."""
-    for job in _jobs.values():
-        if job["status"] in ("downloading", "merging"):
+    # cópia: _set(..., "error") remove o job de _jobs no meio da iteração
+    for job in list(_jobs.values()):
+        if job.get("manual_files"):
+            _resume_manual(job)
+        elif job["status"] in ("downloading", "merging"):
             job["status"] = "downloading"
             _event(job, "status", "Servidor reiniciado — retomando acompanhamento dos downloads")
             _spawn(job["id"], _run_from_download(job))
         elif job["status"] == "searching":
             _set(job, "error", "Servidor reiniciado durante a busca — use ↻ para tentar de novo")
         # awaiting: candidatos estao persistidos; segue esperando a escolha
+
+
+def _resume_manual(job: dict):
+    """Retoma uma conversão manual interrompida por restart: os arquivos de
+    origem estão no disco (não dependem do qBittorrent), então é só recomeçar
+    o merge do zero. A pausa de drift (awaiting) segue esperando a decisão."""
+    if job["status"] == "awaiting":
+        return
+    info = job["manual_files"]
+    vf, af = Path(info["video"]), Path(info["audio"])
+    if vf.is_file() and af.is_file():
+        _event(job, "status", "Servidor reiniciado — recomeçando a conversão manual")
+        _spawn(job["id"], _run_manual(job, vf, af))
+    else:
+        _set(job, "error", "Servidor reiniciado e os arquivos de origem não existem mais "
+                           "— crie a conversão de novo")
 
 
 def _public(job: dict) -> dict:
@@ -359,6 +378,107 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
     return _public(job)
 
 
+def _probe_manual_file(path: Path, role: str) -> None:
+    """Valida via ffprobe um arquivo de origem da conversão manual.
+
+    O de vídeo precisa de stream de vídeo E de áudio (o alinhamento compara os
+    dois áudios); o de áudio precisa só de áudio (pode ser um .mka, ou um vídeo
+    dublado inteiro — o merger escolhe o melhor vídeo entre os dois).
+    """
+    try:
+        probe = merger.ffprobe_json(str(path))
+    except merger.MergeError:
+        raise ValueError(f"'{path.name}' não parece um arquivo de vídeo/áudio válido")
+    streams = probe.get("streams", [])
+    # capa embutida (attached_pic) não conta como vídeo de verdade
+    has_video = any(s.get("codec_type") == "video"
+                    and (s.get("disposition") or {}).get("attached_pic") != 1
+                    for s in streams)
+    has_audio = any(s.get("codec_type") == "audio" for s in streams)
+    if role == "video" and not has_video:
+        raise ValueError(f"'{path.name}' não tem stream de vídeo")
+    if not has_audio:
+        raise ValueError(f"'{path.name}' não tem stream de áudio "
+                         f"(necessário para medir o offset)")
+
+
+async def create_manual(tmdb_id: int, language: str, video_path: str, audio_path: str,
+                        destination_id: int | None = None) -> dict:
+    """Conversão manual: merge de dois arquivos JÁ NO DISCO, sem busca/torrents.
+
+    Mesmo pipeline de conversão dos jobs normais (alinhamento em duas janelas,
+    pausa de drift, fila de merge, saída em destino/Filme (Ano)/), só que os
+    arquivos vêm de caminhos digitados pelo usuário em vez do qBittorrent.
+    """
+    vf, af = Path(video_path.strip()), Path(audio_path.strip())
+    for label, p in (("vídeo", vf), ("áudio", af)):
+        if not str(p).strip() or not p.is_file():
+            raise ValueError(f"Arquivo de {label} não existe: {p}")
+    if vf.resolve() == af.resolve():
+        raise ValueError("Os dois caminhos apontam para o mesmo arquivo")
+    # ffprobe nos dois em paralelo: rejeita na hora o que não é mídia
+    await asyncio.gather(asyncio.to_thread(_probe_manual_file, vf, "video"),
+                         asyncio.to_thread(_probe_manual_file, af, "audio"))
+
+    # readicionar o filme descarta erro anterior da mesma variante (como no create)
+    for old_id in store.error_jobs_for(tmdb_id, language, "both"):
+        _jobs.pop(old_id, None)
+        store.delete_job(old_id)
+    dest = store.get_destination(destination_id) if destination_id else None
+    if dest is None:
+        dest = store.default_destination()
+    if dest is None:
+        raise ValueError("Nenhum destino cadastrado — cadastre uma pasta de destino antes")
+
+    job = {
+        "id": uuid.uuid4().hex[:10],
+        "tmdb_id": tmdb_id,
+        "language": language,
+        "mode": "files",  # distingue da busca auto/manual nas listas da UI
+        "kind": "both",
+        "status": "merging",
+        "detail": "Preparando conversão manual...",
+        "movie": None,
+        "video_torrent": None,
+        "audio_torrent": None,
+        "progress": {"video": None, "audio": None},
+        "output": None,
+        "destination_id": dest["id"],
+        "destination_label": dest["label"],
+        "destination_path": dest["path"],
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "manual_files": {"video": str(vf), "audio": str(af)},
+        "search": None,
+        "fallbacks": None,
+        "current": None,
+    }
+    _jobs[job["id"]] = job
+    _event(job, "status",
+           f"Conversão manual criada — vídeo: {vf} | áudio: {af} — "
+           f"destino: {dest['label']} ({dest['path']})")
+    _spawn(job["id"], _run_manual(job, vf, af))
+    return _public(job)
+
+
+async def _run_manual(job: dict, video_file: Path, audio_file: Path):
+    """Pipeline da conversão manual: TMDB (só metadados do nome) -> fila -> merge."""
+    try:
+        movie = await tmdb.details(job["tmdb_id"], job["language"])
+        job["movie"] = movie
+        _event(job, "info", f"Filme: {movie['original_title']} ({movie['year']})")
+        lock = _get_merge_lock()
+        if lock.locked():
+            _set(job, "merging", "Na fila de conversão — aguardando a conversão anterior terminar...")
+        async with lock:
+            await _merge(job, video_file, audio_file)
+    except asyncio.CancelledError:
+        raise
+    except merger.VersionMismatch as e:
+        _pause_for_drift(job, {"video": video_file, "audio": audio_file}, e)
+    except Exception as e:  # noqa: BLE001
+        _fail(job, f"{type(e).__name__}: {e}")
+
+
 # -------------------- acoes da UI --------------------
 
 async def select(job_id: str, audio_id: str | None, video_id: str | None) -> dict | None:
@@ -432,7 +552,7 @@ async def cancel(job_id: str, delete_torrents: bool = False) -> dict | None:
                 await task
             except asyncio.CancelledError:
                 pass
-    if delete_torrents and is_active:
+    if delete_torrents and is_active and not job.get("manual_files"):
         # limpeza no qBittorrent com teto de tempo: se ele estiver fora do ar,
         # a remoção do job NÃO pode ficar travada esperando o timeout de rede
         for kind in ("video", "audio"):
@@ -465,6 +585,11 @@ async def retry(job_id: str) -> dict | None:
     old = _lookup(job_id)  # jobs em erro/cancelados vivem só no banco agora
     if not old or old["status"] not in ("error", "cancelled"):
         return None
+    if old.get("manual_files"):
+        return await create_manual(old["tmdb_id"], old["language"],
+                                   old["manual_files"]["video"],
+                                   old["manual_files"]["audio"],
+                                   old.get("destination_id"))
     return await create(old["tmdb_id"], old["language"], old.get("mode", "auto"),
                         old.get("destination_id"), old.get("torrent_target_id"),
                         old.get("kind", "both"))
@@ -1224,6 +1349,8 @@ async def _merge(job: dict, video_file: Path, audio_file: Path,
 
 
 async def _cleanup_torrents(job: dict):
+    if job.get("manual_files"):
+        return  # conversão manual: não há torrents para limpar
     if config.QBIT_CLEANUP == "keep":
         return
     # hardlink/cópia são independentes do arquivo do qBittorrent (nada de symlink),

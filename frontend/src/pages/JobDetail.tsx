@@ -318,6 +318,14 @@ export default function JobDetail() {
         </section>
       )}
 
+      {job.manual_files && (
+        <section className="mt-6">
+          <h2 className="mb-1 text-sm font-semibold text-zinc-400">Arquivos de origem (conversão manual)</h2>
+          <div className="text-sm break-all">🎥 <span className="font-mono text-xs text-zinc-400">{job.manual_files.video}</span></div>
+          <div className="text-sm break-all">🔊 <span className="font-mono text-xs text-zinc-400">{job.manual_files.audio}</span></div>
+        </section>
+      )}
+
       {job.destination_label && (
         <section className="mt-6">
           <h2 className="mb-1 text-sm font-semibold text-zinc-400">Destino do arquivo final</h2>

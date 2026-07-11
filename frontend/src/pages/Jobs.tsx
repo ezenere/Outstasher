@@ -175,7 +175,7 @@ export default function Jobs() {
               <span className="flex-1 font-semibold">
                 {jobTitle(j)}{' '}
                 <small className="font-normal text-zinc-400">
-                  [{kindLabel(j)}{j.mode === 'manual' ? ' · manual' : ''}
+                  [{kindLabel(j)}{j.mode === 'manual' ? ' · manual' : j.mode === 'files' ? ' · arquivos locais' : ''}
                   {j.destination_label ? ` · ${j.destination_label}` : ''}]
                 </small>
               </span>

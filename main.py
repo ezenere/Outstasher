@@ -420,6 +420,26 @@ async def create_job(req: JobRequest):
         raise HTTPException(400, str(e))
 
 
+class ManualJobRequest(BaseModel):
+    tmdb_id: int
+    language: str
+    video_path: str
+    audio_path: str
+    destination_id: int | None = None
+
+
+@app.post("/api/jobs/manual")
+async def create_manual_job(req: ManualJobRequest):
+    """Conversão manual: merge de dois arquivos locais, sem busca/torrents."""
+    if req.language not in config.LANGUAGES:
+        raise HTTPException(400, f"Idioma inválido: {req.language}")
+    try:
+        return await jobs.create_manual(req.tmdb_id, req.language, req.video_path,
+                                        req.audio_path, req.destination_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/api/jobs")
 async def list_jobs():
     return jobs.list_jobs()
@@ -511,7 +531,11 @@ async def cancel_job(job_id: str, req: CancelRequest):
 
 @app.post("/api/jobs/{job_id}/retry")
 async def retry_job(job_id: str):
-    job = await jobs.retry(job_id)
+    try:
+        job = await jobs.retry(job_id)
+    except ValueError as e:
+        # conversão manual cujos arquivos de origem sumiram do disco
+        raise HTTPException(400, str(e))
     if not job:
         raise HTTPException(409, "Só é possível repetir jobs com erro ou cancelados")
     return job
