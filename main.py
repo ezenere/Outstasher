@@ -217,6 +217,7 @@ class JobRequest(BaseModel):
     kind: str = "both"  # both (merge) | original | dubbed
     destination_id: int | None = None
     torrent_target_id: int | None = None
+    download_only: bool = False  # só baixa (sem conversão/hardlink/cópia)
 
 
 class SelectRequest(BaseModel):
@@ -415,7 +416,8 @@ async def create_job(req: JobRequest):
         raise HTTPException(400, f"Tipo inválido: {req.kind}")
     try:
         return await jobs.create(req.tmdb_id, req.language, req.mode,
-                                 req.destination_id, req.torrent_target_id, req.kind)
+                                 req.destination_id, req.torrent_target_id, req.kind,
+                                 req.download_only)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

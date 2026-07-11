@@ -20,6 +20,7 @@ export default function Movies() {
   const [languages, setLanguages] = useState<Language[]>([])
   const [language, setLanguage] = useState('pt')
   const [manual, setManual] = useState(false)
+  const [downloadOnly, setDownloadOnly] = useState(false)
   const [destinations, setDestinations] = useState<Destination[]>([])
   const [destId, setDestId] = useState<number | null>(null)
   const [targets, setTargets] = useState<TorrentTarget[]>([])
@@ -133,8 +134,10 @@ export default function Movies() {
         language,
         mode: manual ? 'manual' : 'auto',
         kind,
-        destination_id: destId,
+        // apenas baixar: não há arquivo final, então destino não se aplica
+        destination_id: downloadOnly ? null : destId,
         torrent_target_id: targetId,
+        download_only: downloadOnly,
       })
       // some com a seleção e sinaliza que começou (sem trocar de tela). O
       // estado real chega no próximo tick do summary (≤5s); até lá o overlay
@@ -233,13 +236,36 @@ export default function Movies() {
       )}
 
       {selected && (
-        <div className="fixed inset-x-0 bottom-0 z-20 border-t border-zinc-800 bg-zinc-900/95 backdrop-blur">
-          <div className="mx-auto flex max-w-5xl flex-col gap-3 px-4 py-3">
-            {/* linha 1: título */}
-            <div className="font-semibold">{selected.title ?? selected.original_title}</div>
+        <div
+          className="fixed inset-0 z-20 flex items-start justify-center overflow-y-auto bg-black/60 p-4 sm:items-center"
+          onClick={() => setSelected(null)}
+        >
+          <div
+            className="w-full max-w-2xl rounded-2xl border border-zinc-700 bg-zinc-900 p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* cabeçalho: pôster + título + fechar */}
+            <div className="flex items-center gap-3">
+              {selected.poster && (
+                <img src={selected.poster} className="h-16 w-11 shrink-0 rounded bg-zinc-800 object-cover" alt="" />
+              )}
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-lg font-semibold">{selected.title ?? selected.original_title}</div>
+                <div className="text-xs text-zinc-400">
+                  {selected.year} {selected.rating ? `· ⭐ ${selected.rating.toFixed(1)}` : ''}
+                </div>
+              </div>
+              <button
+                onClick={() => setSelected(null)}
+                className="rounded-lg border border-zinc-700 p-1.5 text-zinc-400 hover:text-zinc-200"
+                title="Fechar"
+              >
+                <Xmark width={16} height={16} />
+              </button>
+            </div>
 
-            {/* linha 2: Áudio / Destino / Torrents, cada um em 1/3 */}
-            <div className="flex flex-col gap-3 sm:flex-row">
+            {/* Áudio / Destino / Torrents, cada um em 1/3 */}
+            <div className="mt-4 flex flex-col gap-3 sm:flex-row">
               <label className="flex flex-1 flex-col gap-1 text-sm">
                 <span className="text-zinc-400">Áudio</span>
                 <select
@@ -256,9 +282,13 @@ export default function Movies() {
               <label className="flex flex-1 flex-col gap-1 text-sm">
                 <span className="flex items-center gap-2 text-zinc-400">
                   Destino
-                  <DiskFree disk={destinations.find((d) => d.id === destId)?.disk} />
+                  {!downloadOnly && <DiskFree disk={destinations.find((d) => d.id === destId)?.disk} />}
                 </span>
-                {destinations.length ? (
+                {downloadOnly ? (
+                  <span className="py-1.5 text-zinc-500" title="Apenas baixar: os arquivos ficam na pasta dos torrents">
+                    — (fica na pasta dos torrents)
+                  </span>
+                ) : destinations.length ? (
                   <select
                     value={destId ?? ''}
                     onChange={(e) => setDestId(Number(e.target.value))}
@@ -304,44 +334,51 @@ export default function Movies() {
               </label>
             </div>
 
-            {/* linha 3: manual à esquerda, ações à direita */}
-            <div className="flex items-center gap-3">
+            {/* opções */}
+            <div className="mt-3 flex flex-col gap-1.5">
               <label className="flex items-center gap-1.5 text-sm text-zinc-300">
                 <input type="checkbox" checked={manual} onChange={(e) => setManual(e.target.checked)} />
                 Escolher torrents manualmente
               </label>
-              <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-                <button
-                  onClick={() => start('original')}
-                  disabled={starting || !destinations.length}
-                  title="Baixa só o vídeo no idioma original, sem merge"
-                  className="rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
-                >
-                  🎥 Só original
-                </button>
-                <button
-                  onClick={() => start('dubbed')}
-                  disabled={starting || !destinations.length}
-                  title="Baixa só a versão dublada, sem merge"
-                  className="rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
-                >
-                  🔊 Só dublado
-                </button>
-                <button
-                  onClick={() => start('both')}
-                  disabled={starting || !destinations.length}
-                  className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
-                >
-                  ⬇ Baixar e fazer merge
-                </button>
-                <button
-                  onClick={() => setSelected(null)}
-                  className="rounded-lg border border-zinc-700 p-2 text-zinc-400 hover:text-zinc-200"
-                  title="Cancelar"
-                >
-                  <Xmark width={16} height={16} />
-                </button>
-              </div>
+              <label
+                className="flex items-center gap-1.5 text-sm text-zinc-300"
+                title="Só baixa pelo qBittorrent e conclui — sem conversão, hardlink ou cópia"
+              >
+                <input type="checkbox" checked={downloadOnly} onChange={(e) => setDownloadOnly(e.target.checked)} />
+                Apenas baixar
+              </label>
+              {downloadOnly && (
+                <p className="text-xs text-zinc-500">
+                  Os arquivos ficam onde o qBittorrent baixar — sem merge, hardlink ou cópia para o destino.
+                </p>
+              )}
+            </div>
+
+            {/* ações */}
+            <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
+              <button
+                onClick={() => start('original')}
+                disabled={starting || (!downloadOnly && !destinations.length)}
+                title={downloadOnly ? 'Baixa só o vídeo no idioma original' : 'Baixa só o vídeo no idioma original, sem merge'}
+                className="rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+              >
+                🎥 Só original
+              </button>
+              <button
+                onClick={() => start('dubbed')}
+                disabled={starting || (!downloadOnly && !destinations.length)}
+                title={downloadOnly ? 'Baixa só a versão dublada' : 'Baixa só a versão dublada, sem merge'}
+                className="rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+              >
+                🔊 Só dublado
+              </button>
+              <button
+                onClick={() => start('both')}
+                disabled={starting || (!downloadOnly && !destinations.length)}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
+              >
+                {downloadOnly ? '⬇ Baixar os dois' : '⬇ Baixar e fazer merge'}
+              </button>
             </div>
           </div>
         </div>

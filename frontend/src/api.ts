@@ -146,6 +146,8 @@ export interface Job {
   language: string
   mode: string
   kind?: string // both | original | dubbed
+  /** Só baixa pelo qBittorrent e conclui — sem conversão, hardlink ou cópia. */
+  download_only?: boolean
   status: string
   detail: string
   movie: MovieRef | null
@@ -201,6 +203,7 @@ export interface JobListItem {
   language: string
   mode: string
   kind: string
+  download_only?: boolean
   status: string
   detail: string
   movie: MovieRef | null

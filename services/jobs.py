@@ -241,6 +241,7 @@ def _slim_job(job: dict) -> dict:
     return {
         "id": job["id"], "tmdb_id": job.get("tmdb_id"), "language": job["language"],
         "mode": job.get("mode"), "kind": job.get("kind", "both"),
+        "download_only": job.get("download_only", False),
         "status": job["status"], "detail": job.get("detail", ""),
         "movie": job.get("movie"), "created_at": job["created_at"],
         "destination_label": job.get("destination_label"),
@@ -323,7 +324,7 @@ def _needed_torrents(job: dict) -> tuple[str, ...]:
 async def create(tmdb_id: int, language: str, mode: str = "auto",
                  destination_id: int | None = None,
                  torrent_target_id: int | None = None,
-                 kind: str = "both") -> dict:
+                 kind: str = "both", download_only: bool = False) -> dict:
     if kind not in KINDS:
         raise ValueError(f"kind inválido: {kind!r}")
     # readicionar o filme descarta erro anterior da MESMA variante (tmdb+idioma+
@@ -331,11 +332,15 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
     for old_id in store.error_jobs_for(tmdb_id, language, kind):
         _jobs.pop(old_id, None)
         store.delete_job(old_id)
-    dest = store.get_destination(destination_id) if destination_id else None
-    if dest is None:
-        dest = store.default_destination()
-    if dest is None:
-        raise ValueError("Nenhum destino cadastrado — cadastre uma pasta de destino antes")
+    # apenas baixar: o produto final fica na pasta dos torrents, então o job
+    # não precisa (nem usa) um destino de arquivo final
+    dest = None
+    if not download_only:
+        dest = store.get_destination(destination_id) if destination_id else None
+        if dest is None:
+            dest = store.default_destination()
+        if dest is None:
+            raise ValueError("Nenhum destino cadastrado — cadastre uma pasta de destino antes")
 
     # destino dos torrents e opcional: sem ele, usa pasta padrao do qBittorrent
     # e nao traduz o content_path (comportamento antigo do .env)
@@ -349,6 +354,7 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
         "language": language,
         "mode": mode,
         "kind": kind,
+        "download_only": download_only,
         "status": "searching",
         "detail": "Buscando informações do filme...",
         "movie": None,
@@ -356,9 +362,9 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
         "audio_torrent": None,
         "progress": {"video": None, "audio": None},
         "output": None,
-        "destination_id": dest["id"],
-        "destination_label": dest["label"],
-        "destination_path": dest["path"],
+        "destination_id": dest["id"] if dest else None,
+        "destination_label": dest["label"] if dest else None,
+        "destination_path": dest["path"] if dest else None,
         "torrent_target_id": target["id"] if target else None,
         "torrent_target_label": target["label"] if target else None,
         "torrent_save_path": (target["save_path"] if target else "") or "",
@@ -372,8 +378,10 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
     tinfo = f" — torrents: {target['label']}" if target else ""
     kind_label = {"both": "original + dublado (merge)",
                   "original": "só original", "dubbed": "só dublado"}[kind]
-    _event(job, "status",
-           f"Job criado ({kind_label}, modo {mode}) — destino: {dest['label']} ({dest['path']}){tinfo}")
+    if download_only:
+        kind_label = kind_label.replace(" (merge)", "") + ", apenas baixar"
+    dinfo = f" — destino: {dest['label']} ({dest['path']})" if dest else ""
+    _event(job, "status", f"Job criado ({kind_label}, modo {mode}){dinfo}{tinfo}")
     _spawn(job["id"], _run(job))
     return _public(job)
 
@@ -592,7 +600,7 @@ async def retry(job_id: str) -> dict | None:
                                    old.get("destination_id"))
     return await create(old["tmdb_id"], old["language"], old.get("mode", "auto"),
                         old.get("destination_id"), old.get("torrent_target_id"),
-                        old.get("kind", "both"))
+                        old.get("kind", "both"), old.get("download_only", False))
 
 
 # -------------------- pipeline --------------------
@@ -964,6 +972,13 @@ def _tag(job: dict, kind: str) -> str:
 async def _run_from_download(job: dict):
     try:
         paths = await _wait_downloads(job)
+        if job.get("download_only"):
+            # apenas baixar: o download É o produto final. Nada de conversão,
+            # hardlink ou cópia — e os torrents ficam no qBittorrent (seedando),
+            # já que os dados baixados são exatamente o que o usuário quer.
+            job["output"] = " | ".join(paths[k] for k in ("video", "audio") if k in paths)
+            _set(job, "done", f"Concluído — apenas baixado (sem conversão): {job['output']}")
+            return
         # localiza os arquivos ANTES de entrar na fila de conversão (com retry:
         # o qBittorrent pode segurar o arquivo recém-concluído por um tempo)
         files = {kind: await _resolve_video_file(job, content, kind)

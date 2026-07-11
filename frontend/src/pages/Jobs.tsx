@@ -5,7 +5,10 @@ import { api, fmtSize, post, type JobCounts, type JobListItem } from '../api'
 import { Badge, Empty } from '../components/ui'
 
 // jobTitle/kindLabel aceitam tanto o job completo quanto o item enxuto da lista
-type JobLike = { movie: JobListItem['movie']; tmdb_id: number; kind?: string; language: string }
+type JobLike = {
+  movie: JobListItem['movie']; tmdb_id: number; kind?: string; language: string
+  download_only?: boolean
+}
 
 export function jobTitle(j: JobLike): string {
   return j.movie ? `${j.movie.original_title} (${j.movie.year})` : `TMDB #${j.tmdb_id}`
@@ -13,9 +16,10 @@ export function jobTitle(j: JobLike): string {
 
 // rótulo curto do tipo do job para exibir junto do idioma
 export function kindLabel(j: JobLike): string {
-  if (j.kind === 'original') return 'só original'
-  if (j.kind === 'dubbed') return `só dublado (${j.language})`
-  return `${j.language} + orig`
+  const dl = j.download_only ? ' · apenas baixar' : ''
+  if (j.kind === 'original') return 'só original' + dl
+  if (j.kind === 'dubbed') return `só dublado (${j.language})${dl}`
+  return `${j.language} + orig${dl}`
 }
 
 // grupos do filtro; o backend filtra por grupo (não trazemos a lista toda)
