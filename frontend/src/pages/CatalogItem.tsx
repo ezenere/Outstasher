@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
-  ClosedCaptionsTag, MediaVideo, MusicNote, NavArrowDown, NavArrowLeft, NavArrowRight,
+  ClosedCaptionsTag, EditPencil, MediaVideo, MusicNote, NavArrowDown, NavArrowLeft, NavArrowRight,
   Page, Trash, WarningTriangle,
 } from 'iconoir-react'
-import { api, del, type CatalogDetail, type CatalogFile, type Stream } from '../api'
+import { api, del, post, type CatalogDetail, type CatalogFile, type Stream } from '../api'
 import { Empty } from '../components/ui'
 
 export default function CatalogItem() {
@@ -43,6 +43,20 @@ export default function CatalogItem() {
     if (!confirm(`Remover o arquivo "${f.name}"?`)) return
     try {
       await del(`/api/catalog/file?${qs}&rel=${encodeURIComponent(f.rel)}`)
+      void reload()
+    } catch (e) {
+      alert(`Erro: ${(e as Error).message}`)
+    }
+  }
+
+  async function renameFile(f: CatalogFile) {
+    const novo = prompt('Novo nome do arquivo (mantém a extensão se você não digitar uma):', f.name)
+    if (novo == null) return // cancelou
+    if (novo.trim() === '' || novo.trim() === f.name) return // vazio ou sem mudança
+    try {
+      await post('/api/catalog/file/rename', {
+        folder, destination_id: destId ? Number(destId) : null, rel: f.rel, new_name: novo.trim(),
+      })
       void reload()
     } catch (e) {
       alert(`Erro: ${(e as Error).message}`)
@@ -127,6 +141,7 @@ export default function CatalogItem() {
             file={f}
             open={open.has(f.rel)}
             onToggle={() => toggle(f.rel)}
+            onRename={() => renameFile(f)}
             onRemove={() => removeFile(f)}
           />
         ))}
@@ -135,10 +150,11 @@ export default function CatalogItem() {
   )
 }
 
-function FileRow({ file, open, onToggle, onRemove }: {
+function FileRow({ file, open, onToggle, onRename, onRemove }: {
   file: CatalogFile
   open: boolean
   onToggle: () => void
+  onRename: () => void
   onRemove: () => void
 }) {
   const Icon = file.category === 'video' ? MediaVideo : file.category === 'subtitle' ? ClosedCaptionsTag : file.category === 'media' ? MusicNote : Page
@@ -157,6 +173,13 @@ function FileRow({ file, open, onToggle, onRemove }: {
             {file.counts ? ` · ${file.counts.video}V/${file.counts.audio}A/${file.counts.subtitle}S` : ''}
             {file.probe_error ? ' · (não sondável)' : ''}
           </div>
+        </button>
+        <button
+          onClick={onRename}
+          title="Renomear arquivo"
+          className="rounded-lg border border-zinc-700 p-1.5 text-zinc-400 hover:border-blue-700 hover:text-blue-300"
+        >
+          <EditPencil width={14} height={14} />
         </button>
         <button
           onClick={onRemove}

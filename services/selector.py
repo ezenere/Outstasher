@@ -217,6 +217,21 @@ def title_variants(title: str, include_and: bool = True) -> list[str]:
 # "dual"/"multi" genérico mesmo com release de qualidade um pouco menor.
 STRONG_MARKER_BONUS = 25
 
+# Bônus (modo audio) para o ANO do filme no nome do release. Releases dublados
+# (título em português) muitas vezes vêm sem o ano, e título sem ano é ambíguo:
+# pode ser remake/reboot com o mesmo nome — o _matches_movie não distingue.
+# Com o ano no nome a identificação é confiável, então ele passa na frente de
+# um release equivalente sem o ano (mas não atropela um release MUITO melhor).
+YEAR_BONUS = 15
+
+
+def has_year(title: str, year: str) -> bool:
+    """True se o nome do torrent contém o ano do filme como número isolado
+    ('(2014)', '.2014.', ' 2014 ') — sem casar o '2014' de '32014' ou de um hash."""
+    if not year:
+        return False
+    return bool(re.search(rf"(?<!\d){re.escape(year)}(?!\d)", _fold(title)))
+
 
 def marker_strength(title: str, language: str, dubbed_title: str | None = None) -> int:
     """2 = marcador forte (dublagem confirmada), 1 = fraco ('dual'...), 0 = nenhum.
@@ -328,6 +343,10 @@ def rank(results: list[dict], mode: str, movie_title: str, year: str,
             cand["rejected"] = "sem seeders"
         else:
             s = score(r, mode, language, dubbed_title)
+            # áudio dublado: ano no nome = identificação confiável, sobe na fila
+            # (vídeo não precisa: a busca original já vai com o ano na query)
+            if mode == "audio" and has_year(r["title"], year):
+                s += YEAR_BONUS
             cand["score"] = round(s, 1)
             if s <= -30:
                 cand["rejected"] = "qualidade muito baixa (CAM/TS)"

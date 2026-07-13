@@ -264,6 +264,41 @@ def delete_file(destination_id: int | None, folder: str, rel: str) -> None:
     target.unlink()
 
 
+def rename_file(destination_id: int | None, folder: str, rel: str, new_name: str) -> str:
+    """Renomeia um arquivo do item, mantendo-o na MESMA subpasta.
+
+    `new_name` é só o nome do arquivo (sem barras) — não move entre pastas. Se
+    vier sem extensão, herda a do arquivo original (para o usuário não perder o
+    .mkv sem querer). Retorna o novo `rel` (relativo à pasta do item).
+    """
+    dest = _resolve_dest(destination_id)
+    root = Path(dest["path"])
+    item_dir = _safe_join(root, folder)
+    src = _safe_join(root, folder, rel)
+    if not src.is_file():
+        raise CatalogError("Arquivo não encontrado")
+
+    clean = (new_name or "").strip()
+    if not clean:
+        raise CatalogError("Nome vazio")
+    # o novo nome é só o nome do arquivo — nada de mudar de pasta por aqui
+    if "/" in clean or "\\" in clean or clean in (".", ".."):
+        raise CatalogError("O nome não pode conter barras")
+    # caracteres proibidos em nomes de arquivo (Windows/POSIX) + controle
+    if re.search(r'[<>:"|?*\x00-\x1f]', clean):
+        raise CatalogError('O nome não pode conter < > : " | ? * nem controle')
+    if not Path(clean).suffix:  # sem extensão: herda a do original
+        clean += src.suffix
+
+    target = _safe_join(root, folder, src.parent.relative_to(item_dir).as_posix(), clean)
+    if target == src:
+        return src.relative_to(item_dir).as_posix()
+    if target.exists():
+        raise CatalogError(f"Já existe um arquivo chamado '{clean}' nesta pasta")
+    src.rename(target)
+    return target.relative_to(item_dir).as_posix()
+
+
 def delete_folder(destination_id: int | None, folder: str) -> None:
     dest = _resolve_dest(destination_id)
     root = Path(dest["path"])

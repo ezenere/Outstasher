@@ -397,6 +397,22 @@ async def catalog_delete_file(folder: str, rel: str, destination_id: int | None 
     return {"ok": True}
 
 
+class RenameFileRequest(BaseModel):
+    folder: str
+    rel: str
+    new_name: str
+    destination_id: int | None = None
+
+
+@app.post("/api/catalog/file/rename")
+async def catalog_rename_file(req: RenameFileRequest):
+    try:
+        new_rel = catalog.rename_file(req.destination_id, req.folder, req.rel, req.new_name)
+    except catalog.CatalogError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "rel": new_rel}
+
+
 @app.delete("/api/catalog/item")
 async def catalog_delete_folder(folder: str, destination_id: int | None = None):
     try:
