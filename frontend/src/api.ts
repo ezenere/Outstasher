@@ -8,6 +8,8 @@ export interface Movie {
   overview: string | null
   poster: string | null
   rating: number | null
+  /** Já existe na coleção (pasta em algum destino) — cache de 30 min no backend. */
+  in_catalog?: boolean
 }
 
 /** Página de resultados de filmes do TMDB (/api/movies). */

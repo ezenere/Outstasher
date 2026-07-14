@@ -4,6 +4,7 @@ Rode com:
     python main.py        # produção: builda o frontend (se mudou) e serve tudo em :8008
     python main.py dev    # dev: API em :8008 com reload + Vite em watch em :5173
 """
+import asyncio
 import shutil
 import subprocess
 import sys
@@ -207,7 +208,12 @@ async def movies(q: str = "", page: int = 1):
     if not config.TMDB_API_KEY:
         raise HTTPException(500, "TMDB_API_KEY não configurada no .env")
     page = max(1, min(page, 500))  # TMDB aceita no máximo 500 páginas
-    return await (tmdb.search(q.strip(), page) if q.strip() else tmdb.popular(page))
+    result = await (tmdb.search(q.strip(), page) if q.strip() else tmdb.popular(page))
+    # marca o que já está na coleção (cache de 30 min, rescan on demand)
+    keys = await asyncio.to_thread(catalog.library_keys)
+    for m in result.get("results", []):
+        m["in_catalog"] = catalog.in_library(m, keys)
+    return result
 
 
 class JobRequest(BaseModel):
@@ -258,7 +264,9 @@ async def list_destinations():
 async def add_destination(req: DestinationRequest):
     if not req.label.strip() or not req.path.strip():
         raise HTTPException(400, "Nome e caminho são obrigatórios")
-    return _with_disk(store.add_destination(req.label.strip(), req.path.strip(), req.is_default))
+    dest = store.add_destination(req.label.strip(), req.path.strip(), req.is_default)
+    catalog.invalidate_library()  # os destinos definem o que conta como coleção
+    return _with_disk(dest)
 
 
 @app.put("/api/destinations/{dest_id}")
@@ -268,6 +276,7 @@ async def update_destination(dest_id: int, req: DestinationRequest):
     dest = store.update_destination(dest_id, req.label.strip(), req.path.strip(), req.is_default)
     if not dest:
         raise HTTPException(404, "Destino não encontrado")
+    catalog.invalidate_library()
     return _with_disk(dest)
 
 
@@ -275,6 +284,7 @@ async def update_destination(dest_id: int, req: DestinationRequest):
 async def delete_destination(dest_id: int):
     if not store.delete_destination(dest_id):
         raise HTTPException(404, "Destino não encontrado")
+    catalog.invalidate_library()
     return {"ok": True}
 
 

@@ -186,8 +186,17 @@ def _measure_window(ref_path: str, ref_a: int, oth_path: str, oth_a: int,
 
 def measure_segment_offsets(ref_path: str, ref_a: int, oth_path: str, oth_a: int,
                             segments: list[tuple[float, float]],
-                            p: SegmentParams, log=print) -> list[float]:
-    """Offset (s) de cada segmento; curto demais para medir herda o vizinho."""
+                            p: SegmentParams, log=print,
+                            oth_duration: float | None = None) -> list[float]:
+    """Offset (s) de cada segmento; imensurável herda o vizinho.
+
+    Imensurável = curto demais, além do fim do arquivo dublado (os segmentos
+    vêm da linha do tempo da REFERÊNCIA — se o dublado é mais curta, os
+    últimos segmentos não existem nele e a extração viria vazia), ou extração
+    que falhou por qualquer outro motivo (áudio mais curto que o container,
+    fim corrompido...). Nada disso derruba o merge: só aquele segmento fica
+    sem medição própria.
+    """
     offsets: list[float | None] = []
     for s, e in segments:
         seg = e - s
@@ -198,7 +207,21 @@ def measure_segment_offsets(ref_path: str, ref_a: int, oth_path: str, oth_a: int
             log(f"  segmento {s:9.2f}-{e:9.2f}s: curto demais para medir — herda o vizinho")
             continue
         start = s + max(margin, (seg - dur) / 2)  # janela centrada no segmento
-        tau = _measure_window(ref_path, ref_a, oth_path, oth_a, start, dur)
+        if oth_duration:
+            # a extração dos dois arquivos usa o MESMO start absoluto: janela
+            # que não cabe no dublado sairia vazia/curta demais para o GCC-PHAT
+            if start + MIN_MEASURE_WINDOW > oth_duration:
+                offsets.append(None)
+                log(f"  segmento {s:9.2f}-{e:9.2f}s: além do fim do arquivo dublado "
+                    f"({oth_duration:.0f}s) — herda o vizinho")
+                continue
+            dur = min(dur, oth_duration - start)
+        try:
+            tau = _measure_window(ref_path, ref_a, oth_path, oth_a, start, dur)
+        except MergeError as err:
+            offsets.append(None)
+            log(f"  ⚠️ segmento {s:9.2f}-{e:9.2f}s: medição falhou ({err}) — herda o vizinho")
+            continue
         offsets.append(tau)
         log(f"  segmento {s:9.2f}-{e:9.2f}s: offset {tau * 1000:+8.1f} ms")
 
@@ -327,7 +350,8 @@ def merge_segmented(file1: str, file2: str, output: str, target_lang: str | None
     # ---- 2. offset por segmento ----
     log("Medindo o offset de cada segmento (GCC-PHAT)...")
     offsets = measure_segment_offsets(ref_path, ref_align_a, oth_path, oth_align_a,
-                                      segments, p, log)
+                                      segments, p, log,
+                                      oth_duration=merger._duration_of(probes[other_input]))
 
     spread = max(offsets) - min(offsets)
     if len(segments) == 1 or spread <= OFFSET_AGREEMENT:

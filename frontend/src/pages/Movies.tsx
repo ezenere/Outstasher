@@ -209,6 +209,16 @@ export default function Movies() {
                 <div className="mt-0.5 text-xs text-zinc-400">
                   {m.year} {m.rating ? `· ⭐ ${m.rating.toFixed(1)}` : ''}
                 </div>
+                {m.in_catalog && !state && (
+                  <div className="mt-1.5">
+                    <span
+                      title="Já existe uma pasta deste filme na coleção"
+                      className="rounded bg-emerald-950 px-1.5 py-0.5 text-xs font-medium text-emerald-300"
+                    >
+                      ✓ Na coleção
+                    </span>
+                  </div>
+                )}
                 {state && (
                   <div className="mt-1.5">
                     <MovieStateBadge state={state} />

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import re
 import shutil
+import time
+import unicodedata
 from pathlib import Path
 
 from services import store
@@ -308,3 +310,72 @@ def delete_folder(destination_id: int | None, folder: str) -> None:
     if not target.is_dir():
         raise CatalogError("Pasta não encontrada")
     shutil.rmtree(target)
+    invalidate_library()  # sumiu um filme da coleção
+
+
+# -------------------- cache "já está na coleção?" --------------------
+# A busca de filmes (TMDB) marca o que o usuário JÁ TEM nos destinos. Para não
+# bater no disco a cada busca: um scan leve (só o 1º nível das pastas de cada
+# destino) fica em memória por LIBRARY_TTL_SECONDS e só é refeito quando uma
+# busca chega com o cache vencido (on demand) ou após invalidate_library()
+# (mudança real: job concluído, pasta removida, destinos alterados).
+# Sem lock de propósito: duas buscas simultâneas com cache vencido só fariam
+# o mesmo scan duas vezes — inofensivo, e a atribuição do dict é atômica.
+
+LIBRARY_TTL_SECONDS = 30 * 60
+_library_cache: dict = {"at": 0.0, "keys": frozenset()}
+
+
+def _norm_title(text: str) -> str:
+    """Título normalizado para casar pasta com TMDB: minúsculo, sem acentos,
+    só letras/números ('WALL·E' == 'WALLE', 'Tóquio' == 'toquio')."""
+    nfkd = unicodedata.normalize("NFKD", (text or "").lower())
+    stripped = "".join(c for c in nfkd if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]+", "", stripped)
+
+
+def _scan_library() -> frozenset[tuple[str, str | None]]:
+    """(titulo_normalizado, ano|None) de cada pasta de filme em cada destino."""
+    keys = set()
+    for dest in store.list_destinations():
+        root = Path(dest["path"])
+        try:
+            if not root.is_dir():
+                continue
+            for entry in root.iterdir():
+                if entry.is_dir():
+                    title, year = _title_and_year(entry.name)
+                    if title:
+                        keys.add((_norm_title(title), year))
+        except OSError:
+            continue  # destino desmontado/sem permissão não derruba a busca
+    return frozenset(keys)
+
+
+def library_keys() -> frozenset[tuple[str, str | None]]:
+    """Chaves da coleção, do cache (rescan só se venceu o TTL). Bloqueante —
+    chamar via asyncio.to_thread na API."""
+    if time.monotonic() - _library_cache["at"] > LIBRARY_TTL_SECONDS:
+        _library_cache["keys"] = _scan_library()
+        _library_cache["at"] = time.monotonic()
+    return _library_cache["keys"]
+
+
+def invalidate_library() -> None:
+    """Marca o cache como vencido (a PRÓXIMA busca refaz o scan — nada roda já)."""
+    _library_cache["at"] = 0.0
+
+
+def in_library(movie: dict, keys: frozenset) -> bool:
+    """O filme do TMDB já está na coleção? Casa título original OU localizado
+    + ano; pasta sem ano no nome casa só pelo título."""
+    year = movie.get("year") or None
+    for t in (movie.get("original_title"), movie.get("title")):
+        if not t:
+            continue
+        norm = _norm_title(t)
+        if not norm:
+            continue
+        if (norm, year) in keys or (norm, None) in keys:
+            return True
+    return False

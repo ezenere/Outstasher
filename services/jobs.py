@@ -25,7 +25,7 @@ from urllib.parse import unquote_plus
 import httpx
 
 import config
-from services import jackett, merger, selector, store, tmdb
+from services import catalog, jackett, merger, selector, store, tmdb
 from services.qbittorrent import QbitClient, QbitError
 
 # problemas de comunicação com o qBittorrent que NÃO devem falhar o job
@@ -294,6 +294,9 @@ def _set(job: dict, status: str, detail: str = ""):
     job["status"] = status
     job["detail"] = detail
     _event(job, "status", detail or status)  # persiste o estado final no banco
+    if status == "done":
+        # entrou filme novo no destino: a próxima busca refaz o scan da coleção
+        catalog.invalidate_library()
     if status in _TERMINAL_STATUSES:
         # virou histórico: tira da memória (quem chamou ainda tem a referência
         # do dict para terminar o que estava fazendo; o banco já está atualizado)
