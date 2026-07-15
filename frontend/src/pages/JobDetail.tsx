@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { NavArrowLeft, Refresh, Trash } from 'iconoir-react'
-import { post, prog, type Job, type JobProgress } from '../api'
+import { post, prog, type Job, type JobEvent, type JobProgress } from '../api'
 import { api } from '../api'
-import { Badge, CandidatesTable, Empty, MergeBar, ProgressBar } from '../components/ui'
+import { Badge, CandidatesTable, Collapsible, Empty, MergeBar, ProgressBar } from '../components/ui'
 import { jobTitle, kindLabel, removeJob } from './Jobs'
 
 export default function JobDetail() {
@@ -16,6 +16,8 @@ export default function JobDetail() {
   // troca de torrent durante o download: qual lista está aberta + trava anti-duplo-clique
   const [pickKind, setPickKind] = useState<'video' | 'audio' | null>(null)
   const [switching, setSwitching] = useState(false)
+  // timeline completa fica escondida por padrão (só os eventos recentes à vista)
+  const [fullTimeline, setFullTimeline] = useState(false)
   const navigate = useNavigate()
 
   // detalhe completo (eventos, candidatos, destinos): recarrega a cada 5s
@@ -68,13 +70,25 @@ export default function JobDetail() {
     }
   }, [job?.status, job?.search])
 
+  const allEvents = useMemo(() => job?.events ?? [], [job?.events])
+  const candEvents = useMemo(
+    () => allEvents.filter((e) => e.kind === 'candidates' && e.data?.candidates),
+    [allEvents],
+  )
+  const timeline = useMemo(() => allEvents.filter((e) => e.kind !== 'candidates'), [allEvents])
+  // "eventos recentes": da última transição de status (bolinha azul) para baixo.
+  // É o que importa agora; a timeline anterior fica atrás do "ver completa".
+  const recent = useMemo(() => {
+    const lastStatus = timeline.map((e) => e.kind).lastIndexOf('status')
+    return lastStatus <= 0 ? timeline : timeline.slice(lastStatus)
+  }, [timeline])
+
   if (error) return <Empty>Erro: {error}</Empty>
   if (!job) return <Empty>Carregando...</Empty>
 
   const pv = prog(job.progress?.video)
   const pa = prog(job.progress?.audio)
-  const candEvents = (job.events ?? []).filter((e) => e.kind === 'candidates' && e.data?.candidates)
-  const timeline = (job.events ?? []).filter((e) => e.kind !== 'candidates')
+  const movie = job.movie
 
   // que torrents este job baixa (kind = both | original | dubbed)
   const needAudio = job.kind !== 'original'
@@ -151,6 +165,7 @@ export default function JobDetail() {
   function switchControls(kind: 'video' | 'audio') {
     if (job?.status !== 'downloading') return null
     const list = kind === 'video' ? job.search?.video : job.search?.audio
+    const currentTitle = (kind === 'video' ? job.video_torrent : job.audio_torrent)?.title
     return (
       <div className="mt-1.5">
         <div className="flex flex-wrap items-center gap-2">
@@ -174,9 +189,11 @@ export default function JobDetail() {
         {pickKind === kind && list && (
           <div className="mt-2">
             <div className="mb-1 text-xs text-zinc-500">
-              Clique em um torrent para trocar imediatamente:
+              Clique em um torrent para trocar imediatamente. O
+              <span className="mx-1 text-emerald-400">▶</span>
+              marca o que está baixando agora.
             </div>
-            <CandidatesTable candidates={list} selectable onSelect={(cid) => trySwitch(kind, cid)} />
+            <CandidatesTable candidates={list} selectable currentTitle={currentTitle} onSelect={(cid) => trySwitch(kind, cid)} />
           </div>
         )}
       </div>
@@ -213,6 +230,32 @@ export default function JobDetail() {
 
       <div className="mt-2 text-sm wrap-break-word whitespace-pre-wrap text-zinc-400">{job.detail}</div>
 
+      {/* capa + sinopse do filme */}
+      {movie && (movie.poster || movie.overview) && (
+        <section className="mt-5 flex gap-4 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+          {movie.poster && (
+            <img
+              src={movie.poster}
+              alt=""
+              className="h-40 w-auto shrink-0 rounded-lg bg-zinc-800 object-cover"
+            />
+          )}
+          <div className="min-w-0">
+            <div className="font-semibold">
+              {movie.original_title}
+              {movie.year ? <span className="font-normal text-zinc-400"> ({movie.year})</span> : ''}
+            </div>
+            {movie.localized_title && movie.localized_title !== movie.original_title && (
+              <div className="text-sm text-zinc-400">{movie.localized_title}</div>
+            )}
+            {movie.overview && (
+              <p className="mt-2 text-sm leading-relaxed text-zinc-300">{movie.overview}</p>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* ---- ações pendentes (o mais urgente vem primeiro) ---- */}
       {job.status === 'awaiting' && job.drift_confirm && (
         <section className="mt-6 rounded-xl border border-amber-900/60 bg-amber-950/20 p-4">
           <h2 className="mb-2 font-semibold text-amber-300">⚠️ Possível versão/corte diferente</h2>
@@ -265,6 +308,7 @@ export default function JobDetail() {
         </section>
       )}
 
+      {/* ---- progresso ao vivo ---- */}
       {job.status === 'merging' && job.progress?.merge && (
         <section className="mt-6">
           <h2 className="mb-2 text-sm font-semibold text-zinc-400">Conversão</h2>
@@ -292,69 +336,136 @@ export default function JobDetail() {
         </section>
       )}
 
-      {candEvents.map((ev, i) => (
-        <section key={i} className="mt-6">
-          <h2 className="mb-2 text-sm font-semibold text-zinc-400">{ev.message}</h2>
-          <CandidatesTable candidates={ev.data!.candidates!} showReason />
-        </section>
-      ))}
+      {/* ---- o que foi escolhido / configurado (resumo em destaque) ---- */}
+      <JobSummary job={job} />
 
+      {/* ---- eventos recentes + timeline completa recolhida ---- */}
       {timeline.length > 0 && (
         <section className="mt-6">
-          <h2 className="mb-2 text-sm font-semibold text-zinc-400">Timeline</h2>
-          <div className="ml-1.5 border-l-2 border-zinc-800 pl-4 text-sm">
-            {timeline.map((ev, i) => (
-              <div key={i} className="relative mb-2">
-                <span
-                  className={`absolute top-1.5 -left-[21px] h-2 w-2 rounded-full ${
-                    ev.kind === 'chosen' ? 'bg-emerald-400' : ev.kind === 'status' ? 'bg-blue-500' : 'bg-zinc-700'
-                  }`}
-                />
-                <span className="mr-2 text-zinc-500 tabular-nums">{ev.ts.slice(11, 19)}</span>
-                <span className="wrap-break-word whitespace-pre-wrap">{ev.message}</span>
-              </div>
-            ))}
+          <div className="mb-2 flex items-center gap-3">
+            <h2 className="text-sm font-semibold text-zinc-400">
+              {fullTimeline ? 'Timeline completa' : 'Eventos recentes'}
+            </h2>
+            {timeline.length > recent.length && (
+              <button
+                onClick={() => setFullTimeline((v) => !v)}
+                className="rounded-lg border border-zinc-700 px-2 py-0.5 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+              >
+                {fullTimeline ? 'Mostrar só os recentes' : `Ver timeline completa (${timeline.length})`}
+              </button>
+            )}
           </div>
+          <EventList events={fullTimeline ? timeline : recent} />
         </section>
       )}
 
-      {job.manual_files && (
-        <section className="mt-6">
-          <h2 className="mb-1 text-sm font-semibold text-zinc-400">Arquivos de origem (conversão manual)</h2>
-          <div className="text-sm break-all">🎥 <span className="font-mono text-xs text-zinc-400">{job.manual_files.video}</span></div>
-          <div className="text-sm break-all">🔊 <span className="font-mono text-xs text-zinc-400">{job.manual_files.audio}</span></div>
-        </section>
-      )}
-
-      {job.destination_label && (
-        <section className="mt-6">
-          <h2 className="mb-1 text-sm font-semibold text-zinc-400">Destino do arquivo final</h2>
-          <div className="text-sm">
-            {job.destination_label}{' '}
-            <span className="font-mono text-xs text-zinc-500">({job.destination_path})</span>
-          </div>
-        </section>
-      )}
-
-      {job.torrent_target_label && (
-        <section className="mt-6">
-          <h2 className="mb-1 text-sm font-semibold text-zinc-400">Destino dos torrents</h2>
-          <div className="text-sm">
-            {job.torrent_target_label}{' '}
-            <span className="font-mono text-xs text-zinc-500">
-              ({job.torrent_save_path || 'pasta padrão do qBittorrent'}
-              {job.torrent_local_path ? ` → ${job.torrent_local_path}` : ''})
-            </span>
-          </div>
-        </section>
-      )}
-
-      {job.output && (
-        <section className="mt-6">
-          <h2 className="mb-1 text-sm font-semibold text-zinc-400">Saída</h2>
-          <div className="text-sm break-all">{job.output}</div>
+      {/* ---- candidatos avaliados: informação secundária, em dropdown ---- */}
+      {candEvents.length > 0 && (
+        <section className="mt-6 space-y-2">
+          {candEvents.map((ev, i) => (
+            <Collapsible
+              key={i}
+              title={ev.message}
+              right={<span className="text-xs text-zinc-500">{ev.data!.candidates!.length} candidatos</span>}
+            >
+              <CandidatesTable candidates={ev.data!.candidates!} showReason />
+            </Collapsible>
+          ))}
         </section>
       )}
     </div>
+  )
+}
+
+/** Linha do tempo (bolinha colorida + horário + mensagem). */
+function EventList({ events }: { events: JobEvent[] }) {
+  return (
+    <div className="ml-1.5 border-l-2 border-zinc-800 pl-4 text-sm">
+      {events.map((ev, i) => (
+        <div key={i} className="relative mb-2">
+          <span
+            className={`absolute top-1.5 -left-[21px] h-2 w-2 rounded-full ${
+              ev.kind === 'chosen' ? 'bg-emerald-400' : ev.kind === 'status' ? 'bg-blue-500' : 'bg-zinc-700'
+            }`}
+          />
+          <span className="mr-2 text-zinc-500 tabular-nums">{ev.ts.slice(11, 19)}</span>
+          <span className="wrap-break-word whitespace-pre-wrap">{ev.message}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/** Resumo do que foi escolhido/configurado: torrents selecionados, destinos,
+ *  arquivos de origem e saída. Fica ACIMA da timeline — é o que o usuário quer
+ *  ver de relance, sem caçar na lista de eventos. */
+function JobSummary({ job }: { job: Job }) {
+  const rows: { label: string; value: React.ReactNode }[] = []
+
+  if (job.video_torrent) {
+    const t = job.video_torrent
+    rows.push({
+      label: '🎥 Vídeo escolhido',
+      value: (
+        <span>
+          <span className="break-all">{t.title}</span>
+          <span className="text-zinc-500"> · {t.seeders} seeds · corte {t.edition ?? 'normal'} · score {t.score}</span>
+        </span>
+      ),
+    })
+  }
+  if (job.audio_torrent) {
+    const t = job.audio_torrent
+    rows.push({
+      label: '🔊 Áudio escolhido',
+      value: (
+        <span>
+          <span className="break-all">{t.title}</span>
+          <span className="text-zinc-500"> · {t.seeders} seeds · corte {t.edition ?? 'normal'} · score {t.score}</span>
+        </span>
+      ),
+    })
+  }
+  if (job.manual_files) {
+    rows.push({ label: '🎥 Arquivo de vídeo', value: <span className="font-mono text-xs break-all">{job.manual_files.video}</span> })
+    rows.push({ label: '🔊 Arquivo de áudio', value: <span className="font-mono text-xs break-all">{job.manual_files.audio}</span> })
+  }
+  if (job.destination_label) {
+    rows.push({
+      label: '📁 Destino final',
+      value: <span>{job.destination_label} <span className="font-mono text-xs text-zinc-500">({job.destination_path})</span></span>,
+    })
+  }
+  if (job.torrent_target_label) {
+    rows.push({
+      label: '🧲 Destino dos torrents',
+      value: (
+        <span>
+          {job.torrent_target_label}{' '}
+          <span className="font-mono text-xs text-zinc-500">
+            ({job.torrent_save_path || 'pasta padrão do qBittorrent'}
+            {job.torrent_local_path ? ` → ${job.torrent_local_path}` : ''})
+          </span>
+        </span>
+      ),
+    })
+  }
+  if (job.output) {
+    rows.push({ label: '✅ Saída', value: <span className="break-all">{job.output}</span> })
+  }
+
+  if (!rows.length) return null
+  return (
+    <section className="mt-6">
+      <h2 className="mb-2 text-sm font-semibold text-zinc-400">Resumo</h2>
+      <dl className="divide-y divide-zinc-800/60 rounded-xl border border-zinc-800">
+        {rows.map((r, i) => (
+          <div key={i} className="grid grid-cols-[9rem_1fr] gap-3 px-3 py-2 text-sm">
+            <dt className="text-zinc-400">{r.label}</dt>
+            <dd className="min-w-0 text-zinc-200">{r.value}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
   )
 }

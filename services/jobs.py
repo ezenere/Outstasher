@@ -1161,6 +1161,9 @@ async def _wait_downloads(job: dict) -> dict:
                 missing[kind]["since"] = None
                 t = torrents[0]
                 pct = t.get("progress", 0)
+                # size = tamanho dos arquivos SELECIONADOS do torrent (o que vai
+                # baixar de fato); total_size inclui os desmarcados. completed =
+                # bytes já baixados. Sem isso a UI não mostrava o tamanho real.
                 job["progress"][kind] = {
                     "pct": round(pct * 100, 1),
                     "speed": t.get("dlspeed", 0),
@@ -1168,6 +1171,8 @@ async def _wait_downloads(job: dict) -> dict:
                     "state": t.get("state"),
                     "seeds": t.get("num_seeds", 0),
                     "name": t.get("name"),
+                    "size": t.get("size", 0),
+                    "downloaded": t.get("completed", 0),
                 }
                 if pct >= 1:
                     paths[kind] = t["content_path"]

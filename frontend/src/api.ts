@@ -138,6 +138,8 @@ export interface Progress {
   state?: string | null
   seeds?: number | null
   name?: string | null
+  size?: number | null        // tamanho total dos arquivos a baixar (bytes)
+  downloaded?: number | null  // bytes já baixados
 }
 
 /** Progresso do ffmpeg durante o merge (parseado de -progress pipe:1). */
@@ -184,6 +186,7 @@ export interface MovieRef {
   localized_title?: string | null
   year: string
   poster?: string | null
+  overview?: string | null
 }
 
 export interface Job {
@@ -488,6 +491,54 @@ export const STATUS_LABEL: Record<string, string> = {
   done: 'Concluído',
   error: 'Erro',
   cancelled: 'Cancelado',
+}
+
+// ---------- estados crus do qBittorrent -> rótulo legível + severidade ----------
+// A API do qBittorrent devolve estados como "stalledDL", "metaDL",
+// "checkingResumeData"... Aqui viram texto humano. `tone` colore o chip:
+// ok (baixando/seedando), warn (parado/enfileirado), done (completo), err (erro).
+
+export type QbitTone = 'ok' | 'warn' | 'done' | 'err' | 'neutral'
+
+interface QbitStateInfo {
+  label: string
+  tone: QbitTone
+}
+
+const QBIT_STATE: Record<string, QbitStateInfo> = {
+  downloading: { label: 'Baixando', tone: 'ok' },
+  forcedDL: { label: 'Baixando (forçado)', tone: 'ok' },
+  metaDL: { label: 'Obtendo metadados', tone: 'warn' },
+  forcedMetaDL: { label: 'Obtendo metadados', tone: 'warn' },
+  stalledDL: { label: 'Sem fonte (esperando seeds)', tone: 'warn' },
+  queuedDL: { label: 'Na fila para baixar', tone: 'warn' },
+  allocating: { label: 'Alocando espaço', tone: 'neutral' },
+  checkingDL: { label: 'Verificando dados', tone: 'neutral' },
+  checkingResumeData: { label: 'Verificando ao iniciar', tone: 'neutral' },
+  moving: { label: 'Movendo arquivos', tone: 'neutral' },
+  pausedDL: { label: 'Pausado', tone: 'warn' },
+  stoppedDL: { label: 'Parado', tone: 'warn' },
+  uploading: { label: 'Concluído (seedando)', tone: 'done' },
+  forcedUP: { label: 'Concluído (seedando)', tone: 'done' },
+  stalledUP: { label: 'Concluído (sem leechers)', tone: 'done' },
+  queuedUP: { label: 'Concluído (na fila de upload)', tone: 'done' },
+  checkingUP: { label: 'Concluído (verificando)', tone: 'done' },
+  pausedUP: { label: 'Concluído', tone: 'done' },
+  stoppedUP: { label: 'Concluído', tone: 'done' },
+  error: { label: 'Erro', tone: 'err' },
+  missingFiles: { label: 'Arquivos ausentes', tone: 'err' },
+  unknown: { label: 'Desconhecido', tone: 'neutral' },
+}
+
+/** Estado cru do qBittorrent -> { label legível, tone p/ cor }. */
+export function qbitState(state?: string | null): QbitStateInfo {
+  if (!state) return { label: '', tone: 'neutral' }
+  return QBIT_STATE[state] ?? { label: state, tone: 'neutral' }
+}
+
+/** True quando o torrent já terminou de baixar (qualquer variante de "UP"). */
+export function qbitIsComplete(state?: string | null): boolean {
+  return !!state && (state.endsWith('UP') || state.endsWith('up'))
 }
 
 // ---------- estado de um filme derivado dos jobs ----------
