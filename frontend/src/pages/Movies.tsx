@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Search, Xmark } from 'iconoir-react'
+import { Check, Download, MediaVideo, Search, SoundHigh, Xmark } from 'iconoir-react'
 import {
   api, MOVIE_STATE_LABEL, post,
   type ConvertOptions, type Destination, type Job, type Language, type Movie,
@@ -217,9 +217,9 @@ export default function Movies() {
                   <div className="mt-1.5">
                     <span
                       title="Já existe uma pasta deste filme na coleção"
-                      className="rounded bg-emerald-950 px-1.5 py-0.5 text-xs font-medium text-emerald-300"
+                      className="inline-flex items-center gap-1 rounded bg-emerald-950 px-1.5 py-0.5 text-xs font-medium text-emerald-300"
                     >
-                      ✓ Na coleção
+                      <Check width={12} height={12} /> Na coleção
                     </span>
                   </div>
                 )}
@@ -382,25 +382,26 @@ export default function Movies() {
               <button
                 onClick={() => start('original')}
                 disabled={starting || (!downloadOnly && !destinations.length)}
-                title={downloadOnly ? 'Baixa só o vídeo no idioma original' : 'Baixa só o vídeo no idioma original, sem merge'}
-                className="rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                title={downloadOnly ? 'Baixa só o vídeo original' : 'Baixa só o vídeo original, sem merge'}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
               >
-                🎥 Só original
+                <MediaVideo width={15} height={15} /> Só original
               </button>
               <button
                 onClick={() => start('dubbed')}
                 disabled={starting || (!downloadOnly && !destinations.length)}
                 title={downloadOnly ? 'Baixa só a versão dublada' : 'Baixa só a versão dublada, sem merge'}
-                className="rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
               >
-                🔊 Só dublado
+                <SoundHigh width={15} height={15} /> Só dublado
               </button>
               <button
                 onClick={() => start('both')}
                 disabled={starting || (!downloadOnly && !destinations.length)}
-                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
               >
-                {downloadOnly ? '⬇ Baixar os dois' : '⬇ Baixar e fazer merge'}
+                <Download width={15} height={15} />
+                {downloadOnly ? 'Baixar os dois' : 'Baixar e fazer merge'}
               </button>
             </div>
           </div>

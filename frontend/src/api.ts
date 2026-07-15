@@ -546,6 +546,39 @@ export function qbitIsComplete(state?: string | null): boolean {
 // cabeçalho (JobSummary[], via JobsSummaryContext), sem cruzar jobs no cliente.
 // Aqui ficam só o tipo e os rótulos.
 
+// nome legível de idioma a partir do código (fallback: código em maiúsculas).
+// Espelha os labels do config.LANGUAGES do backend — estáveis o bastante para
+// os cards não precisarem buscar /api/languages.
+const LANG_NAME: Record<string, string> = {
+  pt: 'Português', es: 'Espanhol', en: 'Inglês', it: 'Italiano',
+  de: 'Alemão', fr: 'Francês', ja: 'Japonês', ko: 'Coreano',
+}
+
+export const langName = (code: string): string =>
+  LANG_NAME[code] ?? code.toUpperCase()
+
+/** Resumo curto das opções de conversão para exibir na descrição/eventos.
+ *  Só as opções que diferem do padrão. Retorna [] quando tudo é padrão. */
+export function convertSummary(c: ConvertOptions | null | undefined): string[] {
+  if (!c) return []
+  const out: string[] = []
+  if (c.video_codec !== 'keep') out.push(c.video_codec.toUpperCase())
+  if (c.resolution !== 'keep') {
+    const r: Record<string, string> = { '4320': '8K', '2160': '4K', '1080': '1080p', '720': '720p', '480': '480p' }
+    out.push(r[c.resolution] ?? c.resolution)
+  }
+  if (c.quality_mode === 'crf' && c.crf != null) out.push(`CRF ${c.crf}`)
+  else if (c.video_codec !== 'keep' && c.video_bitrate != null)
+    out.push(c.video_bitrate >= 1000 ? `${(c.video_bitrate / 1000).toFixed(1)} Mbps` : `${c.video_bitrate} kbps`)
+  if (c.bit_depth !== 'keep') out.push(`${c.bit_depth}-bit`)
+  if (c.audio_codec !== 'keep') out.push(`áudio ${c.audio_codec.toUpperCase()}`)
+  if (c.channels !== 'keep') out.push(c.channels === 'stereo' ? 'estéreo' : '5.1')
+  if (c.audio_tracks === 'target') out.push('só orig+dub')
+  if (c.subtitles === 'none') out.push('sem legendas')
+  else if (c.subtitles === 'all') out.push('todas legendas')
+  return out
+}
+
 export type MovieState = 'converting' | 'downloading' | 'searching' | 'awaiting' | 'done' | 'error'
 
 export const MOVIE_STATE_LABEL: Record<MovieState, string> = {

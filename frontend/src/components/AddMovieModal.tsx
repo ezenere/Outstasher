@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Search, Xmark } from 'iconoir-react'
+import { MediaVideo, Movie as MovieIcon, Play, Search, SoundHigh, Xmark } from 'iconoir-react'
 import { api, post, type ConvertOptions, type Destination, type Job, type Language, type Movie, type MoviePage } from '../api'
 import AdvancedOptions from './AdvancedOptions'
 
@@ -132,7 +132,7 @@ export default function AddMovieModal({ destinations, defaultDestId, onClose }: 
                       {m.poster ? (
                         <img src={m.poster} loading="lazy" className="h-12 w-8 shrink-0 rounded bg-zinc-800 object-cover" alt="" />
                       ) : (
-                        <div className="flex h-12 w-8 shrink-0 items-center justify-center rounded bg-zinc-800 text-xs">🎬</div>
+                        <div className="flex h-12 w-8 shrink-0 items-center justify-center rounded bg-zinc-800 text-zinc-500"><MovieIcon width={16} height={16} /></div>
                       )}
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-sm font-semibold">{m.title ?? m.original_title}</div>
@@ -150,7 +150,7 @@ export default function AddMovieModal({ destinations, defaultDestId, onClose }: 
 
         {/* 2. arquivos */}
         <label className="mt-4 block text-sm">
-          <span className="text-zinc-400">🎥 Arquivo de vídeo (caminho no servidor)</span>
+          <span className="flex items-center gap-1.5 text-zinc-400"><MediaVideo width={14} height={14} /> Arquivo de vídeo (caminho no servidor)</span>
           <input
             value={videoPath}
             onChange={(e) => setVideoPath(e.target.value)}
@@ -159,7 +159,7 @@ export default function AddMovieModal({ destinations, defaultDestId, onClose }: 
           />
         </label>
         <label className="mt-3 block text-sm">
-          <span className="text-zinc-400">🔊 Arquivo com o áudio dublado (caminho no servidor)</span>
+          <span className="flex items-center gap-1.5 text-zinc-400"><SoundHigh width={14} height={14} /> Arquivo com o áudio dublado (caminho no servidor)</span>
           <input
             value={audioPath}
             onChange={(e) => setAudioPath(e.target.value)}
@@ -215,9 +215,9 @@ export default function AddMovieModal({ destinations, defaultDestId, onClose }: 
           <button
             onClick={submit}
             disabled={!ready || submitting}
-            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
           >
-            {submitting ? 'Validando arquivos...' : '▶ Converter'}
+            {submitting ? 'Validando arquivos...' : <><Play width={15} height={15} /> Converter</>}
           </button>
         </div>
       </div>

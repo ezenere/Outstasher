@@ -179,6 +179,39 @@ def _expect(value, name: str, allowed: tuple) -> None:
         raise ValueError(f"{name} inválido: {value!r} (esperado: {', '.join(map(str, allowed))})")
 
 
+def describe(opts: "ConvertOptions | dict | None") -> list[str]:
+    """Resumo curto das opções que diferem do padrão (para logs/descrição do
+    job). Ex.: ['HEVC', '1080p', 'CRF 24', 'áudio OPUS', 'só orig+dub']."""
+    if opts is None:
+        return []
+    o = opts if isinstance(opts, ConvertOptions) else ConvertOptions(
+        **{k: v for k, v in opts.items() if k in ConvertOptions.__dataclass_fields__})
+    res_label = {"4320": "8K", "2160": "4K", "1080": "1080p", "720": "720p", "480": "480p"}
+    out: list[str] = []
+    if o.video_codec != "keep":
+        out.append(o.video_codec.upper())
+    if o.resolution != "keep":
+        out.append(res_label.get(o.resolution, o.resolution))
+    if o.quality_mode == "crf" and o.crf is not None:
+        out.append(f"CRF {o.crf}")
+    elif o.video_codec != "keep" and o.video_bitrate is not None:
+        out.append(f"{o.video_bitrate / 1000:.1f} Mbps" if o.video_bitrate >= 1000
+                   else f"{o.video_bitrate} kbps")
+    if o.bit_depth != "keep":
+        out.append(f"{o.bit_depth}-bit")
+    if o.audio_codec != "keep":
+        out.append(f"áudio {o.audio_codec.upper()}")
+    if o.channels != "keep":
+        out.append("estéreo" if o.channels == "stereo" else "5.1")
+    if o.audio_tracks == "target":
+        out.append("só orig+dub")
+    if o.subtitles == "none":
+        out.append("sem legendas")
+    elif o.subtitles == "all":
+        out.append("todas legendas")
+    return out
+
+
 def validate(payload: dict) -> ConvertOptions:
     """dict da UI/banco -> ConvertOptions validado. ValueError com mensagem amigável."""
     if not isinstance(payload, dict):

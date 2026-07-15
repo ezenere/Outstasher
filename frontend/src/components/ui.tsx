@@ -1,8 +1,8 @@
 import { useState, type ReactNode } from 'react'
-import type { Candidate, DiskInfo, MergeProgress, MovieState, Progress, QbitTone } from '../api'
+import type { Candidate, ConvertOptions, DiskInfo, MergeProgress, MovieState, Progress, QbitTone } from '../api'
 import {
-  fmtDisk, fmtEta, fmtSize, fmtSpeed, fmtTime, MOVIE_STATE_LABEL, STATUS_LABEL,
-  qbitIsComplete, qbitState,
+  convertSummary, fmtDisk, fmtEta, fmtSize, fmtSpeed, fmtTime, langName,
+  MOVIE_STATE_LABEL, STATUS_LABEL, qbitIsComplete, qbitState,
 } from '../api'
 import { Check, MediaVideoList, Download, Search, WarningTriangle, CheckCircle, XmarkCircle } from 'iconoir-react'
 
@@ -113,6 +113,68 @@ export function MergeBar({ p }: { p?: MergeProgress | null }) {
 
 export function Empty({ children }: { children: ReactNode }) {
   return <div className="py-3 text-zinc-500">{children}</div>
+}
+
+/** Tag colorida com tooltip. Cor por tipo (o `title` detalha o significado). */
+export function Tag({ tone, title, children }: {
+  tone: 'lang' | 'orig' | 'custom' | 'muted' | 'info'
+  title: string
+  children: ReactNode
+}) {
+  const cls = {
+    lang: 'bg-blue-950 text-blue-300',
+    orig: 'bg-amber-950 text-amber-300',
+    custom: 'bg-purple-950 text-purple-300',
+    info: 'bg-sky-950 text-sky-300',
+    muted: 'bg-zinc-800 text-zinc-400',
+  }[tone]
+  return (
+    <span title={title} className={`rounded px-1.5 py-0.5 text-xs font-medium ${cls}`}>
+      {children}
+    </span>
+  )
+}
+
+interface KindTagsProps {
+  kind?: string
+  language: string
+  downloadOnly?: boolean
+  convert?: ConvertOptions | boolean | null
+  mode?: string
+}
+
+/** Tags do tipo do job: idioma dublado, original, conversão custom, só baixar,
+ *  modo manual/arquivos locais. Substitui o antigo texto "pt + orig". */
+export function KindTags({ kind, language, downloadOnly, convert, mode }: KindTagsProps) {
+  const lang = langName(language)
+  // convert pode vir como flag (lista) ou objeto completo (detalhe) — no 2º caso
+  // o tooltip lista as opções escolhidas
+  const convSummary = typeof convert === 'object' && convert ? convertSummary(convert) : []
+  const convTitle = convSummary.length
+    ? `Conversão customizada: ${convSummary.join(', ')}`
+    : 'Conversão customizada (opções avançadas)'
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1 align-middle">
+      {kind !== 'original' && (
+        <Tag tone="lang" title={`Áudio dublado em ${lang}`}>{lang}</Tag>
+      )}
+      {kind !== 'dubbed' && (
+        <Tag tone="orig" title="Vídeo no idioma original">Original</Tag>
+      )}
+      {downloadOnly && (
+        <Tag tone="muted" title="Só baixa pelo qBittorrent — sem merge/conversão">Só baixar</Tag>
+      )}
+      {convert && (
+        <Tag tone="custom" title={convTitle}>Custom</Tag>
+      )}
+      {mode === 'manual' && (
+        <Tag tone="muted" title="Torrents escolhidos manualmente">Manual</Tag>
+      )}
+      {mode === 'files' && (
+        <Tag tone="muted" title="Conversão de arquivos locais">Arquivos locais</Tag>
+      )}
+    </span>
+  )
 }
 
 /** Bloco recolhível: cabeçalho clicável (▸/▾) + conteúdo escondido por padrão.

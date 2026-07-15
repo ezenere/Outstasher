@@ -86,10 +86,9 @@ def resume_pending():
             _resume_manual(job)
         elif job["status"] in ("downloading", "merging"):
             job["status"] = "downloading"
-            _event(job, "status", "Servidor reiniciado — retomando acompanhamento dos downloads")
             _spawn(job["id"], _run_from_download(job))
         elif job["status"] == "searching":
-            _set(job, "error", "Servidor reiniciado durante a busca — use ↻ para tentar de novo")
+            _set(job, "error", "Servidor reiniciado durante a busca — use ↻ para repetir")
         # awaiting: candidatos estao persistidos; segue esperando a escolha
 
 
@@ -102,11 +101,9 @@ def _resume_manual(job: dict):
     info = job["manual_files"]
     vf, af = Path(info["video"]), Path(info["audio"])
     if vf.is_file() and af.is_file():
-        _event(job, "status", "Servidor reiniciado — recomeçando a conversão manual")
         _spawn(job["id"], _run_manual(job, vf, af))
     else:
-        _set(job, "error", "Servidor reiniciado e os arquivos de origem não existem mais "
-                           "— crie a conversão de novo")
+        _set(job, "error", "Arquivos de origem não existem mais — crie a conversão de novo")
 
 
 def _public(job: dict) -> dict:
@@ -390,12 +387,10 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
                   "original": "só original", "dubbed": "só dublado"}[kind]
     if download_only:
         kind_label = kind_label.replace(" (merge)", "") + ", apenas baixar"
-    if convert is not None:
-        kind_label += ", conversão customizada"
-    dinfo = f" — destino: {dest['label']} ({dest['path']})" if dest else ""
-    _event(job, "status", f"Job criado ({kind_label}, modo {mode}){dinfo}{tinfo}")
-    if convert is not None:
-        _event(job, "info", "Opções avançadas de conversão ativas", convert)
+    conv = transcode.describe(convert)
+    cinfo = f" — conversão: {', '.join(conv)}" if conv else ""
+    dinfo = f" — destino: {dest['label']}" if dest else ""
+    _event(job, "status", f"Job criado ({kind_label}){dinfo}{tinfo}{cinfo}")
     _spawn(job["id"], _run(job))
     return _public(job)
 
@@ -479,11 +474,9 @@ async def create_manual(tmdb_id: int, language: str, video_path: str, audio_path
         "current": None,
     }
     _jobs[job["id"]] = job
-    _event(job, "status",
-           f"Conversão manual criada — vídeo: {vf} | áudio: {af} — "
-           f"destino: {dest['label']} ({dest['path']})")
-    if convert is not None:
-        _event(job, "info", "Opções avançadas de conversão ativas", convert)
+    conv = transcode.describe(convert)
+    cinfo = f" — conversão: {', '.join(conv)}" if conv else ""
+    _event(job, "status", f"Conversão manual criada — destino: {dest['label']}{cinfo}")
     _spawn(job["id"], _run_manual(job, vf, af))
     return _public(job)
 
@@ -496,7 +489,7 @@ async def _run_manual(job: dict, video_file: Path, audio_file: Path):
         _event(job, "info", f"Filme: {movie['original_title']} ({movie['year']})")
         lock = _get_merge_lock()
         if lock.locked():
-            _set(job, "merging", "Na fila de conversão — aguardando a conversão anterior terminar...")
+            _set(job, "merging", "Na fila de conversão...")
         async with lock:
             await _merge(job, video_file, audio_file)
     except asyncio.CancelledError:
@@ -630,8 +623,7 @@ async def _run(job: dict):
     try:
         await _search(job)
         if job["mode"] == "manual":
-            _set(job, "awaiting",
-                 "Busca concluída — clique em Escolher para selecionar os torrents")
+            _set(job, "awaiting", "Escolha os torrents para baixar")
             return
         a, v = _auto_pick(job)
         await _start_download(job, a, v)
@@ -800,8 +792,7 @@ async def _search(job: dict):
     # paralelo por indexer configurado.
     extra_specs = _extra_searches(loc_spellings, year, lang) if want_audio else []
 
-    _set(job, "searching",
-         f"Procurando '{query_original}' no Jackett (pode levar vários minutos)...")
+    _set(job, "searching", f"Procurando '{query_original}' no Jackett...")
     if extra_specs:
         _event(job, "search",
                f"{len(extra_specs)} busca(s) extra(s) configurada(s) para {label} "
@@ -972,16 +963,14 @@ async def _start_download(job: dict, a: dict | None, v: dict | None):
     if v and a and url_video == url_audio:
         # mesmo torrent serve para os dois (ex.: release dual audio)
         await _qbit.add(url_video, f"{_tag(job, 'video')},{_tag(job, 'audio')}", save_path)
-        _event(job, "qbit", "Mesmo torrent serve para vídeo e áudio — adicionado uma única vez")
+        _event(job, "qbit", "Mesmo torrent para vídeo e áudio — adicionado uma vez")
     else:
         if v:
             await _qbit.add(url_video, _tag(job, "video"), save_path)
-            _event(job, "qbit", f"Torrent de vídeo adicionado ao qBittorrent (tag {_tag(job, 'video')})")
+            _event(job, "qbit", "Torrent de vídeo enviado ao qBittorrent")
         if a:
             await _qbit.add(url_audio, _tag(job, "audio"), save_path)
-            _event(job, "qbit", f"Torrent de áudio adicionado ao qBittorrent (tag {_tag(job, 'audio')})")
-    if save_path:
-        _event(job, "qbit", f"Salvando em: {save_path}")
+            _event(job, "qbit", "Torrent de áudio enviado ao qBittorrent")
     _set(job, "downloading", "Baixando torrent..." if len(_needed_torrents(job)) == 1
          else "Baixando torrents...")
 
@@ -998,7 +987,7 @@ async def _run_from_download(job: dict):
             # hardlink ou cópia — e os torrents ficam no qBittorrent (seedando),
             # já que os dados baixados são exatamente o que o usuário quer.
             job["output"] = " | ".join(paths[k] for k in ("video", "audio") if k in paths)
-            _set(job, "done", f"Concluído — apenas baixado (sem conversão): {job['output']}")
+            _set(job, "done", f"Baixado: {job['output']}")
             return
         # localiza os arquivos ANTES de entrar na fila de conversão (com retry:
         # o qBittorrent pode segurar o arquivo recém-concluído por um tempo)
@@ -1008,7 +997,7 @@ async def _run_from_download(job: dict):
         # só 1 por vez, para uma cópia grande não concorrer com uma conversão.
         lock = _get_merge_lock()
         if lock.locked():
-            _set(job, "merging", "Na fila de conversão — aguardando a conversão anterior terminar...")
+            _set(job, "merging", "Na fila de conversão...")
         async with lock:
             if len(_needed_torrents(job)) == 1:
                 await _deliver_single(job, files)
@@ -1034,10 +1023,8 @@ def _pause_for_drift(job: dict, files: dict, e: "merger.VersionMismatch"):
         "tau1_ms": e.tau1_ms, "tau2_ms": e.tau2_ms,
     }
     _set(job, "awaiting",
-         f"⚠️ Possível versão/corte diferente: os offsets divergem entre o início "
-         f"({e.tau1_ms:+.0f} ms) e o meio ({e.tau2_ms:+.0f} ms) do filme. "
-         f"Conversão pausada — clique em Continuar para converter mesmo assim, "
-         f"escolha outro torrent ou cancele.")
+         f"⚠️ Possível versão/corte diferente (offset {e.tau1_ms:+.0f} → "
+         f"{e.tau2_ms:+.0f} ms). Conversão pausada.")
 
 
 async def proceed(job_id: str) -> dict | None:
@@ -1058,7 +1045,7 @@ async def _resume_merge(job: dict, video_file: Path, audio_file: Path):
     try:
         lock = _get_merge_lock()
         if lock.locked():
-            _set(job, "merging", "Na fila de conversão — aguardando a conversão anterior terminar...")
+            _set(job, "merging", "Na fila de conversão...")
         async with lock:
             await _merge(job, video_file, audio_file, allow_drift=True)
     except asyncio.CancelledError:
@@ -1359,13 +1346,13 @@ async def _deliver_single(job: dict, files: dict):
             log=log, on_progress=on_progress)
         job["progress"]["merge"] = None
         job["output"] = result.output
-        done_label = "entregue (sem conversão necessária)" if result.linked else "convertido"
-        _set(job, "done", f"Concluído — {label} {done_label} em: {result.output}")
+        done_label = "sem conversão necessária" if result.linked else "convertido"
+        _set(job, "done", f"Concluído ({label}, {done_label}): {result.output}")
         await _cleanup_torrents(job)
         return
 
     output = dest_dir / safe_title / f"{safe_title} [{tag}]{src_file.suffix}"
-    _set(job, "merging", f"Entregando arquivo {label} no destino...")
+    _set(job, "merging", f"Entregando {label} no destino...")
 
     notes: list[str] = []
     # hardlink (fallback cópia) roda em thread para não travar a API em cópias grandes
@@ -1374,7 +1361,7 @@ async def _deliver_single(job: dict, files: dict):
         _event(job, "info", n)
 
     job["output"] = str(output)
-    _set(job, "done", f"Concluído — {label} entregue em: {output}")
+    _set(job, "done", f"Concluído ({label}): {output}")
     await _cleanup_torrents(job)
 
 

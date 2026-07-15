@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Refresh, Search, Trash, Xmark } from 'iconoir-react'
+import { MediaVideo, Movie, Refresh, Search, SoundHigh, Trash, Xmark } from 'iconoir-react'
 import { api, fmtSize, post, type JobCounts, type JobListItem } from '../api'
-import { Badge, Empty } from '../components/ui'
+import { Badge, Empty, KindTags } from '../components/ui'
 
-// jobTitle/kindLabel aceitam tanto o job completo quanto o item enxuto da lista
+// jobTitle aceita tanto o job completo quanto o item enxuto da lista
 type JobLike = {
   movie: JobListItem['movie']; tmdb_id: number; kind?: string; language: string
   download_only?: boolean
@@ -13,15 +13,6 @@ type JobLike = {
 
 export function jobTitle(j: JobLike): string {
   return j.movie ? `${j.movie.original_title} (${j.movie.year})` : `TMDB #${j.tmdb_id}`
-}
-
-// rótulo curto do tipo do job para exibir junto do idioma
-export function kindLabel(j: JobLike): string {
-  const extra = (j.download_only ? ' · apenas baixar' : '')
-    + (j.convert ? ' · conversão custom' : '')
-  if (j.kind === 'original') return 'só original' + extra
-  if (j.kind === 'dubbed') return `só dublado (${j.language})${extra}`
-  return `${j.language} + orig${extra}`
 }
 
 // grupos do filtro; o backend filtra por grupo (não trazemos a lista toda)
@@ -173,18 +164,12 @@ export default function Jobs() {
               />
             ) : (
               <div className="hidden h-[167px] w-[111px] shrink-0 items-center justify-center rounded-md bg-zinc-800 text-zinc-600 sm:flex">
-                🎬
+                <Movie width={28} height={28} />
               </div>
             )}
             <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="flex-1 font-semibold">
-                {jobTitle(j)}{' '}
-                <small className="font-normal text-zinc-400">
-                  [{kindLabel(j)}{j.mode === 'manual' ? ' · manual' : j.mode === 'files' ? ' · arquivos locais' : ''}
-                  {j.destination_label ? ` · ${j.destination_label}` : ''}]
-                </small>
-              </span>
+              <span className="flex-1 font-semibold">{jobTitle(j)}</span>
               <Badge status={j.status} />
               {j.status === 'awaiting' && (
                 <button
@@ -207,17 +192,28 @@ export default function Jobs() {
                 <Trash width={15} height={15} />
               </IconBtn>
             </div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-1">
+              <KindTags kind={j.kind} language={j.language} downloadOnly={j.download_only}
+                convert={j.convert} mode={j.mode} />
+              {j.destination_label && (
+                <span className="text-xs text-zinc-500">· {j.destination_label}</span>
+              )}
+            </div>
             <div className="mt-1.5 text-sm whitespace-pre-wrap text-zinc-400">{j.detail}</div>
             {(j.video_torrent || j.audio_torrent) && (
-              <div className="mt-2 text-xs text-zinc-500">
+              <div className="mt-2 space-y-0.5 text-xs text-zinc-500">
                 {j.video_torrent && (
-                  <div className="truncate">
-                    🎥 {j.video_torrent.title} ({j.video_torrent.seeders} seeds, {fmtSize(j.video_torrent.size)})
+                  <div className="flex items-center gap-1 truncate">
+                    <MediaVideo width={12} height={12} className="shrink-0" />
+                    <span className="truncate">{j.video_torrent.title}</span>
+                    <span className="shrink-0">({j.video_torrent.seeders} seeds, {fmtSize(j.video_torrent.size)})</span>
                   </div>
                 )}
                 {j.audio_torrent && (
-                  <div className="truncate">
-                    🔊 {j.audio_torrent.title} ({j.audio_torrent.seeders} seeds, {fmtSize(j.audio_torrent.size)})
+                  <div className="flex items-center gap-1 truncate">
+                    <SoundHigh width={12} height={12} className="shrink-0" />
+                    <span className="truncate">{j.audio_torrent.title}</span>
+                    <span className="shrink-0">({j.audio_torrent.seeders} seeds, {fmtSize(j.audio_torrent.size)})</span>
                   </div>
                 )}
               </div>

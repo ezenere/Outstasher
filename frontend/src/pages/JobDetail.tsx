@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { NavArrowLeft, Refresh, Trash } from 'iconoir-react'
+import {
+  Check, Download, Folder, Magnet, MediaVideo, NavArrowLeft, Play, Refresh,
+  SkipNext, SoundHigh, Trash, WarningTriangle,
+} from 'iconoir-react'
 import { post, prog, type Job, type JobEvent, type JobProgress } from '../api'
 import { api } from '../api'
-import { Badge, CandidatesTable, Collapsible, Empty, MergeBar, ProgressBar } from '../components/ui'
-import { jobTitle, kindLabel, removeJob } from './Jobs'
+import { Badge, CandidatesTable, Collapsible, Empty, KindTags, MergeBar, ProgressBar } from '../components/ui'
+import { jobTitle, removeJob } from './Jobs'
 
 export default function JobDetail() {
   const { id } = useParams<{ id: string }>()
@@ -172,26 +175,24 @@ export default function JobDetail() {
           <button
             onClick={() => trySwitch(kind)}
             disabled={switching}
-            title="Descarta o download atual e troca pelo próximo candidato reserva"
-            className="rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+            title="Troca pelo próximo candidato reserva"
+            className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
           >
-            ⏭ Tentar próximo
+            <SkipNext width={13} height={13} /> Próximo
           </button>
           {(list?.length ?? 0) > 0 && (
             <button
               onClick={() => setPickKind(pickKind === kind ? null : kind)}
               className="rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
             >
-              {pickKind === kind ? 'Fechar lista' : 'Escolher outro torrent…'}
+              {pickKind === kind ? 'Fechar lista' : 'Escolher outro…'}
             </button>
           )}
         </div>
         {pickKind === kind && list && (
           <div className="mt-2">
             <div className="mb-1 text-xs text-zinc-500">
-              Clique em um torrent para trocar imediatamente. O
-              <span className="mx-1 text-emerald-400">▶</span>
-              marca o que está baixando agora.
+              O torrent atual está destacado. Clique em outro para trocar.
             </div>
             <CandidatesTable candidates={list} selectable currentTitle={currentTitle} onSelect={(cid) => trySwitch(kind, cid)} />
           </div>
@@ -206,9 +207,7 @@ export default function JobDetail() {
         <Link to="/jobs" className="rounded-lg border border-zinc-700 p-1.5 text-zinc-400 hover:text-zinc-200">
           <NavArrowLeft width={16} height={16} />
         </Link>
-        <h1 className="flex-1 text-lg font-semibold">
-          {jobTitle(job)} <small className="font-normal text-zinc-400">— {kindLabel(job)}</small>
-        </h1>
+        <h1 className="flex-1 text-lg font-semibold">{jobTitle(job)}</h1>
         <Badge status={job.status} />
         {(job.status === 'error' || job.status === 'cancelled') && (
           <button
@@ -226,6 +225,11 @@ export default function JobDetail() {
         >
           <Trash width={15} height={15} />
         </button>
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-1">
+        <KindTags kind={job.kind} language={job.language} downloadOnly={job.download_only}
+          convert={job.convert} mode={job.mode} />
       </div>
 
       <div className="mt-2 text-sm wrap-break-word whitespace-pre-wrap text-zinc-400">{job.detail}</div>
@@ -258,24 +262,25 @@ export default function JobDetail() {
       {/* ---- ações pendentes (o mais urgente vem primeiro) ---- */}
       {job.status === 'awaiting' && job.drift_confirm && (
         <section className="mt-6 rounded-xl border border-amber-900/60 bg-amber-950/20 p-4">
-          <h2 className="mb-2 font-semibold text-amber-300">⚠️ Possível versão/corte diferente</h2>
+          <h2 className="mb-2 flex items-center gap-1.5 font-semibold text-amber-300">
+            <WarningTriangle width={16} height={16} /> Possível versão/corte diferente
+          </h2>
           <p className="text-sm text-zinc-300">
-            O offset entre os áudios não é o mesmo no início (
-            <span className="tabular-nums">{job.drift_confirm.tau1_ms.toFixed(0)} ms</span>) e no meio (
-            <span className="tabular-nums">{job.drift_confirm.tau2_ms.toFixed(0)} ms</span>) do filme — os
-            dois arquivos podem ser de cortes diferentes e o áudio dublado tende a dessincronizar. A
-            conversão foi pausada para não gastar processamento à toa.
+            O offset varia entre o início (
+            <span className="tabular-nums">{job.drift_confirm.tau1_ms.toFixed(0)} ms</span>) e o meio (
+            <span className="tabular-nums">{job.drift_confirm.tau2_ms.toFixed(0)} ms</span>) do filme — o áudio
+            pode dessincronizar. Conversão pausada.
           </p>
           <button
             onClick={proceedAnyway}
             disabled={submitting}
-            className="mt-3 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-zinc-950 hover:bg-amber-500 disabled:opacity-50"
+            className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-zinc-950 hover:bg-amber-500 disabled:opacity-50"
           >
-            ▶ Continuar mesmo assim
+            <Play width={15} height={15} /> Continuar mesmo assim
           </button>
           {job.search && (
             <p className="mt-2 text-xs text-zinc-500">
-              Ou escolha outro torrent abaixo e baixe de novo — ou cancele o job.
+              Ou escolha outro torrent abaixo, ou cancele o job.
             </p>
           )}
         </section>
@@ -288,22 +293,26 @@ export default function JobDetail() {
           </h2>
           {needAudio && (
             <>
-              <h3 className="mb-2 text-sm text-zinc-400">🔊 Áudio ({job.language})</h3>
+              <h3 className="mb-2 flex items-center gap-1.5 text-sm text-zinc-400">
+                <SoundHigh width={14} height={14} /> Áudio ({job.language})
+              </h3>
               <CandidatesTable candidates={job.search.audio} selectable selectedId={selAudio} onSelect={setSelAudio} />
             </>
           )}
           {needVideo && (
             <>
-              <h3 className="mt-4 mb-2 text-sm text-zinc-400">🎥 Vídeo (original)</h3>
+              <h3 className="mt-4 mb-2 flex items-center gap-1.5 text-sm text-zinc-400">
+                <MediaVideo width={14} height={14} /> Vídeo (original)
+              </h3>
               <CandidatesTable candidates={job.search.video} selectable selectedId={selVideo} onSelect={setSelVideo} />
             </>
           )}
           <button
             onClick={submitSelection}
             disabled={submitting || !selectionReady}
-            className="mt-3 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
+            className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
           >
-            ⬇ Confirmar e baixar
+            <Download width={15} height={15} /> Confirmar e baixar
           </button>
         </section>
       )}
@@ -400,45 +409,33 @@ function EventList({ events }: { events: JobEvent[] }) {
  *  arquivos de origem e saída. Fica ACIMA da timeline — é o que o usuário quer
  *  ver de relance, sem caçar na lista de eventos. */
 function JobSummary({ job }: { job: Job }) {
-  const rows: { label: string; value: React.ReactNode }[] = []
+  type Row = { icon: React.ReactNode; label: string; value: React.ReactNode }
+  const rows: Row[] = []
+  const ic = (I: typeof MediaVideo) => <I width={15} height={15} className="text-zinc-400" />
 
-  if (job.video_torrent) {
-    const t = job.video_torrent
-    rows.push({
-      label: '🎥 Vídeo escolhido',
-      value: (
-        <span>
-          <span className="break-all">{t.title}</span>
-          <span className="text-zinc-500"> · {t.seeders} seeds · corte {t.edition ?? 'normal'} · score {t.score}</span>
-        </span>
-      ),
-    })
-  }
-  if (job.audio_torrent) {
-    const t = job.audio_torrent
-    rows.push({
-      label: '🔊 Áudio escolhido',
-      value: (
-        <span>
-          <span className="break-all">{t.title}</span>
-          <span className="text-zinc-500"> · {t.seeders} seeds · corte {t.edition ?? 'normal'} · score {t.score}</span>
-        </span>
-      ),
-    })
-  }
+  const torrentValue = (t: NonNullable<Job['video_torrent']>) => (
+    <span>
+      <span className="break-all">{t.title}</span>
+      <span className="text-zinc-500"> · {t.seeders} seeds · corte {t.edition ?? 'normal'} · score {t.score}</span>
+    </span>
+  )
+  if (job.video_torrent)
+    rows.push({ icon: ic(MediaVideo), label: 'Vídeo', value: torrentValue(job.video_torrent) })
+  if (job.audio_torrent)
+    rows.push({ icon: ic(SoundHigh), label: 'Áudio', value: torrentValue(job.audio_torrent) })
   if (job.manual_files) {
-    rows.push({ label: '🎥 Arquivo de vídeo', value: <span className="font-mono text-xs break-all">{job.manual_files.video}</span> })
-    rows.push({ label: '🔊 Arquivo de áudio', value: <span className="font-mono text-xs break-all">{job.manual_files.audio}</span> })
+    rows.push({ icon: ic(MediaVideo), label: 'Arquivo de vídeo', value: <span className="font-mono text-xs break-all">{job.manual_files.video}</span> })
+    rows.push({ icon: ic(SoundHigh), label: 'Arquivo de áudio', value: <span className="font-mono text-xs break-all">{job.manual_files.audio}</span> })
   }
   if (job.destination_label) {
     rows.push({
-      label: '📁 Destino final',
+      icon: ic(Folder), label: 'Destino final',
       value: <span>{job.destination_label} <span className="font-mono text-xs text-zinc-500">({job.destination_path})</span></span>,
     })
   }
   if (job.torrent_target_label) {
     rows.push({
-      label: '🧲 Destino dos torrents',
+      icon: ic(Magnet), label: 'Torrents',
       value: (
         <span>
           {job.torrent_target_label}{' '}
@@ -450,9 +447,8 @@ function JobSummary({ job }: { job: Job }) {
       ),
     })
   }
-  if (job.output) {
-    rows.push({ label: '✅ Saída', value: <span className="break-all">{job.output}</span> })
-  }
+  if (job.output)
+    rows.push({ icon: ic(Check), label: 'Saída', value: <span className="break-all">{job.output}</span> })
 
   if (!rows.length) return null
   return (
@@ -460,8 +456,8 @@ function JobSummary({ job }: { job: Job }) {
       <h2 className="mb-2 text-sm font-semibold text-zinc-400">Resumo</h2>
       <dl className="divide-y divide-zinc-800/60 rounded-xl border border-zinc-800">
         {rows.map((r, i) => (
-          <div key={i} className="grid grid-cols-[9rem_1fr] gap-3 px-3 py-2 text-sm">
-            <dt className="text-zinc-400">{r.label}</dt>
+          <div key={i} className="grid grid-cols-[8rem_1fr] gap-3 px-3 py-2 text-sm">
+            <dt className="flex items-center gap-1.5 text-zinc-400">{r.icon} {r.label}</dt>
             <dd className="min-w-0 text-zinc-200">{r.value}</dd>
           </div>
         ))}
