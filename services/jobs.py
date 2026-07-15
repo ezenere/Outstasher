@@ -25,7 +25,7 @@ from urllib.parse import unquote_plus
 import httpx
 
 import config
-from services import catalog, jackett, merger, selector, store, tmdb
+from services import catalog, jackett, merger, selector, store, tmdb, transcode
 from services.qbittorrent import QbitClient, QbitError
 
 # problemas de comunicação com o qBittorrent que NÃO devem falhar o job
@@ -242,6 +242,7 @@ def _slim_job(job: dict) -> dict:
         "id": job["id"], "tmdb_id": job.get("tmdb_id"), "language": job["language"],
         "mode": job.get("mode"), "kind": job.get("kind", "both"),
         "download_only": job.get("download_only", False),
+        "convert": bool(job.get("convert")),
         "status": job["status"], "detail": job.get("detail", ""),
         "movie": job.get("movie"), "created_at": job["created_at"],
         "destination_label": job.get("destination_label"),
@@ -327,9 +328,14 @@ def _needed_torrents(job: dict) -> tuple[str, ...]:
 async def create(tmdb_id: int, language: str, mode: str = "auto",
                  destination_id: int | None = None,
                  torrent_target_id: int | None = None,
-                 kind: str = "both", download_only: bool = False) -> dict:
+                 kind: str = "both", download_only: bool = False,
+                 convert: dict | None = None) -> dict:
     if kind not in KINDS:
         raise ValueError(f"kind inválido: {kind!r}")
+    if download_only:
+        convert = None  # apenas baixar: nunca há conversão
+    if convert is not None:
+        convert = transcode.validate(convert).to_dict()
     # readicionar o filme descarta erro anterior da MESMA variante (tmdb+idioma+
     # kind). Concluído/cancelado persistem (não são apagados na readição).
     for old_id in store.error_jobs_for(tmdb_id, language, kind):
@@ -358,6 +364,7 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
         "mode": mode,
         "kind": kind,
         "download_only": download_only,
+        "convert": convert,
         "status": "searching",
         "detail": "Buscando informações do filme...",
         "movie": None,
@@ -383,8 +390,12 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
                   "original": "só original", "dubbed": "só dublado"}[kind]
     if download_only:
         kind_label = kind_label.replace(" (merge)", "") + ", apenas baixar"
+    if convert is not None:
+        kind_label += ", conversão customizada"
     dinfo = f" — destino: {dest['label']} ({dest['path']})" if dest else ""
     _event(job, "status", f"Job criado ({kind_label}, modo {mode}){dinfo}{tinfo}")
+    if convert is not None:
+        _event(job, "info", "Opções avançadas de conversão ativas", convert)
     _spawn(job["id"], _run(job))
     return _public(job)
 
@@ -414,13 +425,16 @@ def _probe_manual_file(path: Path, role: str) -> None:
 
 
 async def create_manual(tmdb_id: int, language: str, video_path: str, audio_path: str,
-                        destination_id: int | None = None) -> dict:
+                        destination_id: int | None = None,
+                        convert: dict | None = None) -> dict:
     """Conversão manual: merge de dois arquivos JÁ NO DISCO, sem busca/torrents.
 
     Mesmo pipeline de conversão dos jobs normais (alinhamento em duas janelas,
     pausa de drift, fila de merge, saída em destino/Filme (Ano)/), só que os
     arquivos vêm de caminhos digitados pelo usuário em vez do qBittorrent.
     """
+    if convert is not None:
+        convert = transcode.validate(convert).to_dict()
     vf, af = Path(video_path.strip()), Path(audio_path.strip())
     for label, p in (("vídeo", vf), ("áudio", af)):
         if not str(p).strip() or not p.is_file():
@@ -447,6 +461,7 @@ async def create_manual(tmdb_id: int, language: str, video_path: str, audio_path
         "language": language,
         "mode": "files",  # distingue da busca auto/manual nas listas da UI
         "kind": "both",
+        "convert": convert,
         "status": "merging",
         "detail": "Preparando conversão manual...",
         "movie": None,
@@ -467,6 +482,8 @@ async def create_manual(tmdb_id: int, language: str, video_path: str, audio_path
     _event(job, "status",
            f"Conversão manual criada — vídeo: {vf} | áudio: {af} — "
            f"destino: {dest['label']} ({dest['path']})")
+    if convert is not None:
+        _event(job, "info", "Opções avançadas de conversão ativas", convert)
     _spawn(job["id"], _run_manual(job, vf, af))
     return _public(job)
 
@@ -600,10 +617,11 @@ async def retry(job_id: str) -> dict | None:
         return await create_manual(old["tmdb_id"], old["language"],
                                    old["manual_files"]["video"],
                                    old["manual_files"]["audio"],
-                                   old.get("destination_id"))
+                                   old.get("destination_id"), old.get("convert"))
     return await create(old["tmdb_id"], old["language"], old.get("mode", "auto"),
                         old.get("destination_id"), old.get("torrent_target_id"),
-                        old.get("kind", "both"), old.get("download_only", False))
+                        old.get("kind", "both"), old.get("download_only", False),
+                        old.get("convert"))
 
 
 # -------------------- pipeline --------------------
@@ -1297,7 +1315,11 @@ def _find_video_file(job: dict, content_path: str) -> Path:
 
 
 async def _deliver_single(job: dict, files: dict):
-    """Job de um torrent só: entrega o arquivo direto no destino, sem merge."""
+    """Job de um torrent só: entrega o arquivo direto no destino, sem merge.
+
+    Com opções avançadas ativas, em vez do hardlink o arquivo único passa pela
+    conversão (que por si só cai em hardlink se o plano inteiro der em cópia).
+    """
     kind = "video" if "video" in files else "audio"
     src_file = files[kind]
     _event(job, "info", f"Arquivo baixado: {src_file}")
@@ -1306,9 +1328,38 @@ async def _deliver_single(job: dict, files: dict):
     safe_title = re.sub(r'[<>:"/\\|?*]', "", f"{movie['original_title']} ({movie['year']})")
     tag = "orig" if job["kind"] == "original" else job["language"]
     dest_dir = Path(job.get("destination_path") or config.OUTPUT_DIR)
-    output = dest_dir / safe_title / f"{safe_title} [{tag}]{src_file.suffix}"
-
     label = "original" if job["kind"] == "original" else f"dublado ({job['language']})"
+
+    if job.get("convert"):
+        opts = transcode.validate(job["convert"])
+        output = dest_dir / safe_title / f"{safe_title} [{tag}].mkv"
+        _set(job, "merging", f"Convertendo arquivo {label} ({src_file.name})...")
+
+        def log(msg):
+            job["detail"] = str(msg)
+            _event(job, "merge", str(msg))
+
+        last_persist = [0.0]
+
+        def on_progress(info: dict):
+            job["progress"]["merge"] = info
+            now = time.monotonic()
+            if now - last_persist[0] > 15:
+                last_persist[0] = now
+                store.upsert_job(job)
+
+        result = await asyncio.to_thread(
+            transcode.convert_single, str(src_file), str(output), opts,
+            job["language"], (movie or {}).get("original_language"),
+            log=log, on_progress=on_progress)
+        job["progress"]["merge"] = None
+        job["output"] = result.output
+        done_label = "entregue (sem conversão necessária)" if result.linked else "convertido"
+        _set(job, "done", f"Concluído — {label} {done_label} em: {result.output}")
+        await _cleanup_torrents(job)
+        return
+
+    output = dest_dir / safe_title / f"{safe_title} [{tag}]{src_file.suffix}"
     _set(job, "merging", f"Entregando arquivo {label} no destino...")
 
     notes: list[str] = []
@@ -1350,11 +1401,15 @@ async def _merge(job: dict, video_file: Path, audio_file: Path,
             last_persist[0] = now
             store.upsert_job(job)
 
+    # opções avançadas (se o job tiver): re-valida contra o servidor atual
+    convert_opts = transcode.validate(job["convert"]) if job.get("convert") else None
+
     # merger.merge é bloqueante (ffmpeg/ffprobe); roda em thread para não travar a API
     result = await asyncio.to_thread(
         merger.merge, str(video_file), str(audio_file), str(output),
         job["language"], log=log, on_progress=on_progress,
-        allow_drift=allow_drift)
+        allow_drift=allow_drift, convert=convert_opts,
+        original_lang=(job.get("movie") or {}).get("original_language"))
     job["progress"]["merge"] = None  # terminou (com sucesso): some a barra
 
     job["output"] = result.output

@@ -43,11 +43,18 @@ torrent para cada uma, e junta tudo em um único arquivo: **melhor imagem + todo
        com re-encode (AAC se mono/estéreo, AC3 se multicanal — preserva a
        ordem dos canais surround).
 
+Nas buscas por áudio dublado, torrents cujo nome traz o **ano do filme**
+(`(2014)`, `.2014.`) ganham um bônus de score — é um sinal confiável de que o
+release é do filme certo.
+
 ## Requisitos
 
 - Python 3.11+
 - Node 18+ (para buildar o frontend React; `python main.py` builda sozinho)
-- [ffmpeg](https://ffmpeg.org/) (ffmpeg + ffprobe no PATH)
+- [ffmpeg](https://ffmpeg.org/) (ffmpeg + ffprobe no PATH). As **opções avançadas
+  de conversão** só oferecem os codecs que o *seu* ffmpeg sabe encodar (checado em
+  runtime): libx264/libx265, libsvtav1/libaom/librav1e (AV1), libvvenc (VVC),
+  aac/ac3/flac/libopus/libvorbis
 - [Jackett](https://github.com/Jackett/Jackett) rodando com indexadores configurados
 - [qBittorrent](https://www.qbittorrent.org/) com a Web UI habilitada
   (Ferramentas → Opções → Web UI)
@@ -116,7 +123,13 @@ Pontos de atenção do `.env`/`docker-compose.yml`:
 Parar: `docker compose down` (mantém o volume). Ver logs: `docker compose logs -f`.
 
 Busque um filme, clique nele, escolha o idioma e o **destino**, e escolha o que
-baixar:
+baixar. Resultados da busca que **já estão na coleção** (existe uma pasta do filme
+em algum destino) ganham um selo *✓ Na coleção* — a checagem usa um cache em
+memória de 30 min, refeito sob demanda na próxima busca depois que vence ou
+quando algo muda de verdade (um job conclui, uma pasta é removida, um destino é
+editado).
+
+Opções de download:
 
 - **Baixar e fazer merge** — baixa a versão original + a dublada e junta tudo
   num MKV (o fluxo completo descrito acima).
@@ -130,6 +143,60 @@ o destino, numa subpasta própria — sem re-encodar nada. O modo manual (escolh
 torrents) e o destino dos torrents funcionam igual nos três. O andamento aparece
 na aba *Downloads*. O arquivo final vai para a pasta de destino escolhida (veja
 *Destinos* abaixo).
+
+Há também a opção **"Apenas baixar"**: baixa a(s) versão(ões) escolhida(s) pelo
+qBittorrent e conclui aí mesmo — sem merge, hardlink ou cópia. Os arquivos ficam
+onde o qBittorrent os deixou (seguem seedando), então o destino do arquivo final
+não se aplica.
+
+### Opções avançadas de conversão
+
+Um bloco recolhível **"Opções avançadas"** (no modal de download e no de
+conversão manual) permite converter o resultado em vez de só copiá-lo — útil
+quando o bitrate está desnecessariamente alto ou você quer economizar espaço
+naquele filme. Sem marcar **"Habilitar opções avançadas"**, tudo fica desabilitado
+e a conversão sai como sempre (stream copy). As opções:
+
+- **Codec de vídeo**: manter original, VVC/H.266, AV1, HEVC, H.264. A lista é
+  filtrada pelas **capacidades do ffmpeg do servidor** (`GET /api/capabilities`) —
+  codec sem encoder disponível aparece desabilitado.
+- **Preset**: cinco níveis (muito rápido → muito lento) mapeados por encoder
+  (`medium/slow` no x264/x265, `-preset 10..2` no SVT-AV1, `-cpu-used` no aom).
+- **Resolução**: 8K/4K/Full HD/HD/SD. O corte é por **largura** com 8% de
+  tolerância (filme scope 3840×1608 conta como 4K; DCI 4096×2160 não vira 2160p à
+  força) e **nunca aumenta** a resolução da fonte.
+- **Qualidade**: bitrate alvo (slider 100 kbps–150 Mbps, escala logarítmica) ou
+  **CRF** (qualidade constante — o encoder gasta só o bitrate necessário em cada
+  cena, melhor para economizar espaço).
+- **Profundidade de cor**: manter / 10-bit / 8-bit. (H.264 evita 10-bit por
+  padrão — High10 quase nada reproduz.)
+- **Áudios**: manter todos, ou **apenas original + dublagem** (o idioma original
+  vem do TMDB; faixas de idioma desconhecido são sempre mantidas).
+- **Codec de áudio**: manter / AC3 / FLAC / Opus / OGG Vorbis / AAC — também
+  filtrado pelas capacidades do servidor. A UI avisa dos limites de canais (AC3
+  até 5.1, AAC só estéreo, FLAC lossless sem bitrate).
+- **Canais**: manter / máx. 5.1 / estéreo (downmix).
+- **Bitrate de áudio** por faixa e **legendas** (padrão / todas / nenhuma).
+
+Toda validação acontece **no servidor, com o arquivo real**, seguindo a regra de
+nunca "converter para cima": se o bitrate pedido for maior do que a fonte
+entrega, o stream original é mantido; se o re-encode for inevitável por outro
+motivo (mudança de codec/resolução/canais), o alvo é rebaixado ao teto estimado
+da fonte (ajustado pela redução de resolução). Se o plano inteiro cair em cópia,
+a saída volta a ser um hardlink. Como jobs de torrent só têm o arquivo em mãos
+**depois** do download, o resultado dessas regras ("vídeo mantido", "alvo
+rebaixado") aparece nos eventos do job (🔍). Payload inválido (codec sem encoder,
+bitrate fora da faixa) é recusado na criação do job.
+
+### Conversão manual (Catálogo → Adicionar filme)
+
+Na aba **Catálogo**, o botão **"+ Adicionar filme"** cria uma conversão a partir
+de dois arquivos que já estão no disco do servidor: você escolhe o filme no TMDB,
+digita os caminhos do arquivo de **vídeo** e do de **áudio dublado**, o destino e
+(opcionalmente) as mesmas opções avançadas acima. É o mesmo pipeline dos jobs
+normais — alinhamento, fila de conversão, pausa por drift, progresso no detalhe —
+só que sem busca nem torrents. Arquivos inexistentes ou que não são de vídeo/áudio
+são recusados na hora (via `ffprobe`).
 
 O frontend é React + TypeScript + Tailwind + Iconoir + React Router (`frontend/`),
 com rotas `/` (filmes), `/jobs` (downloads), `/jobs/:id` (detalhe/lupa — é também
@@ -237,8 +304,10 @@ Cada arquivo é um **dropdown** — expandindo, mostra o `ffprobe` parseado em
 detalhe: container, bitrate total, capítulos e cada track (vídeo com resolução,
 FPS, HDR/10-bit, espaço de cor, perfil/nível; áudio com layout de canais, sample
 rate, bitrate; legendas com idioma/forced/SDH), além dos campos crus do ffprobe.
-Dá para **remover um arquivo** individual ou a **pasta inteira** do filme.
-Caminhos são validados contra traversal — nada fora do destino é tocado.
+Dá para **renomear** ou **remover** um arquivo individual, ou remover a **pasta
+inteira** do filme. Caminhos são validados contra traversal — nada fora do
+destino é tocado. É também aqui que fica o **"+ Adicionar filme"** (conversão
+manual, descrita acima).
 
 ## merge.py avulso
 
@@ -260,6 +329,19 @@ python merge.py "filme.1080p.mkv" "filme.dublado.mkv" "resultado.mkv" --audio-la
   multicanal — o AAC nativo do ffmpeg perde a sinalização do layout surround e os
   players embaralham os canais), o resto é stream copy.
 
+Duas opções extras do CLI:
+
+- `--series`: os dois primeiros argumentos viram **diretórios**. O script escaneia
+  recursivamente os dois, casa os arquivos por `SxxExx` e faz o merge de cada par,
+  salvando no diretório de saída com o nome do episódio. Saídas que já existem são
+  puladas (retomável) e o erro de um episódio não interrompe o lote.
+- `--segments`: alinhamento **por segmentos** em vez de um offset único para o
+  filme todo. Detecta cortes (trechos em preto validados por silêncio) e alinha
+  cada segmento separadamente — útil quando as versões têm quebras diferentes de
+  comerciais/intervalos. A validação cruzada black↔silence pode ser afinada
+  (`--black-*`, `--silence-*`) ou reduzida a um só modo (`--disable-black` /
+  `--disable-silence`). Fica num módulo à parte; o merge padrão não muda.
+
 ## Estrutura
 
 | Arquivo | Função |
@@ -273,7 +355,9 @@ python merge.py "filme.1080p.mkv" "filme.dublado.mkv" "resultado.mkv" --audio-la
 | `services/store.py` | persistência SQLite (jobs, eventos e destinos) |
 | `services/catalog.py` | catálogo: lista filmes do destino + ffprobe parseado |
 | `services/merger.py` | merge + alinhamento GCC-PHAT (usado pelos jobs) |
-| `merge.py` | CLI avulso em cima do `services/merger.py` |
+| `services/transcode.py` | opções avançadas: capacidades do ffmpeg, validação, planos de vídeo/áudio |
+| `services/merger_segments.py` | alinhamento por segmentos (`merge.py --segments`) |
+| `merge.py` | CLI avulso em cima do `services/merger.py` (`--series`, `--segments`) |
 | `frontend/` | frontend React (TS + Tailwind + Iconoir + Router) |
 | `Dockerfile` | build multi-stage (Node builda o front, runtime Python + ffmpeg) |
 | `docker-compose.yml` | sobe o serviço local com volume p/ o `jobs.db` e mounts |

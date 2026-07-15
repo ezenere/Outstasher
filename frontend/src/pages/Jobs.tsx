@@ -8,6 +8,7 @@ import { Badge, Empty } from '../components/ui'
 type JobLike = {
   movie: JobListItem['movie']; tmdb_id: number; kind?: string; language: string
   download_only?: boolean
+  convert?: boolean | object | null
 }
 
 export function jobTitle(j: JobLike): string {
@@ -16,10 +17,11 @@ export function jobTitle(j: JobLike): string {
 
 // rótulo curto do tipo do job para exibir junto do idioma
 export function kindLabel(j: JobLike): string {
-  const dl = j.download_only ? ' · apenas baixar' : ''
-  if (j.kind === 'original') return 'só original' + dl
-  if (j.kind === 'dubbed') return `só dublado (${j.language})${dl}`
-  return `${j.language} + orig${dl}`
+  const extra = (j.download_only ? ' · apenas baixar' : '')
+    + (j.convert ? ' · conversão custom' : '')
+  if (j.kind === 'original') return 'só original' + extra
+  if (j.kind === 'dubbed') return `só dublado (${j.language})${extra}`
+  return `${j.language} + orig${extra}`
 }
 
 // grupos do filtro; o backend filtra por grupo (não trazemos a lista toda)

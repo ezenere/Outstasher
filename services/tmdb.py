@@ -81,6 +81,8 @@ async def details(movie_id: int, language: str) -> dict:
         "id": data["id"],
         "original_title": data.get("original_title"),
         "localized_title": data.get("title"),
+        # ISO 639-1 ("en", "ja"...): usado pelo filtro "apenas original + dublagem"
+        "original_language": data.get("original_language"),
         "year": (data.get("release_date") or "")[:4],
         "poster": f"https://image.tmdb.org/t/p/w342{data['poster_path']}"
         if data.get("poster_path") else None,

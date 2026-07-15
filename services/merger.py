@@ -553,7 +553,8 @@ def _run_ffmpeg_progress(cmd: list[str], duration_s: float,
 
 def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
           file2_is_target_dub: bool = True, log=print, on_progress=None,
-          allow_drift: bool = True) -> MergeResult:
+          allow_drift: bool = True, convert=None,
+          original_lang: str | None = None) -> MergeResult:
     """Faz o merge de file1+file2 em `output`.
 
     target_lang: codigo curto (pt/es/...) ou ISO (por/spa/...) do idioma desejado.
@@ -563,8 +564,13 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
     allow_drift: False = levanta VersionMismatch quando as duas janelas de
         offset divergem (possível corte diferente), ANTES do ffmpeg pesado —
         em vez de seguir com um merge provavelmente dessincronizado.
+    convert: transcode.ConvertOptions das opções avançadas (None = pipeline
+        clássico, tudo em stream copy). original_lang: idioma original do
+        filme no TMDB (ISO 639-1), para o filtro "apenas original + dublagem".
     """
     _check_tools()
+    if convert is not None:
+        from services import transcode  # import tardio: evita ciclo de módulos
     for f in (file1, file2):
         if not Path(f).exists():
             raise MergeError(f"arquivo não existe: {f}")
@@ -591,6 +597,15 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
         ref_langs = {_lang_of_stream(s, ref_input, und_lang_by_input)
                      for s in get_streams(probes[ref_input], "audio")}
         if target_iso in ref_langs:
+            if convert is not None:
+                # com opções avançadas o "pular merge" ainda vale (o outro
+                # arquivo é desnecessário), mas o arquivo único passa pela
+                # conversão — que por si só cai em hardlink se nada mudar
+                log(f"O arquivo de melhor vídeo já tem áudio '{target_iso}' — "
+                    f"pulando merge e convertendo só ele com as opções avançadas.")
+                return transcode.convert_single(
+                    ref_path, output, convert, target_lang, original_lang,
+                    log=log, on_progress=on_progress)
             log(f"O arquivo de melhor vídeo já tem áudio '{target_iso}' — pulando merge, criando hardlink.")
             out_path = Path(output).with_suffix(Path(ref_path).suffix)
             _link_or_copy(Path(ref_path), out_path, result.notes)
@@ -603,12 +618,28 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
     # ---- melhor audio por lingua e legendas correspondentes ----
     best_audio = choose_best_audio_per_language(probes, und_lang_by_input)
     audio_langs = sorted(best_audio, key=lambda x: (x != target_iso, x == "und", x))
+    if convert is not None and convert.audio_tracks == "target":
+        keep = transcode.allowed_langs(target_iso, original_lang)
+        kept_langs = [lg for lg in audio_langs if lg in keep]
+        if kept_langs and len(kept_langs) < len(audio_langs):
+            note = ("faixas de áudio descartadas (apenas original + dublagem + "
+                    "desconhecidas): "
+                    + ", ".join(lg for lg in audio_langs if lg not in keep))
+            result.notes.append(note)
+            log(note)
+            audio_langs = kept_langs
     log("Áudios escolhidos: " + ", ".join(
         f"{lang}<-arquivo{best_audio[lang][0] + 1}" for lang in audio_langs))
 
     selected_subs: list[tuple[int, dict]] = []
-    for lang in audio_langs:
-        selected_subs.extend(pick_subs_for_lang(probes, lang, video_src=ref_input))
+    if convert is not None and convert.subtitles == "none":
+        log("Legendas descartadas (opções avançadas)")
+    elif convert is not None and convert.subtitles == "all":
+        for src_i in (ref_input, other_input):
+            selected_subs.extend((src_i, s) for s in get_streams(probes[src_i], "subtitle"))
+    else:
+        for lang in audio_langs:
+            selected_subs.extend(pick_subs_for_lang(probes, lang, video_src=ref_input))
 
     chapters_src = ref_input if probes[ref_input].get("chapters") else (
         other_input if probes[other_input].get("chapters") else None)
@@ -685,7 +716,12 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
     for lang in audio_langs:
         src_orig, s = best_audio[lang]
         mapped.append({"lang": lang, "src_cmd": 0 if src_orig == ref_input else 1,
-                       "a_idx": int(s["_type_index"]), "stream": s})
+                       "a_idx": int(s["_type_index"]), "stream": s, "plan": None})
+
+    # opções avançadas: plano de re-encode por faixa (codec/bitrate/canais)
+    if convert is not None:
+        for item in mapped:
+            item["plan"] = transcode.plan_audio(item["stream"], convert)
 
     # só com drift os audios do input 1 passam pelo conserto de PTS/offset
     # (re-encode); sem drift eles vão de stream copy com o sync no container
@@ -696,32 +732,61 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
                 continue
             label = f"a_fix_{item['a_idx']}"
             filter_labels[item["a_idx"]] = label
-            filter_chains.append(build_audio_fix_chain(f"[1:a:{item['a_idx']}]", tau_s) + f"[{label}]")
+            chain = build_audio_fix_chain(f"[1:a:{item['a_idx']}]", tau_s)
+            plan = item["plan"]
+            if plan and plan.encode and plan.needs_layout_fix:
+                chain += "," + transcode.OPUS_LAYOUT_FIX
+            filter_chains.append(chain + f"[{label}]")
     if filter_chains:
         cmd += ["-filter_complex", "; ".join(filter_chains)]
 
-    cmd += ["-c:v", "copy", "-c:a", "copy", "-c:s", "copy"]
+    # vídeo: copy por padrão; re-encode quando as opções avançadas pedirem
+    vplan = None
+    if convert is not None:
+        vplan = transcode.plan_video(probes[ref_input], best_v, convert)
+        for n in vplan.notes:
+            result.notes.append(n)
+            log(n)
+    cmd += (vplan.args if vplan and vplan.encode else ["-c:v", "copy"])
+    cmd += ["-c:a", "copy", "-c:s", "copy"]
 
     default_audio_out = None
     for out_i, item in enumerate(mapped):
         s = item["stream"]
-        if item["src_cmd"] == 1 and not container_sync:
+        plan = item["plan"]
+        drift_forced = item["src_cmd"] == 1 and not container_sync
+        # nota "faixa mantida" não vale quando o drift obriga o re-encode
+        if plan and plan.notes and (plan.encode or not drift_forced):
+            for n in plan.notes:
+                result.notes.append(f"áudio {item['lang']}: {n}")
+                log(f"áudio {item['lang']}: {n}")
+        if drift_forced:
             cmd += ["-map", f"[{filter_labels[item['a_idx']]}]"]
-            ch = channels_of(s)
-            codec, bitrate = filtered_codec_and_bitrate(ch)
-            cmd += [f"-c:a:{out_i}", codec, f"-b:a:{out_i}", bitrate]
-            note = f"áudio {item['lang']} re-encodado para {codec} {bitrate}"
-            if ch > AC3_MAX_CHANNELS:
-                note += f" (downmix {ch}ch → 5.1: ac3 vai até 6 canais)"
-            result.notes.append(note)
+            if plan and plan.encode:
+                # o conserto de drift já obriga re-encode; usa o codec pedido
+                # (o aformat do opus foi embutido na chain do filter_complex)
+                cmd += transcode.audio_output_args(out_i, plan, via_filter_complex=True)
+            else:
+                ch = channels_of(s)
+                codec, bitrate = filtered_codec_and_bitrate(ch)
+                cmd += [f"-c:a:{out_i}", codec, f"-b:a:{out_i}", bitrate]
+                note = f"áudio {item['lang']} re-encodado para {codec} {bitrate}"
+                if ch > AC3_MAX_CHANNELS:
+                    note += f" (downmix {ch}ch → 5.1: ac3 vai até 6 canais)"
+                result.notes.append(note)
         elif item["src_cmd"] == 1:
             cmd += ["-map", f"1:a:{item['a_idx']}"]
-            result.notes.append(
-                f"áudio {item['lang']} copiado sem re-encode — codec original "
-                f"({(s.get('codec_name') or '?').upper()}) preservado"
-                + (f", sync {result.offset_ms:+.0f} ms no container" if apply_offset else ""))
+            if plan and plan.encode:
+                cmd += transcode.audio_output_args(out_i, plan)
+            else:
+                result.notes.append(
+                    f"áudio {item['lang']} copiado sem re-encode — codec original "
+                    f"({(s.get('codec_name') or '?').upper()}) preservado"
+                    + (f", sync {result.offset_ms:+.0f} ms no container" if apply_offset else ""))
         else:
             cmd += ["-map", f"0:a:{item['a_idx']}"]
+            if plan and plan.encode:
+                cmd += transcode.audio_output_args(out_i, plan)
         cmd += [f"-metadata:s:a:{out_i}", f"language={item['lang']}"]
         # limpa o titulo: fora ruido de release; so mantem comentario/AD/und etc.
         # sempre sobrescreve (inclusive vazio) para nao herdar o titulo antigo.

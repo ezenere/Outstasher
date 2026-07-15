@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Search, Xmark } from 'iconoir-react'
-import { api, post, type Destination, type Job, type Language, type Movie, type MoviePage } from '../api'
+import { api, post, type ConvertOptions, type Destination, type Job, type Language, type Movie, type MoviePage } from '../api'
+import AdvancedOptions from './AdvancedOptions'
 
 interface Props {
   destinations: Destination[]
@@ -22,6 +23,7 @@ export default function AddMovieModal({ destinations, defaultDestId, onClose }: 
   const [videoPath, setVideoPath] = useState('')
   const [audioPath, setAudioPath] = useState('')
   const [destId, setDestId] = useState<number | null>(defaultDestId)
+  const [advanced, setAdvanced] = useState<ConvertOptions | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const navigate = useNavigate()
@@ -57,6 +59,7 @@ export default function AddMovieModal({ destinations, defaultDestId, onClose }: 
         video_path: videoPath.trim(),
         audio_path: audioPath.trim(),
         destination_id: destId,
+        convert: advanced,
       })
       navigate(`/jobs/${job.id}`)
     } catch (e) {
@@ -195,6 +198,9 @@ export default function AddMovieModal({ destinations, defaultDestId, onClose }: 
             </select>
           </label>
         </div>
+
+        {/* opções avançadas de conversão (codec/resolução/bitrate/áudios) */}
+        <AdvancedOptions value={advanced} onChange={setAdvanced} />
 
         {error && (
           <div className="mt-3 rounded-lg border border-red-900/60 bg-red-950/30 px-3 py-2 text-sm text-red-300">

@@ -64,6 +64,50 @@ export const VARIANT_LABEL: Record<string, string> = {
   roman_no_year: 'Trocando romanos e sem o ano',
 }
 
+// ---- opções avançadas de conversão ----
+
+/** Payload de opções avançadas enviado em /api/jobs e /api/jobs/manual. */
+export interface ConvertOptions {
+  video_codec: string // keep | vvc | av1 | hevc | h264
+  preset: string // veryfast | fast | default | slow | veryslow
+  resolution: string // keep | 4320 | 2160 | 1080 | 720 | 480
+  quality_mode: 'bitrate' | 'crf'
+  video_bitrate: number | null // kbps
+  crf: number | null
+  bit_depth: string // keep | 10 | 8
+  audio_tracks: string // all | target
+  audio_codec: string // keep | ac3 | flac | opus | vorbis | aac
+  audio_bitrate: number | null // kbps por faixa
+  channels: string // keep | surround51 | stereo
+  subtitles: string // default | all | none
+}
+
+export interface VideoCodecCap {
+  id: string
+  label: string
+  encoder: string | null
+  available: boolean
+  crf: { min: number; max: number; default: number }
+}
+
+export interface AudioCodecCap {
+  id: string
+  label: string
+  available: boolean
+  max_channels: number
+  lossless: boolean
+  default_kbps: number | null
+}
+
+/** O que o ffmpeg do servidor sabe encodar (/api/capabilities). */
+export interface Capabilities {
+  video_codecs: VideoCodecCap[]
+  audio_codecs: AudioCodecCap[]
+  presets: string[]
+  video_bitrate_kbps: [number, number]
+  audio_bitrate_kbps: [number, number]
+}
+
 export interface DiskInfo {
   total: number
   used: number
@@ -150,6 +194,8 @@ export interface Job {
   kind?: string // both | original | dubbed
   /** Só baixa pelo qBittorrent e conclui — sem conversão, hardlink ou cópia. */
   download_only?: boolean
+  /** Opções avançadas de conversão do job (null/ausente = pipeline clássico). */
+  convert?: ConvertOptions | null
   status: string
   detail: string
   movie: MovieRef | null
@@ -206,6 +252,8 @@ export interface JobListItem {
   mode: string
   kind: string
   download_only?: boolean
+  /** true quando o job tem opções avançadas de conversão. */
+  convert?: boolean
   status: string
   detail: string
   movie: MovieRef | null

@@ -3,10 +3,11 @@ import { Link } from 'react-router-dom'
 import { Search, Xmark } from 'iconoir-react'
 import {
   api, MOVIE_STATE_LABEL, post,
-  type Destination, type Job, type Language, type Movie, type MovieState, type MoviePage,
-  type TorrentTarget,
+  type ConvertOptions, type Destination, type Job, type Language, type Movie,
+  type MovieState, type MoviePage, type TorrentTarget,
 } from '../api'
 import { useJobsSummary } from '../jobsSummary'
+import AdvancedOptions from '../components/AdvancedOptions'
 import { DiskFree, Empty, MovieStateBadge, MovieStateIcon } from '../components/ui'
 
 // estados "em progresso": se um filme estava num destes e sumiu do summary,
@@ -21,6 +22,7 @@ export default function Movies() {
   const [language, setLanguage] = useState('pt')
   const [manual, setManual] = useState(false)
   const [downloadOnly, setDownloadOnly] = useState(false)
+  const [advanced, setAdvanced] = useState<ConvertOptions | null>(null)
   const [destinations, setDestinations] = useState<Destination[]>([])
   const [destId, setDestId] = useState<number | null>(null)
   const [targets, setTargets] = useState<TorrentTarget[]>([])
@@ -138,6 +140,8 @@ export default function Movies() {
         destination_id: downloadOnly ? null : destId,
         torrent_target_id: targetId,
         download_only: downloadOnly,
+        // apenas baixar: nada é convertido, então as opções avançadas não valem
+        convert: downloadOnly ? null : advanced,
       })
       // some com a seleção e sinaliza que começou (sem trocar de tela). O
       // estado real chega no próximo tick do summary (≤5s); até lá o overlay
@@ -363,6 +367,15 @@ export default function Movies() {
                 </p>
               )}
             </div>
+
+            {/* opções avançadas de conversão (codec/resolução/bitrate/áudios) */}
+            <AdvancedOptions
+              value={advanced}
+              onChange={setAdvanced}
+              blocked={downloadOnly
+                ? 'Apenas baixar: os arquivos não passam por conversão, então as opções avançadas não se aplicam.'
+                : null}
+            />
 
             {/* ações */}
             <div className="mt-4 flex flex-wrap items-center justify-end gap-2">

@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 import config
-from services import auth, catalog, jackett, jobs, store, tmdb
+from services import auth, catalog, jackett, jobs, store, tmdb, transcode
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
 DIST_DIR = FRONTEND_DIR / "dist"
@@ -224,6 +224,7 @@ class JobRequest(BaseModel):
     destination_id: int | None = None
     torrent_target_id: int | None = None
     download_only: bool = False  # só baixa (sem conversão/hardlink/cópia)
+    convert: dict | None = None  # opções avançadas de conversão (transcode.validate)
 
 
 class SelectRequest(BaseModel):
@@ -432,6 +433,13 @@ async def catalog_delete_folder(folder: str, destination_id: int | None = None):
     return {"ok": True}
 
 
+@app.get("/api/capabilities")
+async def capabilities():
+    """Codecs que o ffmpeg DESTE servidor sabe encodar — a UI de opções
+    avançadas só oferece o que está disponível."""
+    return await asyncio.to_thread(transcode.capabilities)
+
+
 @app.post("/api/jobs")
 async def create_job(req: JobRequest):
     if req.language not in config.LANGUAGES:
@@ -443,7 +451,7 @@ async def create_job(req: JobRequest):
     try:
         return await jobs.create(req.tmdb_id, req.language, req.mode,
                                  req.destination_id, req.torrent_target_id, req.kind,
-                                 req.download_only)
+                                 req.download_only, req.convert)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -454,6 +462,7 @@ class ManualJobRequest(BaseModel):
     video_path: str
     audio_path: str
     destination_id: int | None = None
+    convert: dict | None = None  # opções avançadas de conversão
 
 
 @app.post("/api/jobs/manual")
@@ -463,7 +472,7 @@ async def create_manual_job(req: ManualJobRequest):
         raise HTTPException(400, f"Idioma inválido: {req.language}")
     try:
         return await jobs.create_manual(req.tmdb_id, req.language, req.video_path,
-                                        req.audio_path, req.destination_id)
+                                        req.audio_path, req.destination_id, req.convert)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
