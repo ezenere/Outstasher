@@ -159,30 +159,48 @@ export function ClampText({ children, className = '' }: {
 }) {
   const [expanded, setExpanded] = useState(false)
   const [overflows, setOverflows] = useState(false)
-  const ref = useRef<HTMLSpanElement>(null)
-  // remede a cada mudança de texto: transborda a largura de 1 linha?
+  const boxRef = useRef<HTMLDivElement>(null)
+  const mirrorRef = useRef<HTMLSpanElement>(null)
+  // Mede num espelho fora da tela, não no span visível: expandido ele não trunca
+  // mais (scrollWidth == clientWidth) e a medição se perderia. Compara a largura
+  // real do texto com a do container; o ResizeObserver remede no resize.
   useEffect(() => {
-    const el = ref.current
-    if (!el) return
-    setOverflows(el.scrollWidth > el.clientWidth + 1)
+    const box = boxRef.current
+    const mirror = mirrorRef.current
+    if (!box || !mirror) return
+    const measure = () => setOverflows(mirror.scrollWidth > box.clientWidth + 1)
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(box)
+    return () => ro.disconnect()
   }, [children])
   return (
-    <div className={`flex items-start gap-2 ${className}`}>
+    <div ref={boxRef} className={`relative ${className}`}>
+      <div className="flex items-start gap-2">
+        <span className={`min-w-0 flex-1 ${expanded ? 'whitespace-pre-wrap wrap-break-word' : 'truncate whitespace-nowrap'}`}>
+          {children}
+        </span>
+        {overflows && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation()  // o card em volta pode ser clicável
+              setExpanded((v) => !v)
+            }}
+            className="shrink-0 whitespace-nowrap text-xs text-zinc-500 hover:text-zinc-300"
+          >
+            {expanded ? 'mostrar menos' : 'mostrar mais'}
+          </button>
+        )}
+      </div>
+      {/* espelho invisível, largura livre: dá o tamanho real do texto em 1 linha */}
       <span
-        ref={ref}
-        className={`min-w-0 flex-1 ${expanded ? 'whitespace-pre-wrap wrap-break-word' : 'truncate whitespace-nowrap'}`}
+        ref={mirrorRef}
+        aria-hidden
+        className="pointer-events-none invisible absolute block h-0 w-max whitespace-nowrap"
       >
         {children}
       </span>
-      {(overflows || expanded) && (
-        <button
-          type="button"
-          onClick={() => setExpanded((v) => !v)}
-          className="shrink-0 whitespace-nowrap text-xs text-zinc-500 hover:text-zinc-300"
-        >
-          {expanded ? 'mostrar menos' : 'mostrar mais'}
-        </button>
-      )}
     </div>
   )
 }

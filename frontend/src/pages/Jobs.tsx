@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { MediaVideo, Movie, Refresh, Search, SoundHigh, Trash, Xmark } from 'iconoir-react'
 import { api, fmtSize, post, type JobCounts, type JobListItem } from '../api'
-import { Badge, Empty, KindTags } from '../components/ui'
+import { Badge, ClampText, Empty, KindTags } from '../components/ui'
 import { useDialog, type DialogApi } from '../components/Dialog'
 
 // jobTitle aceita tanto o job completo quanto o item enxuto da lista
@@ -208,7 +208,7 @@ export default function Jobs() {
                 <span className="text-xs text-zinc-500">· {j.destination_label}</span>
               )}
             </div>
-            <div className="mt-1.5 text-sm whitespace-pre-wrap text-zinc-400">{j.detail}</div>
+            <ClampText className="mt-1.5 text-sm text-zinc-400">{j.detail}</ClampText>
             {(j.video_torrent || j.audio_torrent) && (
               <div className="mt-2 space-y-0.5 text-xs text-zinc-500">
                 {j.video_torrent && (
