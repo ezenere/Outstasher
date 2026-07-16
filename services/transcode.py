@@ -38,6 +38,17 @@ VIDEO_CODECS = {
 _SRC_CODEC_ID = {"h264": "h264", "hevc": "hevc", "h265": "hevc", "av1": "av1",
                  "vvc": "vvc", "h266": "vvc"}
 
+# hardware: família -> (label, encoder por codec). VVC não tem encoder de HW.
+HW_FAMILIES = {
+    "nvenc": ("NVENC (GPU NVIDIA)",
+              {"h264": "h264_nvenc", "hevc": "hevc_nvenc", "av1": "av1_nvenc"}),
+    "qsv": ("Quick Sync (GPU Intel/Arc)",
+            {"h264": "h264_qsv", "hevc": "hevc_qsv", "av1": "av1_qsv"}),
+}
+_HW_SHORT = {"nvenc": "NVENC", "qsv": "QSV"}
+# encoders de HW com saída 10-bit (p010le); H.264 em HW é sempre 8-bit
+HW_10BIT = {"hevc_nvenc", "av1_nvenc", "hevc_qsv", "av1_qsv"}
+
 # áudio: id -> (label, encoder ffmpeg, máx. canais, lossless).
 # aac limitado a estéreo de propósito: o encoder nativo embaralha a ordem dos
 # canais em layouts surround (mesmo racional do filtered_codec_and_bitrate).
@@ -57,6 +68,10 @@ RESOLUTION_TOLERANCE = 1.08
 
 # níveis genéricos de preset -> valor por encoder (velocidade vs compressão)
 PRESET_LEVELS = ("veryfast", "fast", "default", "slow", "veryslow")
+_NVENC_PRESETS = {"veryfast": "p1", "fast": "p3", "default": "p4",
+                  "slow": "p6", "veryslow": "p7"}
+_QSV_PRESETS = {"veryfast": "veryfast", "fast": "fast", "default": "medium",
+                "slow": "slow", "veryslow": "veryslow"}
 _PRESETS = {
     "libx264": {"veryfast": "veryfast", "fast": "fast", "default": "medium",
                 "slow": "slow", "veryslow": "veryslow"},
@@ -70,11 +85,21 @@ _PRESETS = {
                    "slow": "3", "veryslow": "2"},
     "librav1e": {"veryfast": "10", "fast": "8", "default": "6",
                  "slow": "4", "veryslow": "2"},
+    "h264_nvenc": _NVENC_PRESETS, "hevc_nvenc": _NVENC_PRESETS,
+    "av1_nvenc": _NVENC_PRESETS,
+    "h264_qsv": _QSV_PRESETS, "hevc_qsv": _QSV_PRESETS, "av1_qsv": _QSV_PRESETS,
 }
 
 # faixa (min, max, default) do CRF/QP por codec — a UI usa isto no slider
 CRF_RANGES = {"h264": (0, 51, 21), "hevc": (0, 51, 24),
               "av1": (1, 63, 30), "vvc": (18, 45, 32)}
+# em HW a escala muda: NVENC usa -cq (0 = automático, daí o mínimo 1) e QSV
+# usa -global_quality (ICQ). Defaults um pouco mais baixos que os de software
+# porque encoder de HW comprime pior no mesmo nível.
+HW_CRF_RANGES = {
+    "h264_nvenc": (1, 51, 22), "hevc_nvenc": (1, 51, 25), "av1_nvenc": (1, 51, 30),
+    "h264_qsv": (1, 51, 22), "hevc_qsv": (1, 51, 25), "av1_qsv": (1, 51, 30),
+}
 
 VIDEO_BITRATE_KBPS = (100, 150_000)
 AUDIO_BITRATE_KBPS = (32, 1024)
@@ -122,20 +147,52 @@ def available_encoders() -> frozenset[str]:
     return _encoders_cache
 
 
-def _video_encoder_for(codec_id: str) -> str | None:
+_hw_probe_cache: dict[str, bool] = {}
+
+
+def hw_encoder_works(encoder: str) -> bool:
+    """Encoder de HW compilado no ffmpeg não garante GPU presente/funcional —
+    só um encode de teste responde de verdade. Resultado cacheado por processo."""
+    if encoder not in available_encoders():
+        return False
+    if encoder not in _hw_probe_cache:
+        cmd = ["ffmpeg", "-hide_banner", "-v", "error",
+               "-f", "lavfi", "-i", "color=black:size=320x180:rate=30:duration=0.2",
+               "-frames:v", "3", "-c:v", encoder, "-f", "null", "-"]
+        try:
+            p = subprocess.run(cmd, capture_output=True, timeout=30)
+            _hw_probe_cache[encoder] = p.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            _hw_probe_cache[encoder] = False
+    return _hw_probe_cache[encoder]
+
+
+def _video_encoder_for(codec_id: str, hw: str = "none") -> str | None:
+    if hw != "none":
+        e = HW_FAMILIES[hw][1].get(codec_id)
+        return e if e and hw_encoder_works(e) else None
     enc = available_encoders()
     return next((e for e in VIDEO_CODECS[codec_id][1] if e in enc), None)
 
 
 def capabilities() -> dict:
-    """O que o ffmpeg DESTE servidor sabe encodar — a UI só mostra o disponível."""
+    """O que o ffmpeg DESTE servidor sabe encodar — a UI só mostra o disponível.
+    Encoders de HW passam pelo encode de teste (exige GPU real) na 1ª chamada."""
     enc = available_encoders()
     video = []
     for cid, (label, _encoders) in VIDEO_CODECS.items():
         chosen = _video_encoder_for(cid)
         lo, hi, default = CRF_RANGES[cid]
+        hw = []
+        for hid, (_hw_label, mapping) in HW_FAMILIES.items():
+            hw_enc = mapping.get(cid)
+            if hw_enc and hw_encoder_works(hw_enc):
+                hlo, hhi, hdef = HW_CRF_RANGES[hw_enc]
+                hw.append({"id": hid, "encoder": hw_enc,
+                           "ten_bit": hw_enc in HW_10BIT,
+                           "crf": {"min": hlo, "max": hhi, "default": hdef}})
         video.append({"id": cid, "label": label, "encoder": chosen,
-                      "available": chosen is not None,
+                      "available": chosen is not None, "hw": hw,
                       "crf": {"min": lo, "max": hi, "default": default}})
     audio = [{"id": cid, "label": label, "available": encoder in enc,
               "max_channels": maxch, "lossless": lossless,
@@ -143,6 +200,9 @@ def capabilities() -> dict:
              for cid, (label, encoder, maxch, lossless) in AUDIO_CODECS.items()]
     return {"video_codecs": video, "audio_codecs": audio,
             "presets": list(PRESET_LEVELS),
+            "hw_accels": [{"id": hid, "label": label,
+                           "available": any(hw_encoder_works(e) for e in mapping.values())}
+                          for hid, (label, mapping) in HW_FAMILIES.items()],
             "video_bitrate_kbps": list(VIDEO_BITRATE_KBPS),
             "audio_bitrate_kbps": list(AUDIO_BITRATE_KBPS)}
 
@@ -152,6 +212,7 @@ def capabilities() -> dict:
 @dataclass
 class ConvertOptions:
     video_codec: str = "keep"       # keep | vvc | av1 | hevc | h264
+    hw_accel: str = "none"          # none (software) | nvenc | qsv
     preset: str = "default"         # PRESET_LEVELS
     resolution: str = "keep"        # keep | 4320 | 2160 | 1080 | 720 | 480
     quality_mode: str = "bitrate"   # bitrate | crf
@@ -189,7 +250,8 @@ def describe(opts: "ConvertOptions | dict | None") -> list[str]:
     res_label = {"4320": "8K", "2160": "4K", "1080": "1080p", "720": "720p", "480": "480p"}
     out: list[str] = []
     if o.video_codec != "keep":
-        out.append(o.video_codec.upper())
+        out.append(o.video_codec.upper()
+                   + (f" ({_HW_SHORT[o.hw_accel]})" if o.hw_accel != "none" else ""))
     if o.resolution != "keep":
         out.append(res_label.get(o.resolution, o.resolution))
     if o.quality_mode == "crf" and o.crf is not None:
@@ -199,8 +261,10 @@ def describe(opts: "ConvertOptions | dict | None") -> list[str]:
                    else f"{o.video_bitrate} kbps")
     if o.bit_depth != "keep":
         out.append(f"{o.bit_depth}-bit")
-    # preset só é relevante quando há re-encode de vídeo (e ≠ default)
+    # preset/HW só são relevantes quando há re-encode de vídeo
     reencodes_video = o.video_codec != "keep" or o.resolution != "keep" or o.bit_depth != "keep"
+    if reencodes_video and o.hw_accel != "none" and o.video_codec == "keep":
+        out.append(_HW_SHORT[o.hw_accel])
     if reencodes_video and o.preset != "default":
         preset_label = {"veryfast": "muito rápido", "fast": "rápido",
                         "slow": "lento", "veryslow": "muito lento"}
@@ -226,6 +290,7 @@ def validate(payload: dict) -> ConvertOptions:
     o = ConvertOptions(**{k: v for k, v in payload.items() if k in known})
 
     _expect(o.video_codec, "codec de vídeo", ("keep", *VIDEO_CODECS))
+    _expect(o.hw_accel, "encoder de hardware", ("none", *HW_FAMILIES))
     _expect(o.preset, "preset", PRESET_LEVELS + ("default",))
     _expect(o.resolution, "resolução", ("keep", *RESOLUTION_CAPS))
     _expect(o.quality_mode, "modo de qualidade", ("bitrate", "crf"))
@@ -235,9 +300,21 @@ def validate(payload: dict) -> ConvertOptions:
     _expect(o.channels, "canais", ("keep", *CHANNEL_CAPS))
     _expect(o.subtitles, "legendas", ("default", "all", "none"))
 
-    if o.video_codec != "keep" and not _video_encoder_for(o.video_codec):
-        raise ValueError(f"o ffmpeg do servidor não tem encoder para "
-                         f"{VIDEO_CODECS[o.video_codec][0]}")
+    if o.video_codec != "keep":
+        if o.hw_accel != "none":
+            hw_label = HW_FAMILIES[o.hw_accel][0]
+            if HW_FAMILIES[o.hw_accel][1].get(o.video_codec) is None:
+                raise ValueError(f"{VIDEO_CODECS[o.video_codec][0]} não tem encoder "
+                                 f"de hardware ({hw_label} encoda H.264/HEVC/AV1)")
+            if not _video_encoder_for(o.video_codec, o.hw_accel):
+                raise ValueError(f"{hw_label} não está disponível neste servidor "
+                                 f"para {VIDEO_CODECS[o.video_codec][0]}")
+            if o.video_codec == "h264" and o.bit_depth == "10":
+                raise ValueError("H.264 em hardware só sai em 8-bit — "
+                                 "use HEVC ou AV1 para 10-bit")
+        elif not _video_encoder_for(o.video_codec):
+            raise ValueError(f"o ffmpeg do servidor não tem encoder para "
+                             f"{VIDEO_CODECS[o.video_codec][0]}")
     if o.audio_codec != "keep" and AUDIO_CODECS[o.audio_codec][1] not in available_encoders():
         raise ValueError(f"o ffmpeg do servidor não tem encoder para "
                          f"{AUDIO_CODECS[o.audio_codec][0]}")
@@ -249,11 +326,12 @@ def validate(payload: dict) -> ConvertOptions:
             raise ValueError(f"bitrate de vídeo fora da faixa {lo}–{hi} kbps")
     if o.crf is not None:
         o.crf = int(o.crf)
-        codec_for_crf = o.video_codec if o.video_codec != "keep" else None
-        if codec_for_crf:
-            lo, hi, _d = CRF_RANGES[codec_for_crf]
+        if o.video_codec != "keep":
+            enc = _video_encoder_for(o.video_codec, o.hw_accel)
+            lo, hi, _d = HW_CRF_RANGES.get(enc or "", CRF_RANGES[o.video_codec])
             if not lo <= o.crf <= hi:
-                raise ValueError(f"CRF fora da faixa {lo}–{hi} para {codec_for_crf.upper()}")
+                raise ValueError(f"CRF fora da faixa {lo}–{hi} para {o.video_codec.upper()}"
+                                 + (f" em {_HW_SHORT[o.hw_accel]}" if o.hw_accel != "none" else ""))
         elif not 0 <= o.crf <= 63:
             raise ValueError("CRF fora da faixa 0–63")
     if o.audio_bitrate is not None:
@@ -345,16 +423,25 @@ def plan_video(probe: dict, vstream: dict, opts: ConvertOptions) -> VideoPlan:
 
     # ---- encoder ----
     codec_id = want_codec or src_id
-    if codec_id is None or _video_encoder_for(codec_id) is None:
-        # "manter codec" + downscale/bit depth numa fonte que não sabemos
-        # re-gerar (vp9, mpeg2...): cai para o melhor encoder disponível
-        fallback = next((c for c in ("hevc", "h264", "av1") if _video_encoder_for(c)), None)
-        if fallback is None:
+    encoder = _video_encoder_for(codec_id, opts.hw_accel) if codec_id else None
+    if encoder is None and codec_id and opts.hw_accel != "none":
+        # "manter codec" + HW que não encoda o codec da fonte: mantém o codec
+        # em software (validate já barrou o pedido explícito de codec sem HW)
+        encoder = _video_encoder_for(codec_id)
+        if encoder:
+            notes.append(f"{_HW_SHORT[opts.hw_accel]} não encoda {codec_id.upper()} "
+                         f"neste servidor — usando encoder por software")
+    if encoder is None:
+        # fonte que não sabemos re-gerar (vp9, mpeg2...): melhor encoder
+        # disponível, preferindo o HW pedido
+        codec_id = next((c for c in ("hevc", "h264", "av1")
+                         if _video_encoder_for(c, opts.hw_accel) or _video_encoder_for(c)), None)
+        if codec_id is None:
             raise merger.MergeError("nenhum encoder de vídeo disponível no ffmpeg do servidor")
+        encoder = _video_encoder_for(codec_id, opts.hw_accel) or _video_encoder_for(codec_id)
         notes.append(f"codec da fonte ({src_name or '?'}) sem encoder no servidor — "
-                     f"re-encodando em {fallback.upper()}")
-        codec_id = fallback
-    encoder = _video_encoder_for(codec_id)
+                     f"re-encodando em {codec_id.upper()}")
+    is_hw = encoder.endswith("_nvenc") or encoder.endswith("_qsv")
 
     args = ["-c:v", encoder]
     preset = _PRESETS[encoder][opts.preset]
@@ -366,8 +453,15 @@ def plan_video(probe: dict, vstream: dict, opts: ConvertOptions) -> VideoPlan:
         args += ["-preset", preset]
 
     if opts.quality_mode == "crf":
-        crf = opts.crf if opts.crf is not None else CRF_RANGES[codec_id][2]
-        if encoder == "libaom-av1":
+        crf = opts.crf if opts.crf is not None \
+            else HW_CRF_RANGES.get(encoder, CRF_RANGES[codec_id])[2]
+        if encoder.endswith("_nvenc"):
+            # NVENC não tem CRF: o equivalente é VBR com alvo de qualidade (-cq)
+            args += ["-rc", "vbr", "-cq", str(crf), "-b:v", "0"]
+        elif encoder.endswith("_qsv"):
+            # QSV: qualidade constante é ICQ, via -global_quality
+            args += ["-global_quality", str(crf)]
+        elif encoder == "libaom-av1":
             args += ["-crf", str(crf), "-b:v", "0"]
         elif encoder in ("librav1e", "libvvenc"):
             args += ["-qp", str(crf)]
@@ -387,7 +481,13 @@ def plan_video(probe: dict, vstream: dict, opts: ConvertOptions) -> VideoPlan:
         ten_bit_out = False
         notes.append("fonte 10-bit sai em 8-bit no H.264 (High10 tem compatibilidade "
                      "péssima) — force 10-bit nas opções se quiser manter")
-    args += ["-pix_fmt", "yuv420p10le" if ten_bit_out else "yuv420p"]
+    if ten_bit_out and is_hw and encoder not in HW_10BIT:
+        ten_bit_out = False
+        notes.append(f"{encoder} só encoda 8-bit — saída em 8-bit")
+    if is_hw:
+        args += ["-pix_fmt", "p010le" if ten_bit_out else "nv12"]
+    else:
+        args += ["-pix_fmt", "yuv420p10le" if ten_bit_out else "yuv420p"]
     if ten_bit_out and not src_10bit:
         notes.append("saída em 10-bit a partir de fonte 8-bit (reduz banding no re-encode)")
 

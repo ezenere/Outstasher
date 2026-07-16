@@ -76,12 +76,12 @@ def test_invalidation_on_job_done_and_delete_folder(library):
            "search": None, "fallbacks": None, "current": None}
     jobs._jobs["x1"] = job
     jobs._set(job, "done", "ok")
-    assert catalog._library_cache["at"] == 0.0
+    assert catalog._library_cache["at"] is None
 
     # remover uma pasta também invalida
     catalog.library_keys()
     catalog.delete_folder(None, "Novo Filme (2020)")
-    assert catalog._library_cache["at"] == 0.0
+    assert catalog._library_cache["at"] is None
     assert ("novofilme", "2020") not in catalog.library_keys()
 
 

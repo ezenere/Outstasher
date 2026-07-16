@@ -20,6 +20,7 @@ interface Props {
 
 export const CONVERT_DEFAULTS: ConvertOptions = {
   video_codec: 'keep',
+  hw_accel: 'none',
   preset: 'default',
   resolution: 'keep',
   quality_mode: 'bitrate',
@@ -105,14 +106,21 @@ export default function AdvancedOptions({ value, onChange, blocked }: Props) {
     if (enabled) onChange(next)
   }
 
-  // trocar codec/resolução re-sugere o bitrate (e o CRF default do codec)
+  // trocar codec/encoder/resolução re-sugere o bitrate (e o CRF default,
+  // cuja escala muda entre software e hardware)
   function updateVideo(patch: Partial<ConvertOptions>) {
     const next = { ...opts, ...patch }
+    const cap = caps?.video_codecs.find((c) => c.id === next.video_codec)
+    if (next.video_codec !== 'keep' && next.hw_accel !== 'none'
+        && !cap?.hw.some((h) => h.id === next.hw_accel)) {
+      next.hw_accel = 'none' // o codec escolhido não tem esse encoder de HW
+    }
+    const hw = cap?.hw.find((h) => h.id === next.hw_accel)
+    if (next.bit_depth === '10' && hw && !hw.ten_bit) next.bit_depth = 'keep'
     const rec = REC_VIDEO_KBPS[next.video_codec] ?? REC_VIDEO_KBPS.keep
     next.video_bitrate = rec[next.resolution] ?? rec.keep
     if (next.quality_mode === 'crf') {
-      const cap = caps?.video_codecs.find((c) => c.id === next.video_codec)
-      next.crf = cap ? cap.crf.default : 24
+      next.crf = hw?.crf.default ?? cap?.crf.default ?? 24
     }
     setOpts(next)
     if (enabled) onChange(next)
@@ -120,8 +128,13 @@ export default function AdvancedOptions({ value, onChange, blocked }: Props) {
 
   const [vMin, vMax] = caps?.video_bitrate_kbps ?? [100, 150000]
   const [aMin, aMax] = caps?.audio_bitrate_kbps ?? [32, 1024]
-  const crfCap = caps?.video_codecs.find((c) => c.id === opts.video_codec)?.crf
-    ?? { min: 0, max: 51, default: 24 }
+  const codecCap = caps?.video_codecs.find((c) => c.id === opts.video_codec)
+  const hwCap = codecCap?.hw.find((h) => h.id === opts.hw_accel)
+  const crfCap = hwCap?.crf ?? codecCap?.crf ?? { min: 0, max: 51, default: 24 }
+  // 10-bit indisponível: H.264 (software desaconselha, HW não suporta) ou
+  // encoder de HW sem saída 10-bit
+  const tenBitBlocked = opts.hw_accel !== 'none' && opts.video_codec !== 'keep'
+    && hwCap !== undefined && !hwCap.ten_bit
   const audioCap = caps?.audio_codecs.find((c) => c.id === opts.audio_codec)
 
   // há chance de re-encode de vídeo? (senão bitrate/CRF/preset são inertes)
@@ -189,6 +202,34 @@ export default function AdvancedOptions({ value, onChange, blocked }: Props) {
               </label>
 
               <label className={`flex flex-col gap-1 text-sm ${videoActive ? '' : 'opacity-50'}`}>
+                <span className="text-zinc-400">Encoder</span>
+                <select
+                  value={opts.hw_accel}
+                  onChange={(e) => updateVideo({ hw_accel: e.target.value })}
+                  className={selectCls}
+                >
+                  <option value="none">Software (CPU)</option>
+                  {caps?.hw_accels.map((a) => {
+                    const forCodec = opts.video_codec === 'keep'
+                      || codecCap?.hw.some((h) => h.id === a.id)
+                    const reason = !a.available ? ' — indisponível no servidor'
+                      : !forCodec ? ' — não encoda este codec' : ''
+                    return (
+                      <option key={a.id} value={a.id} disabled={!a.available || !forCodec}>
+                        {a.label}{reason}
+                      </option>
+                    )
+                  })}
+                </select>
+                {opts.hw_accel !== 'none' && (
+                  <span className="text-xs text-zinc-500">
+                    GPU: muito mais rápido; compressão um pouco pior que software
+                    no mesmo bitrate.
+                  </span>
+                )}
+              </label>
+
+              <label className={`flex flex-col gap-1 text-sm ${videoActive ? '' : 'opacity-50'}`}>
                 <span className="text-zinc-400">Preset (velocidade × compressão)</span>
                 <select
                   value={opts.preset}
@@ -222,7 +263,10 @@ export default function AdvancedOptions({ value, onChange, blocked }: Props) {
                   className={selectCls}
                 >
                   <option value="keep">Manter original</option>
-                  <option value="10">10-bit (comprime melhor, menos banding)</option>
+                  <option value="10" disabled={tenBitBlocked}>
+                    10-bit (comprime melhor, menos banding)
+                    {tenBitBlocked ? ' — este encoder só sai em 8-bit' : ''}
+                  </option>
                   <option value="8">8-bit (máxima compatibilidade)</option>
                 </select>
               </label>

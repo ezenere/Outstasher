@@ -126,7 +126,12 @@ copy). Opções:
 
 - **Codec de vídeo**: manter / VVC / AV1 / HEVC / H.264 (só os que o ffmpeg tem
   encoder aparecem).
-- **Preset**: muito rápido → muito lento.
+- **Encoder**: software (CPU) / **NVENC** (GPU NVIDIA) / **Quick Sync** (GPU
+  Intel/Arc), para H.264/HEVC/AV1. A disponibilidade é testada com um encode
+  real na GPU; a faixa de qualidade (CQ/ICQ, 1–51) e o 10-bit (não existe em
+  H.264 por hardware) seguem o encoder escolhido.
+- **Preset**: muito rápido → muito lento (mapeado por encoder; ex.: p1–p7 no
+  NVENC).
 - **Resolução**: 8K/4K/Full HD/HD/SD. Corta por **largura** com 8% de tolerância
   e **nunca aumenta** a resolução da fonte.
 - **Qualidade**: bitrate alvo (100 kbps–150 Mbps) ou **CRF**.

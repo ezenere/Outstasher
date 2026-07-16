@@ -60,6 +60,13 @@ def test_capabilities(real_encoders):
     assert auds["aac"]["max_channels"] == 2
     assert auds["flac"]["lossless"] and auds["flac"]["default_kbps"] is None
     assert caps["video_bitrate_kbps"] == [100, 150000]
+    # hardware: as duas famílias sempre aparecem; disponível só com GPU real
+    assert {a["id"] for a in caps["hw_accels"]} == {"nvenc", "qsv"}
+    assert vids["vvc"]["hw"] == []  # VVC não tem encoder de hardware
+    for c in caps["video_codecs"]:
+        for h in c["hw"]:
+            assert h["encoder"] in tc.HW_CRF_RANGES
+            assert h["ten_bit"] == (h["encoder"] in tc.HW_10BIT)
 
 
 def test_validate_ok():
@@ -176,6 +183,72 @@ def test_estimate_video_bitrate():
     # sem teto conhecido: converte assim mesmo, avisando
     p = tc.plan_video(probe(vs), vs, tc.validate({"video_codec": "hevc", "video_bitrate": 90000}))
     assert p.encode and any("desconhecido" in n for n in p.notes)
+
+
+# -------------------- hardware encoding --------------------
+
+def test_hw_presets_and_ranges_complete():
+    # todo encoder de HW oferecido tem mapa de preset e faixa de qualidade
+    for _label, mapping in tc.HW_FAMILIES.values():
+        for enc in mapping.values():
+            assert set(tc._PRESETS[enc]) == set(tc.PRESET_LEVELS)
+            assert enc in tc.HW_CRF_RANGES
+
+
+def test_validate_hw_rejects():
+    with pytest.raises(ValueError):
+        tc.validate({"hw_accel": "cuda"})  # família desconhecida
+    with pytest.raises(ValueError):        # VVC não tem encoder de hardware
+        tc.validate({"video_codec": "vvc", "hw_accel": "nvenc", "quality_mode": "crf"})
+    with pytest.raises(ValueError):        # H.264 em HW é sempre 8-bit
+        tc.validate({"video_codec": "h264", "hw_accel": "qsv",
+                     "video_bitrate": 4000, "bit_depth": "10"})
+
+
+def test_hw_plan_or_reject():
+    """Com GPU real o plano usa o encoder de HW (args -cq/-global_quality,
+    pix_fmt nv12/p010le); sem GPU a validação recusa com mensagem clara.
+    Os dois caminhos são o comportamento real do ambiente — nada é falseado."""
+    vs = vstream(codec="h264", br=20_000_000)
+    for hw, (_label, mapping) in tc.HW_FAMILIES.items():
+        enc = mapping["hevc"]
+        payload = {"video_codec": "hevc", "hw_accel": hw,
+                   "quality_mode": "crf", "crf": 25, "preset": "fast"}
+        if tc.hw_encoder_works(enc):
+            p = tc.plan_video(probe(vs), vs, tc.validate(payload))
+            assert p.encode and p.encoder == enc
+            assert "-preset" in p.args and tc._PRESETS[enc]["fast"] in p.args
+            if hw == "nvenc":
+                assert "-cq" in p.args and "25" in p.args and "-crf" not in p.args
+            else:
+                assert "-global_quality" in p.args and "-crf" not in p.args
+            assert "nv12" in p.args  # pix_fmt de HW (fonte 8-bit)
+        else:
+            with pytest.raises(ValueError, match="não está disponível"):
+                tc.validate(payload)
+
+
+def test_hw_crf_range_scale():
+    # AV1 em software vai a 63; em NVENC o -cq para em 51 — a validação segue
+    # a escala do encoder escolhido
+    assert tc.validate({"video_codec": "av1", "quality_mode": "crf", "crf": 60}).crf == 60
+    if tc.hw_encoder_works("av1_nvenc"):
+        with pytest.raises(ValueError, match="fora da faixa"):
+            tc.validate({"video_codec": "av1", "hw_accel": "nvenc",
+                         "quality_mode": "crf", "crf": 60})
+
+
+def test_describe_hw():
+    o = tc.ConvertOptions(video_codec="hevc", hw_accel="nvenc",
+                          quality_mode="crf", crf=25)
+    assert tc.describe(o)[0] == "HEVC (NVENC)"
+    # "manter codec" + downscale em HW: a tag do HW aparece sozinha
+    o = tc.ConvertOptions(resolution="1080", hw_accel="qsv",
+                          quality_mode="crf", crf=25)
+    assert "QSV" in tc.describe(o)
+    # sem re-encode de vídeo, hw_accel é inerte
+    o = tc.ConvertOptions(audio_codec="aac", hw_accel="nvenc")
+    assert tc.describe(o) == ["áudio AAC"]
 
 
 # -------------------- plan_audio --------------------

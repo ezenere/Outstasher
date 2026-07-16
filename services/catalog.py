@@ -322,8 +322,11 @@ def delete_folder(destination_id: int | None, folder: str) -> None:
 # Sem lock de propósito: duas buscas simultâneas com cache vencido só fariam
 # o mesmo scan duas vezes — inofensivo, e a atribuição do dict é atômica.
 
+# "at" usa time.monotonic(), que conta desde o boot — 0.0 não serve de
+# sentinela de "vencido" (numa máquina de pé há < TTL o cache vazio pareceria
+# fresco). None = nunca escaneado / invalidado.
 LIBRARY_TTL_SECONDS = 30 * 60
-_library_cache: dict = {"at": 0.0, "keys": frozenset()}
+_library_cache: dict = {"at": None, "keys": frozenset()}
 
 
 def _norm_title(text: str) -> str:
@@ -355,7 +358,8 @@ def _scan_library() -> frozenset[tuple[str, str | None]]:
 def library_keys() -> frozenset[tuple[str, str | None]]:
     """Chaves da coleção, do cache (rescan só se venceu o TTL). Bloqueante —
     chamar via asyncio.to_thread na API."""
-    if time.monotonic() - _library_cache["at"] > LIBRARY_TTL_SECONDS:
+    at = _library_cache["at"]
+    if at is None or time.monotonic() - at > LIBRARY_TTL_SECONDS:
         _library_cache["keys"] = _scan_library()
         _library_cache["at"] = time.monotonic()
     return _library_cache["keys"]
@@ -363,7 +367,7 @@ def library_keys() -> frozenset[tuple[str, str | None]]:
 
 def invalidate_library() -> None:
     """Marca o cache como vencido (a PRÓXIMA busca refaz o scan — nada roda já)."""
-    _library_cache["at"] = 0.0
+    _library_cache["at"] = None
 
 
 def in_library(movie: dict, keys: frozenset) -> bool:

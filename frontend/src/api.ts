@@ -69,6 +69,7 @@ export const VARIANT_LABEL: Record<string, string> = {
 /** Payload de opções avançadas enviado em /api/jobs e /api/jobs/manual. */
 export interface ConvertOptions {
   video_codec: string // keep | vvc | av1 | hevc | h264
+  hw_accel: string // none (software) | nvenc | qsv
   preset: string // veryfast | fast | default | slow | veryslow
   resolution: string // keep | 4320 | 2160 | 1080 | 720 | 480
   quality_mode: 'bitrate' | 'crf'
@@ -82,11 +83,19 @@ export interface ConvertOptions {
   subtitles: string // default | all | none
 }
 
+export interface HwEncoderCap {
+  id: string // nvenc | qsv
+  encoder: string
+  ten_bit: boolean
+  crf: { min: number; max: number; default: number }
+}
+
 export interface VideoCodecCap {
   id: string
   label: string
   encoder: string | null
   available: boolean
+  hw: HwEncoderCap[]
   crf: { min: number; max: number; default: number }
 }
 
@@ -104,6 +113,7 @@ export interface Capabilities {
   video_codecs: VideoCodecCap[]
   audio_codecs: AudioCodecCap[]
   presets: string[]
+  hw_accels: { id: string; label: string; available: boolean }[]
   video_bitrate_kbps: [number, number]
   audio_bitrate_kbps: [number, number]
 }
@@ -572,8 +582,10 @@ export const langName = (code: string): string =>
  *  Só as opções que diferem do padrão. Retorna [] quando tudo é padrão. */
 export function convertSummary(c: ConvertOptions | null | undefined): string[] {
   if (!c) return []
+  const hwShort: Record<string, string> = { nvenc: 'NVENC', qsv: 'QSV' }
+  const hw = c.hw_accel && c.hw_accel !== 'none' ? (hwShort[c.hw_accel] ?? c.hw_accel) : null
   const out: string[] = []
-  if (c.video_codec !== 'keep') out.push(c.video_codec.toUpperCase())
+  if (c.video_codec !== 'keep') out.push(c.video_codec.toUpperCase() + (hw ? ` (${hw})` : ''))
   if (c.resolution !== 'keep') {
     const r: Record<string, string> = { '4320': '8K', '2160': '4K', '1080': '1080p', '720': '720p', '480': '480p' }
     out.push(r[c.resolution] ?? c.resolution)
@@ -582,8 +594,9 @@ export function convertSummary(c: ConvertOptions | null | undefined): string[] {
   else if (c.video_codec !== 'keep' && c.video_bitrate != null)
     out.push(c.video_bitrate >= 1000 ? `${(c.video_bitrate / 1000).toFixed(1)} Mbps` : `${c.video_bitrate} kbps`)
   if (c.bit_depth !== 'keep') out.push(`${c.bit_depth}-bit`)
-  // preset só é relevante quando há re-encode de vídeo (e ≠ default)
+  // preset/HW só são relevantes quando há re-encode de vídeo
   const reencodesVideo = c.video_codec !== 'keep' || c.resolution !== 'keep' || c.bit_depth !== 'keep'
+  if (reencodesVideo && hw && c.video_codec === 'keep') out.push(hw)
   if (reencodesVideo && c.preset !== 'default') {
     const p: Record<string, string> = {
       veryfast: 'muito rápido', fast: 'rápido', slow: 'lento', veryslow: 'muito lento',
