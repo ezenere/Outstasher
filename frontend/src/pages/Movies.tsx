@@ -8,6 +8,7 @@ import {
 } from '../api'
 import { useJobsSummary } from '../jobsSummary'
 import AdvancedOptions from '../components/AdvancedOptions'
+import { useDialog } from '../components/Dialog'
 import { DiskFree, Empty, MovieStateBadge, MovieStateIcon } from '../components/ui'
 
 // estados "em progresso": se um filme estava num destes e sumiu do summary,
@@ -15,6 +16,7 @@ import { DiskFree, Empty, MovieStateBadge, MovieStateIcon } from '../components/
 const IN_PROGRESS = new Set<MovieState>(['converting', 'downloading', 'searching', 'awaiting'])
 
 export default function Movies() {
+  const dialog = useDialog()
   const [movies, setMovies] = useState<Movie[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
@@ -124,10 +126,11 @@ export default function Movies() {
     if (!selected) return
     // avisa se o filme já está sendo baixado/convertido/finalizado
     const existing = states.get(selected.id)
-    if (existing && !confirm(
-      `Este filme já tem um download ${MOVIE_STATE_LABEL[existing].toLowerCase()}.\n`
-      + 'Quer baixar de novo mesmo assim?',
-    )) return
+    if (existing && !(await dialog.confirm({
+      title: 'Baixar de novo?',
+      message: `Este filme já tem um download ${MOVIE_STATE_LABEL[existing].toLowerCase()}. Quer baixar de novo mesmo assim?`,
+      confirmText: 'Baixar de novo',
+    }))) return
     const tmdbId = selected.id
     setStarting(true)
     try {
@@ -150,7 +153,7 @@ export default function Movies() {
       setJustStarted(tmdbId)
       setTimeout(() => setJustStarted((cur) => (cur === tmdbId ? null : cur)), 5000)
     } catch (e) {
-      alert(`Erro ao criar job: ${(e as Error).message}`)
+      await dialog.alert({ title: 'Erro ao criar job', message: (e as Error).message })
     } finally {
       setStarting(false)
     }

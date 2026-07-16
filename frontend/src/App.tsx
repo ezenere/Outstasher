@@ -13,6 +13,7 @@ import Catalog from './pages/Catalog'
 import CatalogItem from './pages/CatalogItem'
 import Login from './pages/Login'
 import ProcessMenu from './components/ProcessMenu'
+import { DialogProvider } from './components/Dialog'
 import logo from './assets/logo.png'
 
 function Tab({ to, children, dot }: { to: string; children: React.ReactNode; dot?: boolean }) {
@@ -90,6 +91,7 @@ export default function App() {
   }
 
   return (
+    <DialogProvider>
     <JobsSummaryContext.Provider value={summary}>
     <BrowserRouter>
       <div className="min-h-screen">
@@ -144,5 +146,6 @@ export default function App() {
       </div>
     </BrowserRouter>
     </JobsSummaryContext.Provider>
+    </DialogProvider>
   )
 }

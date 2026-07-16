@@ -1,10 +1,10 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import type { Candidate, ConvertOptions, DiskInfo, MergeProgress, MovieState, Progress, QbitTone } from '../api'
 import {
   convertSummary, fmtDisk, fmtEta, fmtSize, fmtSpeed, fmtTime, langName,
   MOVIE_STATE_LABEL, STATUS_LABEL, qbitIsComplete, qbitState,
 } from '../api'
-import { Check, MediaVideoList, Download, Search, WarningTriangle, CheckCircle, XmarkCircle } from 'iconoir-react'
+import { Check, MediaVideoList, Download, Search, Timer, WarningTriangle, CheckCircle, XmarkCircle } from 'iconoir-react'
 
 const BADGE_STYLES: Record<string, string> = {
   searching: 'bg-blue-950 text-blue-400',
@@ -108,6 +108,30 @@ export function MergeBar({ p }: { p?: MergeProgress | null }) {
         Conversão: {p.pct || 0}%{extra ? ` — ${extra}` : ''}
       </div>
     </div>
+  )
+}
+
+/** Tempo decorrido desde `since` (ISO). Enquanto `running`, atualiza a cada
+ *  segundo; parado, congela no último valor. Usado no tempo de conversão/cópia. */
+export function Elapsed({ since, running, title }: {
+  since: string
+  running: boolean
+  title?: string
+}) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!running) return
+    setNow(Date.now())  // atualiza já ao (re)entrar em execução
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [running])
+  const start = new Date(since).getTime()
+  if (Number.isNaN(start)) return null
+  const secs = Math.max(0, (now - start) / 1000)
+  return (
+    <span className="inline-flex items-center gap-1 text-xs text-zinc-400" title={title}>
+      <Timer width={13} height={13} /> {fmtEta(secs)}
+    </span>
   )
 }
 

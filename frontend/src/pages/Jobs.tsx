@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { MediaVideo, Movie, Refresh, Search, SoundHigh, Trash, Xmark } from 'iconoir-react'
 import { api, fmtSize, post, type JobCounts, type JobListItem } from '../api'
 import { Badge, Empty, KindTags } from '../components/ui'
+import { useDialog, type DialogApi } from '../components/Dialog'
 
 // jobTitle aceita tanto o job completo quanto o item enxuto da lista
 type JobLike = {
@@ -25,16 +26,23 @@ const FILTERS: { key: Filter; label: string }[] = [
   { key: 'all', label: 'Todos' },
 ]
 
-export async function removeJob(id: string, reload: () => void) {
-  if (!confirm('Remover este job?')) return
-  const delT = confirm(
-    'Apagar também os torrents e arquivos baixados no qBittorrent?\n\nOK = apagar tudo · Cancelar = manter os downloads',
-  )
+export async function removeJob(dialog: DialogApi, id: string, reload: () => void) {
+  if (!(await dialog.confirm({
+    title: 'Remover job',
+    message: 'Remover este job do histórico?',
+    confirmText: 'Remover', tone: 'danger',
+  }))) return
+  // segunda pergunta: apagar também os dados no qBittorrent?
+  const delT = await dialog.confirm({
+    title: 'Apagar os downloads?',
+    message: 'Apagar também os torrents e arquivos baixados no qBittorrent?',
+    confirmText: 'Apagar tudo', cancelText: 'Manter downloads', tone: 'danger',
+  })
   try {
     await api(`/api/jobs/${id}?delete_torrents=${delT}`, { method: 'DELETE' })
     reload()
   } catch (e) {
-    alert(`Erro: ${(e as Error).message}`)
+    await dialog.alert({ title: 'Erro', message: (e as Error).message })
   }
 }
 
@@ -47,6 +55,7 @@ export default function Jobs() {
   const [filter, setFilter] = useState<Filter>('active')
   const [query, setQuery] = useState('')
   const navigate = useNavigate()
+  const dialog = useDialog()
   // guarda a contagem do grupo aberto no último tick, para detectar mudança
   const lastGroupCount = useRef<number | null>(null)
 
@@ -95,7 +104,7 @@ export default function Jobs() {
       await post(`/api/jobs/${id}/retry`)
       void reload(filter)
     } catch (e) {
-      alert(`Erro: ${(e as Error).message}`)
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
     }
   }
 
@@ -188,7 +197,7 @@ export default function Jobs() {
                 className="rounded-lg border border-zinc-700 p-1.5 text-zinc-400 hover:text-zinc-200">
                 <Search width={15} height={15} />
               </Link>
-              <IconBtn title="Remover job" onClick={() => removeJob(j.id, () => reload(filter))}>
+              <IconBtn title="Remover job" onClick={() => removeJob(dialog, j.id, () => reload(filter))}>
                 <Trash width={15} height={15} />
               </IconBtn>
             </div>

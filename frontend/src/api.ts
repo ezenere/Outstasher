@@ -218,6 +218,8 @@ export interface Job {
   torrent_save_path?: string | null
   torrent_local_path?: string | null
   created_at: string
+  /** ISO de quando a conversão/cópia começou (para o tempo decorrido). */
+  merge_started_at?: string | null
   search?: { audio: Candidate[]; video: Candidate[] } | null
   events?: JobEvent[]
   /** Presente quando a conversão pausou por offsets divergentes (possível
@@ -275,6 +277,7 @@ export interface JobProgress {
   detail: string
   progress: Job['progress']
   output: string | null
+  merge_started_at?: string | null
 }
 
 // ---------- catálogo ----------

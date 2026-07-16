@@ -325,7 +325,8 @@ def progress(job_id: str) -> dict | None:
     if not job:
         return None
     return {"id": job["id"], "status": job["status"], "detail": job.get("detail", ""),
-            "progress": job["progress"], "output": job.get("output")}
+            "progress": job["progress"], "output": job.get("output"),
+            "merge_started_at": job.get("merge_started_at")}
 
 
 def _event(job: dict, kind: str, message: str, data=None):
@@ -1391,6 +1392,7 @@ async def _deliver_single(job: dict, files: dict):
         output = dest_dir / safe_title / f"{safe_title} [{tag}].mkv"
         # registra o destino antes do ffmpeg: cancel() apaga o parcial (ver _merge)
         job["output"] = str(output)
+        job["merge_started_at"] = datetime.now().isoformat(timespec="seconds")
         _set(job, "merging", f"Convertendo arquivo {label} ({src_file.name})...")
 
         def log(msg):
@@ -1421,6 +1423,7 @@ async def _deliver_single(job: dict, files: dict):
         return
 
     output = dest_dir / safe_title / f"{safe_title} [{tag}]{src_file.suffix}"
+    job["merge_started_at"] = datetime.now().isoformat(timespec="seconds")
     _set(job, "merging", f"Entregando {label} no destino...")
 
     notes: list[str] = []
@@ -1448,6 +1451,7 @@ async def _merge(job: dict, video_file: Path, audio_file: Path,
     # precisa saber qual arquivo parcial apagar
     job["output"] = str(output)
 
+    job["merge_started_at"] = datetime.now().isoformat(timespec="seconds")
     _set(job, "merging", f"Fazendo merge ({video_file.name} + {audio_file.name})...")
 
     def log(msg):

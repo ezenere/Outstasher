@@ -6,8 +6,10 @@ import {
 } from 'iconoir-react'
 import { api, del, post, type CatalogDetail, type CatalogFile, type Stream } from '../api'
 import { Empty } from '../components/ui'
+import { useDialog } from '../components/Dialog'
 
 export default function CatalogItem() {
+  const dialog = useDialog()
   const [params] = useSearchParams()
   const destId = params.get('destination_id')
   const folder = params.get('folder') ?? ''
@@ -40,17 +42,25 @@ export default function CatalogItem() {
   }
 
   async function removeFile(f: CatalogFile) {
-    if (!confirm(`Remover o arquivo "${f.name}"?`)) return
+    if (!(await dialog.confirm({
+      title: 'Remover arquivo',
+      message: `Remover o arquivo "${f.name}"?`,
+      confirmText: 'Remover', tone: 'danger',
+    }))) return
     try {
       await del(`/api/catalog/file?${qs}&rel=${encodeURIComponent(f.rel)}`)
       void reload()
     } catch (e) {
-      alert(`Erro: ${(e as Error).message}`)
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
     }
   }
 
   async function renameFile(f: CatalogFile) {
-    const novo = prompt('Novo nome do arquivo (mantém a extensão se você não digitar uma):', f.name)
+    const novo = await dialog.prompt({
+      title: 'Renomear arquivo',
+      message: 'Sem digitar uma extensão, a original é mantida.',
+      defaultValue: f.name, confirmText: 'Renomear',
+    })
     if (novo == null) return // cancelou
     if (novo.trim() === '' || novo.trim() === f.name) return // vazio ou sem mudança
     try {
@@ -59,18 +69,22 @@ export default function CatalogItem() {
       })
       void reload()
     } catch (e) {
-      alert(`Erro: ${(e as Error).message}`)
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
     }
   }
 
   async function removeFolder() {
     if (!detail) return
-    if (!confirm(`Remover a PASTA INTEIRA do filme "${detail.title}"?\nIsso apaga todos os arquivos dentro dela.`)) return
+    if (!(await dialog.confirm({
+      title: 'Remover pasta do filme',
+      message: `Remover a pasta inteira do filme "${detail.title}"? Isso apaga todos os arquivos dentro dela.`,
+      confirmText: 'Remover tudo', tone: 'danger',
+    }))) return
     try {
       await del(`/api/catalog/item?${qs}`)
       navigate('/catalog')
     } catch (e) {
-      alert(`Erro: ${(e as Error).message}`)
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
     }
   }
 

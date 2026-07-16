@@ -3,3 +3,70 @@
 body {
   @apply bg-zinc-950 text-zinc-100 antialiased;
 }
+
+/* Checkboxes e radios estilizados para casar com o design (azul de acento,
+   fundo zinc). appearance-none + desenho do "marcador" à mão para controle
+   total em qualquer navegador. */
+input[type="checkbox"],
+input[type="radio"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
+  border: 1.5px solid var(--color-zinc-600);
+  background-color: var(--color-zinc-800);
+  cursor: pointer;
+  display: inline-grid;
+  place-content: center;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+input[type="checkbox"] { border-radius: 0.25rem; }
+input[type="radio"] { border-radius: 9999px; }
+
+input[type="checkbox"]:hover:not(:disabled),
+input[type="radio"]:hover:not(:disabled) {
+  border-color: var(--color-zinc-500);
+}
+
+input[type="checkbox"]:checked,
+input[type="radio"]:checked {
+  background-color: var(--color-blue-600);
+  border-color: var(--color-blue-600);
+}
+
+/* marcador: check (✓) para checkbox, ponto para radio */
+input[type="checkbox"]::before {
+  content: "";
+  width: 0.6rem;
+  height: 0.6rem;
+  transform: scale(0);
+  transition: transform 0.12s ease-in-out;
+  background-color: white;
+  clip-path: polygon(14% 44%, 0 65%, 40% 100%, 100% 16%, 82% 0, 40% 68%);
+}
+input[type="radio"]::before {
+  content: "";
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 9999px;
+  transform: scale(0);
+  transition: transform 0.12s ease-in-out;
+  background-color: white;
+}
+input[type="checkbox"]:checked::before,
+input[type="radio"]:checked::before {
+  transform: scale(1);
+}
+
+input[type="checkbox"]:focus-visible,
+input[type="radio"]:focus-visible {
+  outline: 2px solid var(--color-blue-500);
+  outline-offset: 2px;
+}
+
+input[type="checkbox"]:disabled,
+input[type="radio"]:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

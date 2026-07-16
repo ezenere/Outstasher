@@ -2,15 +2,17 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   Check, Download, Folder, Magnet, MediaVideo, NavArrowLeft, Play, Refresh,
-  SkipNext, SoundHigh, Trash, WarningTriangle,
+  Settings as SettingsIcon, SkipNext, SoundHigh, Trash, WarningTriangle,
 } from 'iconoir-react'
-import { post, prog, type Job, type JobEvent, type JobProgress } from '../api'
+import { convertSummary, post, prog, type Job, type JobEvent, type JobProgress } from '../api'
 import { api } from '../api'
-import { Badge, CandidatesTable, Collapsible, Empty, KindTags, MergeBar, ProgressBar } from '../components/ui'
+import { Badge, CandidatesTable, Collapsible, Elapsed, Empty, KindTags, MergeBar, ProgressBar } from '../components/ui'
+import { useDialog } from '../components/Dialog'
 import { jobTitle, removeJob } from './Jobs'
 
 export default function JobDetail() {
   const { id } = useParams<{ id: string }>()
+  const dialog = useDialog()
   const [job, setJob] = useState<Job | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [selAudio, setSelAudio] = useState<string | undefined>()
@@ -52,7 +54,8 @@ export default function JobDetail() {
         const p = await api<JobProgress>(`/api/jobs/${id}/progress`)
         if (stop) return
         setJob((cur) =>
-          cur ? { ...cur, status: p.status, detail: p.detail, progress: p.progress, output: p.output } : cur,
+          cur ? { ...cur, status: p.status, detail: p.detail, progress: p.progress,
+                  output: p.output, merge_started_at: p.merge_started_at } : cur,
         )
       } catch {
         /* 404 quando o job some / servidor reiniciando: o reload de 5s trata */
@@ -106,9 +109,11 @@ export default function JobDetail() {
     if (a && v) {
       const ea = a.edition ?? null
       const ev = v.edition ?? null
-      if (ea !== ev && !confirm(
-        `Cortes diferentes (${ea ?? 'normal'} ≠ ${ev ?? 'normal'}) — os áudios provavelmente NÃO vão alinhar.\nContinuar mesmo assim?`,
-      )) return
+      if (ea !== ev && !(await dialog.confirm({
+        title: 'Cortes diferentes',
+        message: `Áudio e vídeo têm cortes diferentes (${ea ?? 'normal'} ≠ ${ev ?? 'normal'}) — os áudios provavelmente não vão alinhar. Continuar mesmo assim?`,
+        confirmText: 'Continuar', tone: 'danger',
+      }))) return
     }
     setSubmitting(true)
     try {
@@ -118,7 +123,7 @@ export default function JobDetail() {
       })
       void reload()
     } catch (e) {
-      alert(`Erro: ${(e as Error).message}`)
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
     } finally {
       setSubmitting(false)
     }
@@ -132,7 +137,7 @@ export default function JobDetail() {
       await post(`/api/jobs/${job.id}/proceed`)
       void reload()
     } catch (e) {
-      alert(`Erro: ${(e as Error).message}`)
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
     } finally {
       setSubmitting(false)
     }
@@ -144,21 +149,27 @@ export default function JobDetail() {
     const what = candidateId ? 'o torrent selecionado' : 'o próximo candidato reserva'
     // em jobs de merge, avisa se o corte escolhido não bate com o do outro torrent
     let warn = ''
+    let mismatch = false
     if (candidateId && job.kind !== 'original' && job.kind !== 'dubbed') {
       const cand = (kind === 'video' ? job.search?.video : job.search?.audio)?.find((c) => c.id === candidateId)
       const other = kind === 'video' ? job.audio_torrent : job.video_torrent
       if (cand && other && (cand.edition ?? null) !== (other.edition ?? null)) {
-        warn = `\n⚠ Corte diferente do outro torrent (${cand.edition ?? 'normal'} ≠ ${other.edition ?? 'normal'}) — os áudios podem NÃO alinhar.`
+        mismatch = true
+        warn = ` Atenção: corte diferente do outro torrent (${cand.edition ?? 'normal'} ≠ ${other.edition ?? 'normal'}) — os áudios podem não alinhar.`
       }
     }
-    if (!confirm(`Trocar para ${what}?\nO download atual de ${kind === 'video' ? 'vídeo' : 'áudio'} será descartado.${warn}`)) return
+    if (!(await dialog.confirm({
+      title: 'Trocar torrent',
+      message: `Trocar para ${what}? O download atual de ${kind === 'video' ? 'vídeo' : 'áudio'} será descartado.${warn}`,
+      confirmText: 'Trocar', tone: mismatch ? 'danger' : 'default',
+    }))) return
     setSwitching(true)
     try {
       await post(`/api/jobs/${job.id}/switch`, { kind, candidate_id: candidateId ?? null })
       setPickKind(null)
       void reload()
     } catch (e) {
-      alert(`Erro: ${(e as Error).message}`)
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
     } finally {
       setSwitching(false)
     }
@@ -211,7 +222,9 @@ export default function JobDetail() {
         <Badge status={job.status} />
         {(job.status === 'error' || job.status === 'cancelled') && (
           <button
-            onClick={() => post(`/api/jobs/${job.id}/retry`).then(() => navigate('/jobs')).catch((e) => alert((e as Error).message))}
+            onClick={() => post(`/api/jobs/${job.id}/retry`)
+              .then(() => navigate('/jobs'))
+              .catch((e) => dialog.alert({ title: 'Erro', message: (e as Error).message }))}
             title="Tentar de novo"
             className="rounded-lg border border-zinc-700 p-1.5 text-zinc-400 hover:text-zinc-200"
           >
@@ -219,7 +232,7 @@ export default function JobDetail() {
           </button>
         )}
         <button
-          onClick={() => removeJob(job.id, () => navigate('/jobs'))}
+          onClick={() => removeJob(dialog, job.id, () => navigate('/jobs'))}
           title="Remover job"
           className="rounded-lg border border-zinc-700 p-1.5 text-zinc-400 hover:text-zinc-200"
         >
@@ -317,11 +330,20 @@ export default function JobDetail() {
         </section>
       )}
 
-      {/* ---- progresso ao vivo ---- */}
-      {job.status === 'merging' && job.progress?.merge && (
+      {/* ---- conversão/cópia: barra (se ffmpeg) + tempo decorrido ---- */}
+      {(job.merge_started_at || (job.status === 'merging' && job.progress?.merge)) && (
         <section className="mt-6">
-          <h2 className="mb-2 text-sm font-semibold text-zinc-400">Conversão</h2>
-          <MergeBar p={job.progress.merge} />
+          <div className="mb-2 flex items-center gap-2">
+            <h2 className="text-sm font-semibold text-zinc-400">Conversão</h2>
+            {job.merge_started_at && (
+              <Elapsed
+                since={job.merge_started_at}
+                running={job.status === 'merging'}
+                title="Tempo desde o início da conversão/cópia"
+              />
+            )}
+          </div>
+          {job.status === 'merging' && job.progress?.merge && <MergeBar p={job.progress.merge} />}
         </section>
       )}
 
@@ -443,6 +465,22 @@ function JobSummary({ job }: { job: Job }) {
             ({job.torrent_save_path || 'pasta padrão do qBittorrent'}
             {job.torrent_local_path ? ` → ${job.torrent_local_path}` : ''})
           </span>
+        </span>
+      ),
+    })
+  }
+  // opções avançadas de conversão (só quando habilitadas)
+  const conv = convertSummary(job.convert)
+  if (conv.length) {
+    rows.push({
+      icon: ic(SettingsIcon), label: 'Conversão',
+      value: (
+        <span className="flex flex-wrap gap-1">
+          {conv.map((c, i) => (
+            <span key={i} className="rounded bg-purple-950 px-1.5 py-0.5 text-xs font-medium text-purple-300">
+              {c}
+            </span>
+          ))}
         </span>
       ),
     })

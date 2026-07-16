@@ -10,6 +10,7 @@ import {
   type JackettIndexer, type LanguageConfig, type LanguageEntry, type TorrentTarget,
 } from '../api'
 import { DiskBar, Empty } from '../components/ui'
+import { useDialog } from '../components/Dialog'
 
 // abas da tela de Configurações (cada uma é uma sub-rota)
 const SETTINGS_TABS: { to: string; label: string; icon: typeof Folder }[] = [
@@ -319,6 +320,7 @@ function MarkerChips({ label, hint, markers, onChange }: {
 }
 
 export function LanguagesSection() {
+  const dialog = useDialog()
   const [langs, setLangs] = useState<LanguageEntry[] | null>(null)
   const [subs, setSubs] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
@@ -341,8 +343,11 @@ export function LanguagesSection() {
       code: '', label: '', tmdb: '', markers_strong: [], markers_weak: [],
     }])
   }
-  function removeLang(i: number) {
-    if (!confirm('Remover este idioma?')) return
+  async function removeLang(i: number) {
+    if (!(await dialog.confirm({
+      title: 'Remover idioma', message: 'Remover este idioma?',
+      confirmText: 'Remover', tone: 'danger',
+    }))) return
     setLangs((prev) => prev && prev.filter((_, j) => j !== i))
   }
 
@@ -548,6 +553,7 @@ interface DestForm {
 }
 
 export function DestinationsSection() {
+  const dialog = useDialog()
   const [dests, setDests] = useState<Destination[] | null>(null)
   const [form, setForm] = useState<DestForm | null>(null)
   const [saving, setSaving] = useState(false)
@@ -563,7 +569,8 @@ export function DestinationsSection() {
 
   async function save() {
     if (!form) return
-    if (!form.label.trim() || !form.path.trim()) return alert('Preencha nome e caminho.')
+    if (!form.label.trim() || !form.path.trim())
+      return dialog.alert({ title: 'Campos obrigatórios', message: 'Preencha nome e caminho.' })
     setSaving(true)
     try {
       const body = { label: form.label.trim(), path: form.path.trim(), is_default: form.is_default }
@@ -572,19 +579,23 @@ export function DestinationsSection() {
       setForm(null)
       void reload()
     } catch (e) {
-      alert(`Erro: ${(e as Error).message}`)
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
     } finally {
       setSaving(false)
     }
   }
 
   async function remove(d: Destination) {
-    if (!confirm(`Remover o destino "${d.label}"?\n(Jobs já criados mantêm o caminho que usaram.)`)) return
+    if (!(await dialog.confirm({
+      title: 'Remover destino',
+      message: `Remover o destino "${d.label}"? Jobs já criados mantêm o caminho que usaram.`,
+      confirmText: 'Remover', tone: 'danger',
+    }))) return
     try {
       await del(`/api/destinations/${d.id}`)
       void reload()
     } catch (e) {
-      alert(`Erro: ${(e as Error).message}`)
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
     }
   }
 
@@ -662,6 +673,7 @@ interface TargetForm {
 }
 
 export function TorrentTargetsSection() {
+  const dialog = useDialog()
   const [targets, setTargets] = useState<TorrentTarget[] | null>(null)
   const [form, setForm] = useState<TargetForm | null>(null)
   const [saving, setSaving] = useState(false)
@@ -677,7 +689,8 @@ export function TorrentTargetsSection() {
 
   async function save() {
     if (!form) return
-    if (!form.label.trim()) return alert('Preencha o nome.')
+    if (!form.label.trim())
+      return dialog.alert({ title: 'Campo obrigatório', message: 'Preencha o nome.' })
     setSaving(true)
     try {
       const body = {
@@ -691,19 +704,23 @@ export function TorrentTargetsSection() {
       setForm(null)
       void reload()
     } catch (e) {
-      alert(`Erro: ${(e as Error).message}`)
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
     } finally {
       setSaving(false)
     }
   }
 
   async function remove(t: TorrentTarget) {
-    if (!confirm(`Remover o destino de torrents "${t.label}"?`)) return
+    if (!(await dialog.confirm({
+      title: 'Remover destino de torrents',
+      message: `Remover o destino de torrents "${t.label}"?`,
+      confirmText: 'Remover', tone: 'danger',
+    }))) return
     try {
       await del(`/api/torrent-targets/${t.id}`)
       void reload()
     } catch (e) {
-      alert(`Erro: ${(e as Error).message}`)
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
     }
   }
 
