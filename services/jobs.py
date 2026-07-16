@@ -299,6 +299,9 @@ def _slim_job(job: dict) -> dict:
             "audio": _pct(job["progress"].get("audio")),
             "merge": (job["progress"].get("merge") or {}).get("pct")
             if job["progress"].get("merge") else None,
+            # leitura (frames lidos pelo encoder) para a barra sobreposta do card
+            "merge_read": (job["progress"].get("merge") or {}).get("read_pct")
+            if job["progress"].get("merge") else None,
         },
     }
 
@@ -932,10 +935,15 @@ async def _search(job: dict):
 
         # dedupe (o mesmo torrent pode aparecer nas duas buscas) e ordena:
         # titulo dublado (tier 0) SEMPRE antes de ingles+marcador (tier 1);
-        # score decide dentro de cada tier. Mesma chave (identidade × provider)
-        # do _dedup_results: mesmo torrent em trackers diferentes continua concorrendo.
+        # dentro do tier, quem tem o ANO no nome vem antes (identificacao
+        # confiavel — sem ano pode ser outro filme da franquia/remake); score
+        # decide por ultimo. Mesma chave (identidade × provider) do
+        # _dedup_results: mesmo torrent em trackers diferentes continua concorrendo.
         seen = set()
-        for c in sorted(audio_ranked, key=lambda r: (r.get("tier", 1), -r["score"])):
+        for c in sorted(audio_ranked,
+                        key=lambda r: (r.get("tier", 1),
+                                       not r.get("year_match", False),
+                                       -r["score"])):
             ident = _torrent_identity(c)
             key = (ident, c.get("tracker_id") or c.get("tracker"))
             if ident is not None and key in seen:

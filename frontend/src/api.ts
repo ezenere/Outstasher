@@ -174,6 +174,8 @@ export interface Candidate {
   score: number | null
   rejected?: string | null
   chosen?: boolean
+  /** Modo áudio: o nome traz o ano do filme (identificação confiável — vem antes no rank). */
+  year_match?: boolean
 }
 
 export interface JobEvent {
@@ -269,7 +271,7 @@ export interface JobListItem {
   video_torrent: TorrentInfo | null
   audio_torrent: TorrentInfo | null
   output: string | null
-  progress: { video: number | null; audio: number | null; merge: number | null }
+  progress: { video: number | null; audio: number | null; merge: number | null; merge_read?: number | null }
 }
 
 /** Tick de 1s do detalhe do job (/api/jobs/{id}/progress). */

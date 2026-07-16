@@ -16,7 +16,9 @@ torrent para cada uma, e junta tudo em um único arquivo: **melhor imagem + todo
      idioma dublado tem preferência; título original + marcador é fallback.
      Marcadores fortes ("Dublado", "Dual Áudio") valem mais que "dual" genérico.
      Torrents só **legendado** (sem marca de dublagem) são descartados. Torrents
-     com o **ano do filme** no nome ganham bônus de score.
+     com o **ano do filme** no nome têm preferência absoluta sobre os sem ano
+     (título sem ano é ambíguo — pode ser outro filme da franquia ou um remake);
+     o score só ordena dentro de cada grupo.
    - título original → melhor **vídeo**, **restrito ao mesmo corte** do áudio
      (cortes diferentes não alinham). Sem vídeo do corte do melhor áudio, tenta o
      próximo candidato de áudio.

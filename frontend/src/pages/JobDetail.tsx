@@ -393,15 +393,20 @@ export default function JobDetail() {
       {/* ---- candidatos avaliados: informação secundária, em dropdown ---- */}
       {candEvents.length > 0 && (
         <section className="mt-6 space-y-2">
-          {candEvents.map((ev, i) => (
-            <Collapsible
-              key={i}
-              title={ev.message}
-              right={<span className="text-xs text-zinc-500">{ev.data!.candidates!.length} candidatos</span>}
-            >
-              <CandidatesTable candidates={ev.data!.candidates!} showReason />
-            </Collapsible>
-          ))}
+          {candEvents.map((ev, i) => {
+            // torrent em uso na role desta avaliação (áudio/vídeo) — destaca o bookmark
+            const inUse = (ev.data!.role === 'video' ? job.video_torrent : ev.data!.role === 'audio' ? job.audio_torrent : null)?.title
+            return (
+              <Collapsible
+                key={i}
+                flush
+                title={ev.message}
+                right={<span className="text-xs text-zinc-500">{ev.data!.candidates!.length} candidatos</span>}
+              >
+                <CandidatesTable candidates={ev.data!.candidates!} showReason currentTitle={inUse} flush />
+              </Collapsible>
+            )
+          })}
         </section>
       )}
     </div>

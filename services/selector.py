@@ -217,12 +217,12 @@ def title_variants(title: str, include_and: bool = True) -> list[str]:
 # "dual"/"multi" genérico mesmo com release de qualidade um pouco menor.
 STRONG_MARKER_BONUS = 25
 
-# Bônus (modo audio) para o ANO do filme no nome do release. Releases dublados
-# (título em português) muitas vezes vêm sem o ano, e título sem ano é ambíguo:
-# pode ser remake/reboot com o mesmo nome — o _matches_movie não distingue.
-# Com o ano no nome a identificação é confiável, então ele passa na frente de
-# um release equivalente sem o ano (mas não atropela um release MUITO melhor).
-YEAR_BONUS = 15
+# Modo audio: o ANO do filme no nome do release tem preferência ABSOLUTA.
+# Releases dublados muitas vezes vêm sem o ano, e título sem ano é ambíguo:
+# pode ser outro filme da franquia ("Guardiões da Galáxia" casa com Vol. 2 e 3)
+# ou remake com o mesmo nome — o _matches_movie não distingue. Com o ano a
+# identificação é confiável, então TODOS os releases com ano vêm antes de
+# qualquer um sem ano; o score só ordena dentro de cada grupo.
 
 
 def has_year(title: str, year: str) -> bool:
@@ -306,9 +306,11 @@ def rank(results: list[dict], mode: str, movie_title: str, year: str,
          require_language: bool = False,
          required_edition: str | None = ANY_EDITION,
          dubbed_title: str | None = None) -> tuple[list[dict], list[dict]]:
-    """Retorna (viáveis ordenados por score desc, trace de todos os avaliados).
+    """Retorna (viáveis ordenados, trace de todos os avaliados).
 
-    Cada viável é o resultado completo (magnet/link) + score + edition.
+    Ordem: score desc; no modo audio, quem tem o ANO do filme no nome vem
+    ANTES de quem não tem (year_match), e o score só ordena dentro do grupo.
+    Cada viável é o resultado completo (magnet/link) + score + edition + year_match.
     required_edition: ANY_EDITION libera qualquer corte; None exige corte normal;
     uma string ("extended", ...) exige aquele corte — para as duas versões
     baixadas serem do MESMO corte e os áudios alinharem.
@@ -343,27 +345,28 @@ def rank(results: list[dict], mode: str, movie_title: str, year: str,
             cand["rejected"] = "sem seeders"
         else:
             s = score(r, mode, language, dubbed_title)
-            # áudio dublado: ano no nome = identificação confiável, sobe na fila
-            # (vídeo não precisa: a busca original já vai com o ano na query)
-            if mode == "audio" and has_year(r["title"], year):
-                s += YEAR_BONUS
             cand["score"] = round(s, 1)
             if s <= -30:
                 cand["rejected"] = "qualidade muito baixa (CAM/TS)"
+        # áudio dublado: ano no nome = identificação confiável -> preferência
+        # absoluta sobre score (vídeo não precisa: a busca já vai com o ano)
+        cand["year_match"] = mode == "audio" and has_year(r["title"], year)
         pairs.append((cand, r))
 
     viable = [(c, r) for c, r in pairs if c["rejected"] is None]
-    viable.sort(key=lambda p: p[0]["score"], reverse=True)
+    viable.sort(key=lambda p: (not p[0]["year_match"], -p[0]["score"]))
     ranked = []
     for c, r in viable:
         item = dict(r)
         item["score"] = c["score"]
         item["edition"] = c["edition"]
+        item["year_match"] = c["year_match"]
         ranked.append(item)
 
     trace = sorted(
         (c for c, _ in pairs),
         key=lambda c: (not c["chosen"], c["rejected"] is not None,
+                       not c["year_match"],
                        -(c["score"] if c["score"] is not None else -1e9)))
     return ranked, trace[:MAX_TRACE]
 

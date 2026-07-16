@@ -4,7 +4,7 @@ import {
   convertSummary, fmtDisk, fmtEta, fmtSize, fmtSpeed, fmtTime, langName,
   MOVIE_STATE_LABEL, STATUS_LABEL, qbitIsComplete, qbitState,
 } from '../api'
-import { Check, MediaVideoList, Download, Search, Timer, WarningTriangle, CheckCircle, XmarkCircle } from 'iconoir-react'
+import { BookmarkSolid, Check, MediaVideoList, Download, Search, Timer, WarningTriangle, CheckCircle, XmarkCircle } from 'iconoir-react'
 
 const BADGE_STYLES: Record<string, string> = {
   searching: 'bg-blue-950 text-blue-400',
@@ -215,16 +215,18 @@ export function KindTags({ kind, language, downloadOnly, convert, mode }: KindTa
 /** Bloco recolhível: cabeçalho clicável (▸/▾) + conteúdo escondido por padrão.
  *  Para informação secundária que não precisa ficar à vista o tempo todo. */
 export function Collapsible({
-  title, children, defaultOpen = false, right,
+  title, children, defaultOpen = false, right, flush = false,
 }: {
   title: ReactNode
   children: ReactNode
   defaultOpen?: boolean
   right?: ReactNode
+  /** Cola o conteúdo no container: sem padding, borda reta em baixo (para tabelas). */
+  flush?: boolean
 }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
-    <div className="rounded-xl border border-zinc-800">
+    <div className={`border border-zinc-800 ${flush && open ? 'rounded-t-xl' : 'rounded-xl'}`}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -234,7 +236,7 @@ export function Collapsible({
         <span className="flex-1">{title}</span>
         {right}
       </button>
-      {open && <div className="border-t border-zinc-800 p-3">{children}</div>}
+      {open && <div className={`border-t border-zinc-800 ${flush ? '' : 'p-3'}`}>{children}</div>}
     </div>
   )
 }
@@ -306,16 +308,19 @@ interface CandidatesTableProps {
   selectedId?: string
   onSelect?: (id: string) => void
   showReason?: boolean
-  /** Título do torrent em uso agora: marca a linha com "▶ atual". */
+  /** Título do torrent em uso agora: marca a linha com o bookmark. */
   currentTitle?: string | null
+  /** Cola a tabela no container-pai (sem margem/borda própria — ver Collapsible flush). */
+  flush?: boolean
 }
 
 export function CandidatesTable({
-  candidates, selectable, selectedId, onSelect, showReason, currentTitle,
+  candidates, selectable, selectedId, onSelect, showReason, currentTitle, flush,
 }: CandidatesTableProps) {
-  if (!candidates.length) return <Empty>Nenhum candidato.</Empty>
+  if (!candidates.length)
+    return <div className={flush ? 'px-3 py-2' : ''}><Empty>Nenhum candidato.</Empty></div>
   return (
-    <div className="mb-2 max-h-72 overflow-auto rounded-lg border border-zinc-800">
+    <div className={`max-h-72 overflow-auto ${flush ? 'rounded-b-xl' : 'mb-2 rounded-lg border border-zinc-800'}`}>
       <table className="w-full border-collapse text-xs">
         <thead>
           <tr className="sticky top-0 bg-zinc-900 text-left text-zinc-400">
@@ -349,12 +354,26 @@ export function CandidatesTable({
                 <td className="px-2 py-1.5">
                   {selectable && c.id ? (
                     <input type="radio" checked={selectedId === c.id} onChange={() => onSelect?.(c.id!)} />
+                  ) : isCurrent ? (
+                    <BookmarkSolid width={14} height={14} className="text-rose-400" />
                   ) : c.chosen ? (
                     <Check width={14} height={14} className="text-emerald-400" />
                   ) : null}
                 </td>
                 <td className="max-w-96 truncate px-2 py-1.5" title={c.title}>
-                  {isCurrent && <span className="mr-1 text-emerald-400" title="Torrent em uso agora">▶</span>}
+                  {isCurrent && (
+                    <span title="Torrent em uso agora" className="mr-1 inline-block align-[-1px] text-rose-400">
+                      <BookmarkSolid width={13} height={13} />
+                    </span>
+                  )}
+                  {c.year_match && (
+                    <span
+                      className="mr-1 rounded bg-sky-500/15 px-1 py-px text-[10px] font-medium text-sky-400"
+                      title="Nome traz o ano do filme: identificação confiável — tem prioridade sobre releases sem ano"
+                    >
+                      ano
+                    </span>
+                  )}
                   {c.title}
                 </td>
                 <td className="px-2 py-1.5">{c.tracker ?? ''}</td>

@@ -233,7 +233,9 @@ export default function Jobs() {
                 <MiniBar label="Áudio" pct={j.progress.audio} />
               </>
             )}
-            {j.status === 'merging' && <MiniBar label="Conversão" pct={j.progress.merge} color="purple" />}
+            {j.status === 'merging' && (
+              <MiniBar label="Conversão" pct={j.progress.merge} readPct={j.progress.merge_read} color="purple" />
+            )}
             </div>
           </div>
         )
@@ -243,21 +245,28 @@ export default function Jobs() {
 }
 
 // barra de progresso enxuta (só %) para os cards da lista. Velocidade/ETA/seeds
-// ficam no detalhe do job, não aqui.
-function MiniBar({ label, pct, color = 'blue' }: {
+// ficam no detalhe do job, não aqui. Na conversão, `readPct` (frames lidos pelo
+// encoder) vira uma barra clara sobreposta à de escrita (grande em AV1).
+function MiniBar({ label, pct, readPct, color = 'blue' }: {
   label: string
   pct: number | null
+  readPct?: number | null
   color?: 'blue' | 'purple'
 }) {
   if (pct == null) return null
   const bar = color === 'purple' ? 'bg-purple-500' : 'bg-blue-500'
+  const barSoft = color === 'purple' ? 'bg-purple-500/30' : 'bg-blue-500/30'
+  const read = Math.max(pct, readPct ?? pct)
+  const buffering = read - pct > 1
   return (
     <div className="mt-2">
-      <div className="h-2 overflow-hidden rounded bg-zinc-800">
-        <div className={`h-full ${bar} transition-all duration-500`} style={{ width: `${pct}%` }} />
+      <div className="relative h-2 overflow-hidden rounded bg-zinc-800">
+        <div className={`absolute inset-y-0 left-0 ${barSoft} transition-all duration-500`} style={{ width: `${read}%` }} />
+        <div className={`absolute inset-y-0 left-0 ${bar} transition-all duration-500`} style={{ width: `${pct}%` }} />
       </div>
       <div className="mt-1 text-xs text-zinc-400">
         {label}: {Math.round(pct)}%
+        {buffering && <span className="text-purple-300/80"> (lido {Math.round(read)}%)</span>}
       </div>
     </div>
   )
