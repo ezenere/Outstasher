@@ -144,9 +144,11 @@ export interface Progress {
 
 /** Progresso do ffmpeg durante o merge (parseado de -progress pipe:1). */
 export interface MergeProgress {
-  pct: number
+  pct: number         // ESCRITA: out_time/duração — quanto já saiu codificado
+  read_pct?: number   // LEITURA: frames lidos/total — quanto já entrou no encoder
   out_s: number       // tempo do filme já processado (s)
   duration_s: number  // duração total esperada (s)
+  frame?: number      // frames lidos até agora
   size: number        // bytes escritos até agora
   bitrate: number     // bits/s
   speed: number       // multiplicador (1.35 = 1.35x tempo real)
@@ -460,14 +462,15 @@ export function fmtSpeed(bps: number): string {
   return mb >= 1 ? `${mb.toFixed(1)} MB/s` : `${(bps / 1024).toFixed(0)} kB/s`
 }
 
-/** Segundos -> "1:42:13" / "42:13" (posição no filme). */
-export function fmtTime(s: number): string {
+/** Segundos -> "1:42:13" / "42:13" (posição no filme). Com forceHours=true
+ *  sempre inclui a hora ("0:42:13"), para pares alinharem sem confundir. */
+export function fmtTime(s: number, forceHours = false): string {
   const h = Math.floor(s / 3600)
   const m = Math.floor((s % 3600) / 60)
   const sec = Math.floor(s % 60)
   const mm = String(m).padStart(2, '0')
   const ss = String(sec).padStart(2, '0')
-  return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`
+  return h || forceHours ? `${h}:${mm}:${ss}` : `${mm}:${ss}`
 }
 
 export function fmtEta(s: number): string {
@@ -574,6 +577,14 @@ export function convertSummary(c: ConvertOptions | null | undefined): string[] {
   else if (c.video_codec !== 'keep' && c.video_bitrate != null)
     out.push(c.video_bitrate >= 1000 ? `${(c.video_bitrate / 1000).toFixed(1)} Mbps` : `${c.video_bitrate} kbps`)
   if (c.bit_depth !== 'keep') out.push(`${c.bit_depth}-bit`)
+  // preset só é relevante quando há re-encode de vídeo (e ≠ default)
+  const reencodesVideo = c.video_codec !== 'keep' || c.resolution !== 'keep' || c.bit_depth !== 'keep'
+  if (reencodesVideo && c.preset !== 'default') {
+    const p: Record<string, string> = {
+      veryfast: 'muito rápido', fast: 'rápido', slow: 'lento', veryslow: 'muito lento',
+    }
+    out.push(`preset ${p[c.preset] ?? c.preset}`)
+  }
   if (c.audio_codec !== 'keep') out.push(`áudio ${c.audio_codec.toUpperCase()}`)
   if (c.channels !== 'keep') out.push(c.channels === 'stereo' ? 'estéreo' : '5.1')
   if (c.audio_tracks === 'target') out.push('só orig+dub')

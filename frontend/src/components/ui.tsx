@@ -86,26 +86,37 @@ export function ProgressBar({ label, p }: { label: string; p: Progress | null })
 /** Barra de progresso da conversão (ffmpeg): tempo do filme, velocidade, tamanho... */
 export function MergeBar({ p }: { p?: MergeProgress | null }) {
   if (!p) return null
+  const write = p.pct || 0                      // barra da frente: já codificado (escrito)
+  const read = Math.max(write, p.read_pct ?? write)  // barra de trás: já lido pelo encoder
+  // gap visível = frames no buffer do encoder (grande em AV1, ~0 em H264/HEVC)
+  const buffering = read - write > 1
   const extra = [
-    p.duration_s ? `${fmtTime(p.out_s)} / ${fmtTime(p.duration_s)}` : fmtTime(p.out_s),
+    p.duration_s ? `${fmtTime(p.out_s, true)} / ${fmtTime(p.duration_s, true)}` : fmtTime(p.out_s, true),
     p.speed ? `${p.speed.toFixed(2)}x` : null,
     p.fps ? `${Math.round(p.fps)} fps` : null,
     p.size ? fmtSize(p.size) : null,
     p.bitrate ? `${(p.bitrate / 1e6).toFixed(1)} Mb/s` : null,
-    p.eta != null && p.pct < 100 ? `ETA ${fmtEta(p.eta)}` : null,
+    p.eta != null && write < 100 ? `ETA ${fmtEta(p.eta)}` : null,
   ]
     .filter(Boolean)
     .join(' · ')
   return (
     <div className="mt-2">
-      <div className="h-2 overflow-hidden rounded bg-zinc-800">
+      {/* duas barras sobrepostas: lidos (claro, atrás) e escritos (forte, frente) */}
+      <div className="relative h-2 overflow-hidden rounded bg-zinc-800">
         <div
-          className="h-full bg-purple-500 transition-all duration-500"
-          style={{ width: `${p.pct || 0}%` }}
+          className="absolute inset-y-0 left-0 bg-purple-500/30 transition-all duration-500"
+          style={{ width: `${read}%` }}
+        />
+        <div
+          className="absolute inset-y-0 left-0 bg-purple-500 transition-all duration-500"
+          style={{ width: `${write}%` }}
         />
       </div>
       <div className="mt-1 text-xs text-zinc-400">
-        Conversão: {p.pct || 0}%{extra ? ` — ${extra}` : ''}
+        Conversão: {write}%
+        {buffering && <span className="text-purple-300/80"> (lidos {Math.round(read)}%)</span>}
+        {extra ? ` — ${extra}` : ''}
       </div>
     </div>
   )

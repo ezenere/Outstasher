@@ -250,4 +250,16 @@ def test_describe():
                      "audio_tracks": "target", "subtitles": "none"})
     assert tc.describe(o) == ["HEVC", "1080p", "CRF 24", "áudio OPUS", "só orig+dub", "sem legendas"]
     assert tc.describe(None) == [] and tc.describe(tc.validate({})) == []
+
+
+def test_describe_preset():
+    # preset aparece quando há re-encode de vídeo e ≠ default
+    o = tc.validate({"video_codec": "hevc", "video_bitrate": 3000, "preset": "slow"})
+    assert tc.describe(o) == ["HEVC", "3.0 Mbps", "preset lento"]
+    # preset default não aparece, mesmo com re-encode
+    o = tc.validate({"video_codec": "hevc", "video_bitrate": 3000, "preset": "default"})
+    assert "preset lento" not in tc.describe(o) and not any("preset" in x for x in tc.describe(o))
+    # sem re-encode de vídeo (só áudio): preset é inerte, não aparece
+    o = tc.validate({"audio_codec": "aac", "preset": "veryslow"})
+    assert tc.describe(o) == ["áudio AAC"]
     assert tc.describe({"video_codec": "av1", "video_bitrate": 3000}) == ["AV1", "3.0 Mbps"]

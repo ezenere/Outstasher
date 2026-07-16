@@ -373,6 +373,33 @@ def _duration_of(probe: dict) -> float:
         return 0.0
 
 
+def _total_frames(probe: dict, duration_s: float) -> int:
+    """Estimativa do total de frames do 1º vídeo, para o progresso de LEITURA.
+
+    Prefere nb_frames (exato quando presente); senão duração×fps do
+    avg_frame_rate ("24000/1001"). Retorna 0 se não der para estimar — aí a
+    barra de "lidos" fica desligada e só resta a de escrita."""
+    vids = [s for s in get_streams(probe, "video")
+            if (s.get("disposition") or {}).get("attached_pic") != 1]
+    if not vids:
+        return 0
+    v = vids[0]
+    try:
+        nb = int(v.get("nb_frames") or 0)
+        if nb > 0:
+            return nb
+    except (TypeError, ValueError):
+        pass
+    try:
+        num, _, den = (v.get("avg_frame_rate") or "0/0").partition("/")
+        fps = float(num) / float(den) if float(den or 0) else 0.0
+        if fps > 0 and duration_s > 0:
+            return int(duration_s * fps)
+    except (TypeError, ValueError, ZeroDivisionError):
+        pass
+    return 0
+
+
 def _measure_offset(ref_path: str, ref_a: int, oth_path: str, oth_a: int,
                     start: float) -> float:
     """Offset (s) numa janela de ALIGN_DURATION a partir de `start`."""
@@ -482,8 +509,16 @@ def _hms_to_seconds(text: str) -> float:
     return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
 
 
-def _parse_progress_block(raw: dict, duration_s: float) -> dict:
-    """Bloco chave=valor do -progress -> dict amigável para a UI."""
+def _parse_progress_block(raw: dict, duration_s: float, total_frames: int = 0) -> dict:
+    """Bloco chave=valor do -progress -> dict amigável para a UI.
+
+    Dois progressos: `pct` (ESCRITA) = out_time/duração — quanto do vídeo já saiu
+    codificado no arquivo; `read_pct` (LEITURA) = frame/total_frames — quanto já
+    ENTROU no encoder. A leitura vai à frente da escrita pela latência de buffer
+    do encoder (grande em AV1, quase nula em H264/HEVC); o gap entre as duas é o
+    que está no pipeline. total_frames é uma estimativa (duração×fps) — só serve
+    para a barra secundária de "lidos"; a barra principal usa o out_time exato.
+    """
     # out_time_us e out_time_ms são AMBOS microssegundos (quirk histórico do ffmpeg)
     out_us = raw.get("out_time_us") or raw.get("out_time_ms") or ""
     if out_us.lstrip("-").isdigit():
@@ -499,20 +534,28 @@ def _parse_progress_block(raw: dict, duration_s: float) -> dict:
         fps = float(raw.get("fps") or 0)
     except ValueError:
         fps = 0.0
+    try:
+        frame = int(raw.get("frame") or 0)
+    except ValueError:
+        frame = 0
     m = re.match(r"([\d.]+)\s*kbits/s", raw.get("bitrate") or "")
     bitrate = int(float(m.group(1)) * 1000) if m else 0  # bits/s
     size = int(raw["total_size"]) if (raw.get("total_size") or "").isdigit() else 0
 
     pct = min(100.0, out_s / duration_s * 100) if duration_s > 0 else 0.0
+    # a leitura nunca "volta": clamp em [pct, 100] (a estimativa de total pode
+    # errar por alguns % em vídeo VFR)
+    read_pct = min(100.0, frame / total_frames * 100) if total_frames > 0 else 0.0
+    read_pct = max(read_pct, pct)
     eta = (duration_s - out_s) / speed if (speed > 0 and duration_s > out_s) else None
-    return {"pct": round(pct, 1), "out_s": round(out_s, 1),
-            "duration_s": round(duration_s, 1), "size": size, "bitrate": bitrate,
-            "speed": round(speed, 2), "fps": round(fps, 1),
+    return {"pct": round(pct, 1), "read_pct": round(read_pct, 1), "out_s": round(out_s, 1),
+            "duration_s": round(duration_s, 1), "frame": frame, "size": size,
+            "bitrate": bitrate, "speed": round(speed, 2), "fps": round(fps, 1),
             "eta": round(eta) if eta is not None else None}
 
 
 def _run_ffmpeg_progress(cmd: list[str], duration_s: float,
-                         on_progress=None, on_start=None) -> None:
+                         on_progress=None, on_start=None, total_frames: int = 0) -> None:
     """Roda o ffmpeg lendo o stream do -progress pipe:1 e reportando via callback.
 
     stderr é drenado numa thread (para não travar o pipe) e usado na mensagem
@@ -521,6 +564,8 @@ def _run_ffmpeg_progress(cmd: list[str], duration_s: float,
     on_start(proc): chamado com o Popen assim que o ffmpeg sobe — o chamador
     guarda a referência para poder MATAR o processo se o job for cancelado
     (cancelar a task async não interrompe o subprocess sozinho).
+    total_frames: total estimado de frames do vídeo, para o progresso de LEITURA
+    (barra secundária "lidos"); 0 desliga essa barra.
     """
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, encoding="utf-8", errors="replace", bufsize=1)
@@ -541,9 +586,10 @@ def _run_ffmpeg_progress(cmd: list[str], duration_s: float,
             continue
         # "progress=continue|end" fecha um bloco de status
         if on_progress:
-            info = _parse_progress_block(block, duration_s)
+            info = _parse_progress_block(block, duration_s, total_frames)
             if value == "end":
                 info["pct"] = 100.0
+                info["read_pct"] = 100.0
                 info["eta"] = 0
             on_progress(info)
         block = {}
@@ -826,7 +872,8 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
     log("+ " + " ".join(cmd))
     # duracao esperada da saida = duracao do arquivo de referencia (video em copy)
     out_duration = _duration_of(probes[ref_input]) or duration
-    _run_ffmpeg_progress(cmd, out_duration, on_progress, on_start)
+    total_frames = _total_frames(probes[ref_input], out_duration)
+    _run_ffmpeg_progress(cmd, out_duration, on_progress, on_start, total_frames)
 
     log(f"OK: {output}")
     return result

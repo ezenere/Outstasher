@@ -199,6 +199,12 @@ def describe(opts: "ConvertOptions | dict | None") -> list[str]:
                    else f"{o.video_bitrate} kbps")
     if o.bit_depth != "keep":
         out.append(f"{o.bit_depth}-bit")
+    # preset só é relevante quando há re-encode de vídeo (e ≠ default)
+    reencodes_video = o.video_codec != "keep" or o.resolution != "keep" or o.bit_depth != "keep"
+    if reencodes_video and o.preset != "default":
+        preset_label = {"veryfast": "muito rápido", "fast": "rápido",
+                        "slow": "lento", "veryslow": "muito lento"}
+        out.append(f"preset {preset_label.get(o.preset, o.preset)}")
     if o.audio_codec != "keep":
         out.append(f"áudio {o.audio_codec.upper()}")
     if o.channels != "keep":
@@ -596,6 +602,8 @@ def convert_single(src: str, output: str, opts: ConvertOptions,
         log(n)
     log("Executando ffmpeg...")
     log("+ " + " ".join(cmd))
-    merger._run_ffmpeg_progress(cmd, merger._duration_of(probe), on_progress, on_start)
+    dur = merger._duration_of(probe)
+    merger._run_ffmpeg_progress(cmd, dur, on_progress, on_start,
+                                merger._total_frames(probe, dur))
     log(f"OK: {output}")
     return result
