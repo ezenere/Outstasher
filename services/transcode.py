@@ -508,7 +508,7 @@ def allowed_langs(target_iso: str | None, original_lang: str | None) -> set[str]
 
 def convert_single(src: str, output: str, opts: ConvertOptions,
                    target_lang: str | None = None, original_lang: str | None = None,
-                   log=print, on_progress=None) -> "merger.MergeResult":
+                   log=print, on_progress=None, on_start=None) -> "merger.MergeResult":
     """Converte UM arquivo conforme as opções: jobs 'só original'/'só dublado'
     e o atalho do merge quando o melhor vídeo já tem o áudio no idioma alvo.
 
@@ -596,6 +596,6 @@ def convert_single(src: str, output: str, opts: ConvertOptions,
         log(n)
     log("Executando ffmpeg...")
     log("+ " + " ".join(cmd))
-    merger._run_ffmpeg_progress(cmd, merger._duration_of(probe), on_progress)
+    merger._run_ffmpeg_progress(cmd, merger._duration_of(probe), on_progress, on_start)
     log(f"OK: {output}")
     return result

@@ -512,14 +512,20 @@ def _parse_progress_block(raw: dict, duration_s: float) -> dict:
 
 
 def _run_ffmpeg_progress(cmd: list[str], duration_s: float,
-                         on_progress=None) -> None:
+                         on_progress=None, on_start=None) -> None:
     """Roda o ffmpeg lendo o stream do -progress pipe:1 e reportando via callback.
 
     stderr é drenado numa thread (para não travar o pipe) e usado na mensagem
     de erro se o ffmpeg falhar.
+
+    on_start(proc): chamado com o Popen assim que o ffmpeg sobe — o chamador
+    guarda a referência para poder MATAR o processo se o job for cancelado
+    (cancelar a task async não interrompe o subprocess sozinho).
     """
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             text=True, encoding="utf-8", errors="replace", bufsize=1)
+    if on_start:
+        on_start(proc)
     stderr_lines: list[str] = []
     t = threading.Thread(target=lambda: stderr_lines.extend(proc.stderr), daemon=True)
     t.start()
@@ -554,7 +560,7 @@ def _run_ffmpeg_progress(cmd: list[str], duration_s: float,
 def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
           file2_is_target_dub: bool = True, log=print, on_progress=None,
           allow_drift: bool = True, convert=None,
-          original_lang: str | None = None) -> MergeResult:
+          original_lang: str | None = None, on_start=None) -> MergeResult:
     """Faz o merge de file1+file2 em `output`.
 
     target_lang: codigo curto (pt/es/...) ou ISO (por/spa/...) do idioma desejado.
@@ -605,7 +611,7 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
                     f"pulando merge e convertendo só ele com as opções avançadas.")
                 return transcode.convert_single(
                     ref_path, output, convert, target_lang, original_lang,
-                    log=log, on_progress=on_progress)
+                    log=log, on_progress=on_progress, on_start=on_start)
             log(f"O arquivo de melhor vídeo já tem áudio '{target_iso}' — pulando merge, criando hardlink.")
             out_path = Path(output).with_suffix(Path(ref_path).suffix)
             _link_or_copy(Path(ref_path), out_path, result.notes)
@@ -820,7 +826,7 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
     log("+ " + " ".join(cmd))
     # duracao esperada da saida = duracao do arquivo de referencia (video em copy)
     out_duration = _duration_of(probes[ref_input]) or duration
-    _run_ffmpeg_progress(cmd, out_duration, on_progress)
+    _run_ffmpeg_progress(cmd, out_duration, on_progress, on_start)
 
     log(f"OK: {output}")
     return result

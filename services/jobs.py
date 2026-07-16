@@ -16,6 +16,7 @@ torrent que sumiu do qBittorrent é reinserido automaticamente.
 """
 import asyncio
 import re
+import subprocess
 import time
 import uuid
 from datetime import datetime
@@ -47,6 +48,14 @@ _ACTIVE_STATUSES = ("searching", "awaiting", "downloading", "merging")
 # _jobs guarda APENAS os jobs ativos. Terminais são lidos do banco sob demanda.
 _jobs: dict[str, dict] = {}
 _tasks: dict[str, asyncio.Task] = {}
+# processo ffmpeg ativo por job: cancelar a task async NÃO interrompe o
+# subprocess (roda numa thread via to_thread), então guardamos o Popen aqui
+# para matá-lo no cancel(). Some quando o merge termina.
+_ffmpeg_procs: dict[str, "subprocess.Popen"] = {}
+# ids sendo cancelados agora: matar o ffmpeg faz o merge levantar MergeError, e
+# esse "erro" NÃO deve virar status=error — é o cancelamento pedido. O handler
+# de exceção do pipeline checa aqui para não sobrescrever o estado.
+_cancelling: set[str] = set()
 _qbit = QbitClient()
 
 # fila de conversão: só 1 merge/entrega roda por vez (ffmpeg é pesado de CPU/IO).
@@ -59,6 +68,45 @@ def _get_merge_lock() -> asyncio.Lock:
     if _merge_lock is None:
         _merge_lock = asyncio.Lock()
     return _merge_lock
+
+
+def _register_proc(job_id: str):
+    """on_start para o merger: guarda o Popen do ffmpeg deste job, para que o
+    cancel() possa matá-lo. Retorna a função a passar como on_start."""
+    def _on_start(proc):
+        _ffmpeg_procs[job_id] = proc
+    return _on_start
+
+
+def _kill_ffmpeg(job_id: str):
+    """Mata o ffmpeg em andamento deste job (se houver). Chamado ao cancelar:
+    o subprocess roda numa thread, então cancelar a task não o interrompe."""
+    proc = _ffmpeg_procs.pop(job_id, None)
+    if proc and proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _delete_output(job: dict):
+    """Apaga o arquivo final (parcial ou pronto) e a subpasta do filme se ficar
+    vazia. Usado ao cancelar durante a conversão: o .mkv em construção fica
+    corrompido/incompleto e não deve sobrar no destino."""
+    out = job.get("output")
+    if not out:
+        return
+    p = Path(out)
+    try:
+        if p.is_file():
+            p.unlink()
+            _event(job, "info", f"Arquivo final removido: {p}")
+        # remove a subpasta do filme se esvaziou (só a criamos para este filme)
+        parent = p.parent
+        if parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+    except OSError as e:
+        _event(job, "info", f"Não removi o arquivo final ({e}) — apague manualmente se precisar")
 
 
 def _spawn(job_id: str, coro):
@@ -302,6 +350,10 @@ def _set(job: dict, status: str, detail: str = ""):
 
 
 def _fail(job: dict, message: str):
+    # o job está sendo cancelado: o erro (ffmpeg morto pelo kill) é esperado —
+    # deixa o cancel() definir o estado final, não sobrescreve com "error"
+    if job["id"] in _cancelling:
+        return
     _set(job, "error", message)
 
 
@@ -565,7 +617,16 @@ async def cancel(job_id: str, delete_torrents: bool = False) -> dict | None:
     if not job:
         return None
     is_active = job_id in _jobs
+    # conversão em andamento? o arquivo final está sendo escrito e precisa ser
+    # apagado. Captura ANTES do cancel (o _set(cancelled) pode mexer no job).
+    was_merging = is_active and job["status"] == "merging"
     if is_active:
+        # marca antes de matar o ffmpeg: o merge vai levantar MergeError e o
+        # pipeline não pode transformar isso em status=error (é cancelamento)
+        _cancelling.add(job_id)
+        # mata o ffmpeg primeiro: ele roda numa thread (to_thread), então cancelar
+        # a task não o interrompe — sem isso o subprocess seguiria escrevendo
+        _kill_ffmpeg(job_id)
         task = _tasks.pop(job_id, None)
         if task and not task.done():
             task.cancel()
@@ -573,6 +634,9 @@ async def cancel(job_id: str, delete_torrents: bool = False) -> dict | None:
                 await task
             except asyncio.CancelledError:
                 pass
+    if was_merging:
+        _delete_output(job)
+    _cancelling.discard(job_id)
     if delete_torrents and is_active and not job.get("manual_files"):
         # limpeza no qBittorrent com teto de tempo: se ele estiver fora do ar,
         # a remoção do job NÃO pode ficar travada esperando o timeout de rede
@@ -1325,6 +1389,8 @@ async def _deliver_single(job: dict, files: dict):
     if job.get("convert"):
         opts = transcode.validate(job["convert"])
         output = dest_dir / safe_title / f"{safe_title} [{tag}].mkv"
+        # registra o destino antes do ffmpeg: cancel() apaga o parcial (ver _merge)
+        job["output"] = str(output)
         _set(job, "merging", f"Convertendo arquivo {label} ({src_file.name})...")
 
         def log(msg):
@@ -1340,10 +1406,13 @@ async def _deliver_single(job: dict, files: dict):
                 last_persist[0] = now
                 store.upsert_job(job)
 
-        result = await asyncio.to_thread(
-            transcode.convert_single, str(src_file), str(output), opts,
-            job["language"], (movie or {}).get("original_language"),
-            log=log, on_progress=on_progress)
+        try:
+            result = await asyncio.to_thread(
+                transcode.convert_single, str(src_file), str(output), opts,
+                job["language"], (movie or {}).get("original_language"),
+                log=log, on_progress=on_progress, on_start=_register_proc(job["id"]))
+        finally:
+            _ffmpeg_procs.pop(job["id"], None)
         job["progress"]["merge"] = None
         job["output"] = result.output
         done_label = "sem conversão necessária" if result.linked else "convertido"
@@ -1375,6 +1444,9 @@ async def _merge(job: dict, video_file: Path, audio_file: Path,
     # subpasta por filme dentro do destino escolhido (bom para Jellyfin/Plex)
     dest_dir = Path(job.get("destination_path") or config.OUTPUT_DIR)
     output = dest_dir / safe_title / f"{safe_title} [{job['language']}+orig].mkv"
+    # registra o destino JÁ: se o usuário cancelar durante o ffmpeg, o cancel()
+    # precisa saber qual arquivo parcial apagar
+    job["output"] = str(output)
 
     _set(job, "merging", f"Fazendo merge ({video_file.name} + {audio_file.name})...")
 
@@ -1397,11 +1469,15 @@ async def _merge(job: dict, video_file: Path, audio_file: Path,
     convert_opts = transcode.validate(job["convert"]) if job.get("convert") else None
 
     # merger.merge é bloqueante (ffmpeg/ffprobe); roda em thread para não travar a API
-    result = await asyncio.to_thread(
-        merger.merge, str(video_file), str(audio_file), str(output),
-        job["language"], log=log, on_progress=on_progress,
-        allow_drift=allow_drift, convert=convert_opts,
-        original_lang=(job.get("movie") or {}).get("original_language"))
+    try:
+        result = await asyncio.to_thread(
+            merger.merge, str(video_file), str(audio_file), str(output),
+            job["language"], log=log, on_progress=on_progress,
+            allow_drift=allow_drift, convert=convert_opts,
+            original_lang=(job.get("movie") or {}).get("original_language"),
+            on_start=_register_proc(job["id"]))
+    finally:
+        _ffmpeg_procs.pop(job["id"], None)
     job["progress"]["merge"] = None  # terminou (com sucesso): some a barra
 
     job["output"] = result.output
