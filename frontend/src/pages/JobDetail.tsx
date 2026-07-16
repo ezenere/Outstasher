@@ -6,7 +6,7 @@ import {
 } from 'iconoir-react'
 import { convertSummary, post, prog, type Job, type JobEvent, type JobProgress } from '../api'
 import { api } from '../api'
-import { Badge, CandidatesTable, Collapsible, Elapsed, Empty, KindTags, MergeBar, ProgressBar } from '../components/ui'
+import { Badge, CandidatesTable, ClampText, Collapsible, Elapsed, Empty, KindTags, MergeBar, ProgressBar } from '../components/ui'
 import { useDialog } from '../components/Dialog'
 import { jobTitle, removeJob } from './Jobs'
 
@@ -245,7 +245,7 @@ export default function JobDetail() {
           convert={job.convert} mode={job.mode} />
       </div>
 
-      <div className="mt-2 text-sm wrap-break-word whitespace-pre-wrap text-zinc-400">{job.detail}</div>
+      <ClampText className="mt-2 text-sm text-zinc-400">{job.detail}</ClampText>
 
       {/* capa + sinopse do filme */}
       {movie && (movie.poster || movie.overview) && (

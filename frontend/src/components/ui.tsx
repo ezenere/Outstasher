@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { Candidate, ConvertOptions, DiskInfo, MergeProgress, MovieState, Progress, QbitTone } from '../api'
 import {
   convertSummary, fmtDisk, fmtEta, fmtSize, fmtSpeed, fmtTime, langName,
@@ -148,6 +148,43 @@ export function Elapsed({ since, running, title }: {
 
 export function Empty({ children }: { children: ReactNode }) {
   return <div className="py-3 text-zinc-500">{children}</div>
+}
+
+/** Texto que colapsa em 1 linha (ellipsis) quando transborda, com um
+ *  "mostrar mais / menos" à direita. Útil para o detail do job quando ele é o
+ *  comando ffmpeg inteiro. O botão só aparece se o texto realmente transbordar. */
+export function ClampText({ children, className = '' }: {
+  children: string
+  className?: string
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const [overflows, setOverflows] = useState(false)
+  const ref = useRef<HTMLSpanElement>(null)
+  // remede a cada mudança de texto: transborda a largura de 1 linha?
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    setOverflows(el.scrollWidth > el.clientWidth + 1)
+  }, [children])
+  return (
+    <div className={`flex items-start gap-2 ${className}`}>
+      <span
+        ref={ref}
+        className={`min-w-0 flex-1 ${expanded ? 'whitespace-pre-wrap wrap-break-word' : 'truncate whitespace-nowrap'}`}
+      >
+        {children}
+      </span>
+      {(overflows || expanded) && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="shrink-0 whitespace-nowrap text-xs text-zinc-500 hover:text-zinc-300"
+        >
+          {expanded ? 'mostrar menos' : 'mostrar mais'}
+        </button>
+      )}
+    </div>
+  )
 }
 
 /** Tag colorida com tooltip. Cor por tipo (o `title` detalha o significado). */
