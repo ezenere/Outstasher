@@ -1,0 +1,5 @@
+# Dependências só para rodar a suíte de testes (além das de requirements.txt).
+# A suíte roda no AMBIENTE COMPLETO da aplicação (as deps de runtime + ffmpeg
+# no PATH); veja tests/README.md.
+-r requirements.txt
+pytest>=8
