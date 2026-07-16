@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
-  ClosedCaptionsTag, EditPencil, MediaVideo, MusicNote, NavArrowDown, NavArrowLeft, NavArrowRight,
-  Page, Trash, WarningTriangle,
+  ClosedCaptionsTag, Compress, EditPencil, Label, MediaVideo, MusicNote, NavArrowDown,
+  NavArrowLeft, NavArrowRight, Page, Trash, WarningTriangle,
 } from 'iconoir-react'
 import { api, del, post, type CatalogDetail, type CatalogFile, type Stream } from '../api'
 import { Empty } from '../components/ui'
 import { useDialog } from '../components/Dialog'
+import RecompressModal from '../components/RecompressModal'
 
 export default function CatalogItem() {
   const dialog = useDialog()
@@ -16,9 +17,12 @@ export default function CatalogItem() {
   const [detail, setDetail] = useState<CatalogDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [open, setOpen] = useState<Set<string>>(new Set())
+  const [recompress, setRecompress] = useState<CatalogFile | null>(null)
   const navigate = useNavigate()
 
   const qs = `destination_id=${destId}&folder=${encodeURIComponent(folder)}`
+  // o [tmdbid-N] na pasta é o que o Jellyfin usa para identificar o filme
+  const taggedId = /\[tmdbid-(\d+)\]/i.exec(folder)?.[1]
 
   const reload = useCallback(async () => {
     try {
@@ -73,6 +77,26 @@ export default function CatalogItem() {
     }
   }
 
+  async function tagTmdbId() {
+    if (!detail?.tmdb) return
+    const novo = `${detail.title}${detail.year ? ` (${detail.year})` : ''} [tmdbid-${detail.tmdb.id}]`
+    if (!(await dialog.confirm({
+      title: 'Marcar com o ID do TMDB',
+      message: `Renomear a pasta para "${novo}"? O Jellyfin usa esse ID para identificar o filme sem depender do título.`,
+      confirmText: 'Renomear',
+    }))) return
+    try {
+      const r = await post<{ folder: string }>('/api/catalog/item/tmdbid', {
+        folder, destination_id: destId ? Number(destId) : null, tmdb_id: detail.tmdb.id,
+      })
+      // a pasta mudou de nome: a URL atual aponta para um caminho que não existe mais
+      navigate(`/catalog/item?destination_id=${destId}&folder=${encodeURIComponent(r.folder)}`,
+        { replace: true })
+    } catch (e) {
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
+    }
+  }
+
   async function removeFolder() {
     if (!detail) return
     if (!(await dialog.confirm({
@@ -103,6 +127,15 @@ export default function CatalogItem() {
           {detail.title}
           {detail.year && <span className="ml-1 font-normal text-zinc-400">({detail.year})</span>}
         </h1>
+        {m && !taggedId && (
+          <button
+            onClick={tagTmdbId}
+            title={`Renomear a pasta para incluir [tmdbid-${m.id}]`}
+            className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:border-blue-700 hover:text-blue-300"
+          >
+            <Label width={15} height={15} /> Marcar ID do TMDB
+          </button>
+        )}
         <button
           onClick={removeFolder}
           className="flex items-center gap-1.5 rounded-lg border border-red-900/60 px-3 py-1.5 text-sm text-red-400 hover:bg-red-950/40"
@@ -157,19 +190,31 @@ export default function CatalogItem() {
             onToggle={() => toggle(f.rel)}
             onRename={() => renameFile(f)}
             onRemove={() => removeFile(f)}
+            onRecompress={f.category === 'video' ? () => setRecompress(f) : undefined}
           />
         ))}
       </div>
+
+      {recompress && (
+        <RecompressModal
+          folder={folder}
+          destinationId={destId ? Number(destId) : null}
+          file={recompress}
+          tmdb={detail.tmdb}
+          onClose={() => setRecompress(null)}
+        />
+      )}
     </div>
   )
 }
 
-function FileRow({ file, open, onToggle, onRename, onRemove }: {
+function FileRow({ file, open, onToggle, onRename, onRemove, onRecompress }: {
   file: CatalogFile
   open: boolean
   onToggle: () => void
   onRename: () => void
   onRemove: () => void
+  onRecompress?: () => void
 }) {
   const Icon = file.category === 'video' ? MediaVideo : file.category === 'subtitle' ? ClosedCaptionsTag : file.category === 'media' ? MusicNote : Page
   return (
@@ -188,6 +233,15 @@ function FileRow({ file, open, onToggle, onRename, onRemove }: {
             {file.probe_error ? ' · (não sondável)' : ''}
           </div>
         </button>
+        {onRecompress && (
+          <button
+            onClick={onRecompress}
+            title="Recomprimir (converter com as opções avançadas)"
+            className="rounded-lg border border-zinc-700 p-1.5 text-zinc-400 hover:border-purple-700 hover:text-purple-300"
+          >
+            <Compress width={14} height={14} />
+          </button>
+        )}
         <button
           onClick={onRename}
           title="Renomear arquivo"

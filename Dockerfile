@@ -15,9 +15,10 @@ RUN npm run build
 FROM python:3.12-slim AS runtime
 WORKDIR /app
 
-# ffmpeg + ffprobe sao exigidos pelo merger (services/merger.py)
+# ffmpeg + ffprobe sao exigidos pelo merger (services/merger.py);
+# mkvtoolnix (mkvpropedit) reinjeta metadados HDR10 que encoders descartam
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg mkvtoolnix \
     && rm -rf /var/lib/apt/lists/*
 
 # deps python primeiro (camada cacheada enquanto requirements nao muda)

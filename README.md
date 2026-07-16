@@ -42,6 +42,9 @@ torrent para cada uma, e junta tudo em um único arquivo: **melhor imagem + todo
 - [ffmpeg](https://ffmpeg.org/) (ffmpeg + ffprobe no PATH). As opções avançadas
   de conversão só oferecem os codecs que o seu ffmpeg tem encoder (detectado em
   runtime).
+- Opcional: [mkvtoolnix](https://mkvtoolnix.download/) (`mkvpropedit`) — usado
+  para reinjetar metadados HDR10 no container quando o encoder os descarta no
+  re-encode (comum em encoders de hardware). Sem ele, a conversão avisa.
 - [Jackett](https://github.com/Jackett/Jackett) rodando com indexadores configurados
 - [qBittorrent](https://www.qbittorrent.org/) com a Web UI habilitada
   (Ferramentas → Opções → Web UI)
@@ -129,7 +132,15 @@ copy). Opções:
 - **Encoder**: software (CPU) / **NVENC** (GPU NVIDIA) / **Quick Sync** (GPU
   Intel/Arc), para H.264/HEVC/AV1. A disponibilidade é testada com um encode
   real na GPU; a faixa de qualidade (CQ/ICQ, 1–51) e o 10-bit (não existe em
-  H.264 por hardware) seguem o encoder escolhido.
+  H.264 por hardware) seguem o encoder escolhido. Na GPU o modo qualidade
+  constante liga lookahead estendido (`-extbrc`/`-look_ahead_depth` no QSV,
+  `-multipass`/`-rc-lookahead`/AQ no NVENC) e GOP de ~10 s; o decode também
+  acontece na GPU quando possível (testado com o arquivo real, com fallback
+  para software) — sem filtros de CPU no meio, os frames ficam na VRAM do
+  decode ao encode. Fontes HDR10 têm a sinalização de cor reaplicada e os
+  metadados estáticos (mastering display/MaxCLL) conferidos após o encode —
+  reinjetados no container via `mkvpropedit` se o encoder os descartar.
+  Dolby Vision não sobrevive a re-encode (fica o HDR10 base).
 - **Preset**: muito rápido → muito lento (mapeado por encoder; ex.: p1–p7 no
   NVENC).
 - **Resolução**: 8K/4K/Full HD/HD/SD. Corta por **largura** com 8% de tolerância
@@ -240,6 +251,21 @@ track (vídeo: resolução/FPS/HDR/10-bit/cor/perfil; áudio: canais/sample
 rate/bitrate; legendas: idioma/forced/SDH). Dá para **renomear**/**remover** um
 arquivo ou remover a **pasta inteira** (caminhos validados contra traversal).
 Também é aqui que fica o **"+ Adicionar filme"** (conversão manual).
+
+**Recomprimir** (ícone no arquivo de vídeo) converte um filme que já está na
+coleção com as mesmas opções avançadas dos downloads — sem torrent, sem merge.
+A saída vai para um arquivo temporário na mesma pasta e só substitui o original
+quando o ffmpeg termina; cancelar ou falhar deixa o filme intacto, e um
+resultado maior que o original é descartado. Também dá para **manter os dois**
+(grava como `[recomprimido]` ao lado).
+
+### Identificação no Jellyfin (tmdbid)
+
+Pastas novas saem como `Filme (Ano) [tmdbid-N]` — o Jellyfin usa o id para
+identificar o filme sem depender do título (remakes, títulos localizados). Para
+a coleção antiga, o botão **"Marcar ID do TMDB"** no catálogo renomeia a pasta
+com o id do match já exibido na tela. O `[tmdbid-N]` não entra no nome do
+arquivo nem nas chaves do cache da coleção.
 
 ## merge.py avulso
 

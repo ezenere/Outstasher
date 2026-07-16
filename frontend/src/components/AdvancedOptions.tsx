@@ -318,6 +318,8 @@ export default function AdvancedOptions({ value, onChange, blocked }: Props) {
                   />
                   <span className="text-xs text-zinc-500">
                     O encoder gasta só o bitrate necessário em cada cena.
+                    {opts.hw_accel !== 'none'
+                      && ' Na GPU usa lookahead estendido; 20–24 ≈ qualidade de arquivo (Blu-ray sem perda visível).'}
                   </span>
                 </label>
               )}

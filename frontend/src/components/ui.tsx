@@ -243,18 +243,23 @@ export function KindTags({ kind, language, downloadOnly, convert, mode }: KindTa
   const convTitle = convSummary.length
     ? `Conversão customizada: ${convSummary.join(', ')}`
     : 'Conversão customizada (opções avançadas)'
+  // recompressão não tem idioma/original: o job só re-encoda um filme que já existe
+  const isRecompress = mode === 'recompress'
   return (
     <span className="inline-flex flex-wrap items-center gap-1 align-middle">
-      {kind !== 'original' && (
+      {isRecompress && (
+        <Tag tone="custom" title="Recompressão de um filme da coleção">Recomprimir</Tag>
+      )}
+      {!isRecompress && kind !== 'original' && (
         <Tag tone="lang" title={`Áudio dublado em ${lang}`}>{lang}</Tag>
       )}
-      {kind !== 'dubbed' && (
+      {!isRecompress && kind !== 'dubbed' && (
         <Tag tone="orig" title="Vídeo no idioma original">Original</Tag>
       )}
       {downloadOnly && (
         <Tag tone="muted" title="Só baixa pelo qBittorrent — sem merge/conversão">Só baixar</Tag>
       )}
-      {convert && (
+      {convert && !isRecompress && (
         <Tag tone="custom" title={convTitle}>Custom</Tag>
       )}
       {mode === 'manual' && (

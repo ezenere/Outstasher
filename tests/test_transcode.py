@@ -220,8 +220,11 @@ def test_hw_plan_or_reject():
             assert "-preset" in p.args and tc._PRESETS[enc]["fast"] in p.args
             if hw == "nvenc":
                 assert "-cq" in p.args and "25" in p.args and "-crf" not in p.args
+                assert "-rc-lookahead" in p.args  # rate control reforçado
             else:
                 assert "-global_quality" in p.args and "-crf" not in p.args
+                assert "-extbrc" in p.args and "-look_ahead_depth" in p.args
+            assert "-g" in p.args    # GOP longo (default de HW é curto)
             assert "nv12" in p.args  # pix_fmt de HW (fonte 8-bit)
         else:
             with pytest.raises(ValueError, match="não está disponível"):
@@ -249,6 +252,92 @@ def test_describe_hw():
     # sem re-encode de vídeo, hw_accel é inerte
     o = tc.ConvertOptions(audio_codec="aac", hw_accel="nvenc")
     assert tc.describe(o) == ["áudio AAC"]
+
+
+# -------------------- HDR / sinalização de cor --------------------
+
+def test_plan_video_color_signaling():
+    # fonte HDR10: a sinalização de cor é reaplicada explicitamente no encode
+    vs = vstream(codec="hevc", w=3840, h=2160, br=40_000_000, pix="yuv420p10le")
+    vs.update(color_primaries="bt2020", color_transfer="smpte2084",
+              color_space="bt2020nc", color_range="tv")
+    p = tc.plan_video(probe(vs), vs, tc.validate(
+        {"video_codec": "av1", "quality_mode": "crf", "crf": 22}))
+    assert p.encode
+    for flag, val in (("-color_primaries", "bt2020"), ("-color_trc", "smpte2084"),
+                      ("-colorspace", "bt2020nc"), ("-color_range", "tv")):
+        i = p.args.index(flag)
+        assert p.args[i + 1] == val, (flag, p.args)
+    assert any("mastering display" in n for n in p.notes), p.notes
+    # fonte SDR sem cor declarada: nenhuma flag de cor inventada
+    vs = vstream(codec="h264", br=20_000_000)
+    p = tc.plan_video(probe(vs), vs, tc.validate({"video_codec": "hevc", "video_bitrate": 3000}))
+    assert "-color_primaries" not in p.args and "-colorspace" not in p.args
+
+
+def test_plan_video_dolby_vision_note():
+    vs = vstream(codec="hevc", br=40_000_000, pix="yuv420p10le")
+    vs["side_data_list"] = [{"side_data_type": "DOVI configuration record"}]
+    p = tc.plan_video(probe(vs), vs, tc.validate(
+        {"video_codec": "av1", "quality_mode": "crf", "crf": 22}))
+    assert any("Dolby Vision" in n for n in p.notes), p.notes
+
+
+def test_fps_and_frac_helpers():
+    assert tc._fps_of({"avg_frame_rate": "24000/1001"}) == pytest.approx(23.976, abs=1e-3)
+    assert tc._fps_of({"avg_frame_rate": "0/0"}) == 0.0
+    assert tc._frac("34000/50000") == pytest.approx(0.68)
+    assert tc._frac("1000") == 1000.0
+    assert tc._frac("lixo") is None and tc._frac(None) is None
+
+
+def test_mkvpropedit_cmd():
+    md = {"mastering": {"red_x": 0.68, "red_y": 0.32, "max_luminance": 1000.0,
+                        "min_luminance": 0.005, "white_point_x": 0.3127},
+          "light": {"max_content": 1000, "max_average": 400}}
+    cmd = tc._mkvpropedit_cmd("out.mkv", md)
+    assert cmd[:4] == ["mkvpropedit", "out.mkv", "--edit", "track:v1"]
+    assert "chromaticity-coordinates-red-x=0.68" in cmd
+    assert "max-luminance=1000" in cmd and "min-luminance=0.005" in cmd
+    assert "white-coordinates-x=0.3127" in cmd
+    assert "max-content-light=1000" in cmd and "max-frame-light=400" in cmd
+
+
+@pytest.mark.ffmpeg
+def test_hdr_metadata_roundtrip(tmp_path):
+    """Fonte HEVC 10-bit com HDR10 real (SEI de mastering display + CLL via
+    libx265) -> _hdr_side_data lê; após re-encode para H.264 (que descarta o
+    SEI), preserve_hdr_metadata reage conforme o ambiente: reinjeta se o
+    mkvpropedit existir, senão avisa para instalar o mkvtoolnix."""
+    import shutil as _shutil
+    import subprocess
+    src = str(tmp_path / "hdr.mkv")
+    subprocess.run([
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "testsrc=s=320x180:d=1:r=24",
+        "-c:v", "libx265", "-preset", "ultrafast", "-pix_fmt", "yuv420p10le",
+        "-x265-params",
+        "master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)"
+        "L(10000000,1):max-cll=1000,400",
+        "-color_primaries", "bt2020", "-color_trc", "smpte2084",
+        "-colorspace", "bt2020nc", src], check=True)
+
+    md = tc._hdr_side_data(src)
+    assert md and "mastering" in md, md
+    assert md["mastering"]["max_luminance"] == pytest.approx(1000.0)
+    assert md["light"] == {"max_content": 1000, "max_average": 400}
+
+    out = str(tmp_path / "out.mkv")
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", src, "-c:v", "libx264", "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p", "-an", out], check=True)
+    notes = tc.preserve_hdr_metadata(src, out)
+    assert notes, "fonte HDR10 sem nota de verificação"
+    if _shutil.which("mkvpropedit"):
+        assert any("reinjetados" in n or "preservados" in n for n in notes), notes
+        assert tc._hdr_side_data(out), "metadados não voltaram ao container"
+    else:
+        assert any("mkvtoolnix" in n for n in notes), notes
 
 
 # -------------------- plan_audio --------------------

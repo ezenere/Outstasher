@@ -18,7 +18,9 @@ pipeline fica exatamente como sempre foi.
 """
 from __future__ import annotations
 
+import json
 import re
+import shutil
 import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -147,24 +149,49 @@ def available_encoders() -> frozenset[str]:
     return _encoders_cache
 
 
-_hw_probe_cache: dict[str, bool] = {}
+_hw_probe_cache: dict[str, str] = {}  # "ok" | "low_power" | "no"
+
+
+def _hw_probe(encoder: str) -> str:
+    """Encoder de HW compilado no ffmpeg não garante GPU presente/funcional —
+    só um encode de teste responde de verdade. Algumas builds expõem o AV1 do
+    Arc/DG2 apenas pelo caminho VDENC: retenta com -low_power 1 e lembra que o
+    encoder precisa da flag. Resultado cacheado por processo."""
+    if encoder not in available_encoders():
+        return "no"
+    if encoder not in _hw_probe_cache:
+        def _try(extra: list[str]) -> bool:
+            cmd = ["ffmpeg", "-hide_banner", "-v", "error",
+                   "-f", "lavfi", "-i", "color=black:size=320x180:rate=30:duration=0.2",
+                   "-frames:v", "3", "-c:v", encoder, *extra, "-f", "null", "-"]
+            try:
+                return subprocess.run(cmd, capture_output=True, timeout=30).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                return False
+        _hw_probe_cache[encoder] = "ok" if _try([]) else (
+            "low_power" if encoder.endswith("_qsv") and _try(["-low_power", "1"])
+            else "no")
+    return _hw_probe_cache[encoder]
 
 
 def hw_encoder_works(encoder: str) -> bool:
-    """Encoder de HW compilado no ffmpeg não garante GPU presente/funcional —
-    só um encode de teste responde de verdade. Resultado cacheado por processo."""
-    if encoder not in available_encoders():
+    return _hw_probe(encoder) != "no"
+
+
+def _hw_decode_args(accel: str) -> list[str]:
+    return (["-init_hw_device", "qsv=hw"] if accel == "qsv" else []) + ["-hwaccel", accel]
+
+
+def _hw_decode_works(path: str, accel: str, v_index: int = 0) -> bool:
+    """Decode de 1 frame na GPU. O -hwaccel_output_format impede o fallback
+    silencioso para software — sem ele o ffmpeg retornaria 0 mesmo sem GPU."""
+    cmd = ["ffmpeg", "-hide_banner", "-v", "error",
+           *_hw_decode_args(accel), "-hwaccel_output_format", accel,
+           "-i", path, "-map", f"0:v:{v_index}", "-frames:v", "1", "-f", "null", "-"]
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=60).returncode == 0
+    except (OSError, subprocess.SubprocessError):
         return False
-    if encoder not in _hw_probe_cache:
-        cmd = ["ffmpeg", "-hide_banner", "-v", "error",
-               "-f", "lavfi", "-i", "color=black:size=320x180:rate=30:duration=0.2",
-               "-frames:v", "3", "-c:v", encoder, "-f", "null", "-"]
-        try:
-            p = subprocess.run(cmd, capture_output=True, timeout=30)
-            _hw_probe_cache[encoder] = p.returncode == 0
-        except (OSError, subprocess.SubprocessError):
-            _hw_probe_cache[encoder] = False
-    return _hw_probe_cache[encoder]
 
 
 def _video_encoder_for(codec_id: str, hw: str = "none") -> str | None:
@@ -353,7 +380,17 @@ class VideoPlan:
     encode: bool
     encoder: str | None = None
     args: list[str] = field(default_factory=list)  # -c:v/-preset/-crf|-b:v/-pix_fmt/-vf
+    input_args: list[str] = field(default_factory=list)  # -hwaccel... (antes do -i)
     notes: list[str] = field(default_factory=list)
+
+
+def _fps_of(vstream: dict) -> float:
+    raw = str(vstream.get("avg_frame_rate") or vstream.get("r_frame_rate") or "")
+    num, _, den = raw.partition("/")
+    try:
+        return float(num) / float(den or 1)
+    except (ValueError, ZeroDivisionError):
+        return 0.0
 
 
 def _estimate_video_bitrate(probe: dict, vstream: dict) -> int:
@@ -377,8 +414,11 @@ def _estimate_video_bitrate(probe: dict, vstream: dict) -> int:
     return max(0, total - audio)
 
 
-def plan_video(probe: dict, vstream: dict, opts: ConvertOptions) -> VideoPlan:
-    """Decide se o vídeo re-encoda e monta os argumentos do encoder."""
+def plan_video(probe: dict, vstream: dict, opts: ConvertOptions,
+               src: str | None = None) -> VideoPlan:
+    """Decide se o vídeo re-encoda e monta os argumentos do encoder. Com `src`
+    (caminho real) e encoder de HW, testa também o DECODE na GPU — 1 frame —
+    e, sem filtros de CPU no meio, deixa os frames na VRAM do decode ao encode."""
     notes: list[str] = []
     width = int(vstream.get("width") or 0)
     height = int(vstream.get("height") or 0)
@@ -444,6 +484,8 @@ def plan_video(probe: dict, vstream: dict, opts: ConvertOptions) -> VideoPlan:
     is_hw = encoder.endswith("_nvenc") or encoder.endswith("_qsv")
 
     args = ["-c:v", encoder]
+    if is_hw and _hw_probe(encoder) == "low_power":
+        args += ["-low_power", "1"]  # ex.: AV1 do Arc/DG2 exposto só via VDENC
     preset = _PRESETS[encoder][opts.preset]
     if encoder == "libaom-av1":
         args += ["-cpu-used", preset, "-row-mt", "1"]
@@ -456,11 +498,16 @@ def plan_video(probe: dict, vstream: dict, opts: ConvertOptions) -> VideoPlan:
         crf = opts.crf if opts.crf is not None \
             else HW_CRF_RANGES.get(encoder, CRF_RANGES[codec_id])[2]
         if encoder.endswith("_nvenc"):
-            # NVENC não tem CRF: o equivalente é VBR com alvo de qualidade (-cq)
-            args += ["-rc", "vbr", "-cq", str(crf), "-b:v", "0"]
+            # NVENC não tem CRF: VBR com alvo de qualidade (-cq) + lookahead/AQ
+            # multipass para o rate control se aproximar de um encoder de software
+            args += ["-rc", "vbr", "-cq", str(crf), "-b:v", "0",
+                     "-tune", "hq", "-multipass", "fullres", "-rc-lookahead", "32",
+                     "-spatial-aq", "1", "-temporal-aq", "1"]
         elif encoder.endswith("_qsv"):
-            # QSV: qualidade constante é ICQ, via -global_quality
-            args += ["-global_quality", str(crf)]
+            # QSV: ICQ; extbrc+lookahead ligam o rate control estendido do
+            # oneVPL (analisa dezenas de frames antes de distribuir bits)
+            args += ["-global_quality", str(crf), "-extbrc", "1",
+                     "-look_ahead_depth", "40"]
         elif encoder == "libaom-av1":
             args += ["-crf", str(crf), "-b:v", "0"]
         elif encoder in ("librav1e", "libvvenc"):
@@ -474,6 +521,11 @@ def plan_video(probe: dict, vstream: dict, opts: ConvertOptions) -> VideoPlan:
         notes.append(f"vídeo re-encodado em {codec_id.upper()} ({encoder}, "
                      f"{target_kbps} kbps, preset {opts.preset})")
 
+    if is_hw:
+        # GOP longo (~10 s): o default dos encoders de HW herda GOPs curtos de
+        # streaming, que custam eficiência em arquivo parado
+        args += ["-g", str(int(round((_fps_of(vstream) or 24.0) * 10)))]
+
     # ---- profundidade de cor ----
     ten_bit_out = src_10bit if opts.bit_depth == "keep" else (opts.bit_depth == "10")
     if codec_id == "h264" and ten_bit_out and opts.bit_depth != "10":
@@ -484,22 +536,53 @@ def plan_video(probe: dict, vstream: dict, opts: ConvertOptions) -> VideoPlan:
     if ten_bit_out and is_hw and encoder not in HW_10BIT:
         ten_bit_out = False
         notes.append(f"{encoder} só encoda 8-bit — saída em 8-bit")
-    if is_hw:
-        args += ["-pix_fmt", "p010le" if ten_bit_out else "nv12"]
-    else:
-        args += ["-pix_fmt", "yuv420p10le" if ten_bit_out else "yuv420p"]
+
+    # ---- decode em hardware ----
+    input_args: list[str] = []
+    vram = False
+    if is_hw and src:
+        accel = "qsv" if encoder.endswith("_qsv") else "cuda"
+        if _hw_decode_works(src, accel, int(vstream.get("_type_index") or 0)):
+            input_args = _hw_decode_args(accel)
+            # sem scale nem mudança de bit depth, os frames ficam na VRAM do
+            # decode ao encode (em 4K o round-trip pelo PCIe vira gargalo)
+            vram = not downscale and ten_bit_out == src_10bit
+            if vram:
+                input_args += ["-hwaccel_output_format", accel]
+            notes.append("decode na GPU" + (" — frames direto na VRAM" if vram else ""))
+    if not vram:
+        if is_hw:
+            args += ["-pix_fmt", "p010le" if ten_bit_out else "nv12"]
+        else:
+            args += ["-pix_fmt", "yuv420p10le" if ten_bit_out else "yuv420p"]
     if ten_bit_out and not src_10bit:
         notes.append("saída em 10-bit a partir de fonte 8-bit (reduz banding no re-encode)")
 
+    # sinalização de cor explícita: HDR10/BT.2020 não podem depender da
+    # propagação automática no re-encode
+    for flag, key in (("-color_primaries", "color_primaries"),
+                      ("-color_trc", "color_transfer"),
+                      ("-colorspace", "color_space"),
+                      ("-color_range", "color_range")):
+        val = str(vstream.get(key) or "").strip()
+        if val and val != "unknown":
+            args += [flag, val]
+
     if (vstream.get("color_transfer") or "").lower() in ("smpte2084", "arib-std-b67"):
-        notes.append("fonte HDR: as propriedades de cor seguem no stream, mas metadados "
-                     "HDR10+/Dolby Vision podem se perder no re-encode")
+        notes.append("fonte HDR: sinalização de cor reaplicada no encode; metadados "
+                     "estáticos (mastering display/MaxCLL) são conferidos ao final e "
+                     "reinjetados no container se o encoder os descartar")
+    if any("dovi" in str(sd.get("side_data_type") or "").lower()
+           for sd in vstream.get("side_data_list") or []):
+        notes.append("fonte com Dolby Vision: o re-encode descarta a camada DV "
+                     "(o resultado fica com o HDR10 base)")
 
     if downscale:
         args += ["-vf", f"scale={cap}:-2"]
         notes.append(f"resolução reduzida: {width}x{height} → {cap}px de largura")
 
-    return VideoPlan(encode=True, encoder=encoder, args=args, notes=notes)
+    return VideoPlan(encode=True, encoder=encoder, args=args,
+                     input_args=input_args, notes=notes)
 
 
 # -------------------- plano de cada faixa de áudio --------------------
@@ -594,6 +677,101 @@ def audio_output_args(out_i: int, plan: AudioPlan, via_filter_complex: bool = Fa
     return args
 
 
+# -------------------- metadados estáticos de HDR10 --------------------
+# No HEVC eles vivem em SEI; no AV1 viram OBU de metadata. Encoders (de HW em
+# especial) têm histórico de descartá-los em silêncio — daí conferir depois do
+# encode e, se sumiram, reinjetar no nível do container: o Matroska tem campos
+# próprios de cor/luminância que os players respeitam.
+
+_MASTERING_KEYS = ("red_x", "red_y", "green_x", "green_y", "blue_x", "blue_y",
+                   "white_point_x", "white_point_y", "min_luminance", "max_luminance")
+
+_MKV_COLOUR_PROPS = {
+    "red_x": "chromaticity-coordinates-red-x",
+    "red_y": "chromaticity-coordinates-red-y",
+    "green_x": "chromaticity-coordinates-green-x",
+    "green_y": "chromaticity-coordinates-green-y",
+    "blue_x": "chromaticity-coordinates-blue-x",
+    "blue_y": "chromaticity-coordinates-blue-y",
+    "white_point_x": "white-coordinates-x",
+    "white_point_y": "white-coordinates-y",
+    "min_luminance": "min-luminance",
+    "max_luminance": "max-luminance",
+}
+
+
+def _frac(value) -> float | None:
+    """'34000/50000' -> 0.68; '1000' -> 1000.0; lixo -> None."""
+    if value is None:
+        return None
+    num, _, den = str(value).partition("/")
+    try:
+        return float(num) / float(den) if den else float(num)
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def _hdr_side_data(path: str, v_index: int = 0) -> dict | None:
+    """Mastering display / content light do 1º frame (ffprobe). None = sem HDR10."""
+    # -show_frames completo: o -show_entries "frame=side_data_list" devolve a
+    # lista com os campos aninhados VAZIOS (limitação do seletor do ffprobe)
+    cmd = ["ffprobe", "-v", "error", "-select_streams", f"v:{v_index}",
+           "-read_intervals", "%+#1", "-show_frames", "-of", "json", path]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=120)
+        frames = json.loads(p.stdout or "{}").get("frames") or []
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    md: dict = {}
+    for sd in (frames[0].get("side_data_list") or []) if frames else []:
+        kind = str(sd.get("side_data_type") or "").lower()
+        if "mastering display" in kind:
+            vals = {k: _frac(sd.get(k)) for k in _MASTERING_KEYS}
+            md["mastering"] = {k: v for k, v in vals.items() if v is not None}
+        elif "content light" in kind:
+            md["light"] = {"max_content": int(sd.get("max_content") or 0),
+                           "max_average": int(sd.get("max_average") or 0)}
+    return md or None
+
+
+def _mkvpropedit_cmd(output: str, md: dict) -> list[str]:
+    cmd = ["mkvpropedit", output, "--edit", "track:v1"]
+    for key, prop in _MKV_COLOUR_PROPS.items():
+        v = (md.get("mastering") or {}).get(key)
+        if v is not None:
+            cmd += ["--set", f"{prop}={v:g}"]
+    light = md.get("light")
+    if light:
+        cmd += ["--set", f"max-content-light={light['max_content']}",
+                "--set", f"max-frame-light={light['max_average']}"]
+    return cmd
+
+
+def preserve_hdr_metadata(src: str, output: str, v_index: int = 0) -> list[str]:
+    """Depois de um re-encode: os metadados de HDR10 sobreviveram? Se o encoder
+    os descartou, reinjeta no container via mkvpropedit. Retorna notas."""
+    src_md = _hdr_side_data(src, v_index)
+    if not src_md:
+        return []
+    if _hdr_side_data(output):
+        return ["metadados HDR10 (mastering display/CLL) preservados no re-encode"]
+    if not output.lower().endswith(".mkv") or shutil.which("mkvpropedit") is None:
+        return ["⚠️ o encoder descartou os metadados HDR10 (mastering display/"
+                "MaxCLL) — instale o mkvtoolnix (mkvpropedit) para que sejam "
+                "reinjetados no container automaticamente"]
+    try:
+        p = subprocess.run(_mkvpropedit_cmd(output, src_md), capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        return [f"⚠️ falha ao reinjetar metadados HDR10 no container: {e}"]
+    if p.returncode == 0:
+        return ["metadados HDR10 reinjetados no container (o encoder os havia "
+                "descartado; mkvpropedit)"]
+    return ["⚠️ falha ao reinjetar metadados HDR10 no container: "
+            + (p.stderr or p.stdout).strip()[:200]]
+
+
 # -------------------- filtro "apenas original + dublagem" --------------------
 
 def allowed_langs(target_iso: str | None, original_lang: str | None) -> set[str]:
@@ -632,7 +810,7 @@ def convert_single(src: str, output: str, opts: ConvertOptions,
     if not vstreams:
         raise merger.MergeError(f"nenhuma stream de vídeo em {src}")
     best_v = max(vstreams, key=merger.video_score)
-    vplan = plan_video(probe, best_v, opts)
+    vplan = plan_video(probe, best_v, opts, src=src)
 
     target_iso = merger.canonical_lang(
         merger.LANG_ISO.get(target_lang, target_lang)) if target_lang else None
@@ -679,7 +857,8 @@ def convert_single(src: str, output: str, opts: ConvertOptions,
         return result
 
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats",
-           "-progress", "pipe:1", "-y", "-fflags", "+genpts", "-i", src,
+           "-progress", "pipe:1", "-y", *vplan.input_args,
+           "-fflags", "+genpts", "-i", src,
            "-map", f"0:v:{int(best_v['_type_index'])}"]
     cmd += vplan.args if vplan.encode else ["-c:v", "copy"]
 
@@ -705,5 +884,9 @@ def convert_single(src: str, output: str, opts: ConvertOptions,
     dur = merger._duration_of(probe)
     merger._run_ffmpeg_progress(cmd, dur, on_progress, on_start,
                                 merger._total_frames(probe, dur))
+    if vplan.encode:
+        for n in preserve_hdr_metadata(src, output, int(best_v.get("_type_index") or 0)):
+            result.notes.append(n)
+            log(n)
     log(f"OK: {output}")
     return result

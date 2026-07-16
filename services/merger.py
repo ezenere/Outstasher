@@ -756,10 +756,21 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
                     f"capítulos podem ficar deslocados {tau_s:.1f}s "
                     f"(offset aplicado no container)")
 
+    # vídeo: copy por padrão; re-encode quando as opções avançadas pedirem.
+    # Planejado antes do comando porque o plano pode trazer args de ENTRADA
+    # (decode em HW), que precisam vir antes do -i do arquivo de vídeo.
+    vplan = None
+    if convert is not None:
+        vplan = transcode.plan_video(probes[ref_input], best_v, convert, src=ref_path)
+        for n in vplan.notes:
+            result.notes.append(n)
+            log(n)
+
     # ---- comando ffmpeg ----
     # -progress pipe:1: stream chave=valor no stdout para a barra de progresso
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats",
            "-progress", "pipe:1", "-y",
+           *(vplan.input_args if vplan else []),
            "-fflags", "+genpts", *in_ref, *in_oth]
 
     cmd += ["-map", f"0:v:{int(best_v['_type_index'])}"]
@@ -792,13 +803,6 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
     if filter_chains:
         cmd += ["-filter_complex", "; ".join(filter_chains)]
 
-    # vídeo: copy por padrão; re-encode quando as opções avançadas pedirem
-    vplan = None
-    if convert is not None:
-        vplan = transcode.plan_video(probes[ref_input], best_v, convert)
-        for n in vplan.notes:
-            result.notes.append(n)
-            log(n)
     cmd += (vplan.args if vplan and vplan.encode else ["-c:v", "copy"])
     cmd += ["-c:a", "copy", "-c:s", "copy"]
 
@@ -874,6 +878,12 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
     out_duration = _duration_of(probes[ref_input]) or duration
     total_frames = _total_frames(probes[ref_input], out_duration)
     _run_ffmpeg_progress(cmd, out_duration, on_progress, on_start, total_frames)
+
+    if vplan and vplan.encode:
+        for n in transcode.preserve_hdr_metadata(ref_path, output,
+                                                 int(best_v.get("_type_index") or 0)):
+            result.notes.append(n)
+            log(n)
 
     log(f"OK: {output}")
     return result

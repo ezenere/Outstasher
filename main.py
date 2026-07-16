@@ -433,6 +433,42 @@ async def catalog_delete_folder(folder: str, destination_id: int | None = None):
     return {"ok": True}
 
 
+class TagTmdbRequest(BaseModel):
+    folder: str
+    tmdb_id: int
+    destination_id: int | None = None
+
+
+@app.post("/api/catalog/item/tmdbid")
+async def catalog_tag_tmdb(req: TagTmdbRequest):
+    """Marca a pasta com [tmdbid-N] para o Jellyfin identificar o filme."""
+    try:
+        folder = await asyncio.to_thread(catalog.tag_folder_with_tmdb,
+                                         req.destination_id, req.folder, req.tmdb_id)
+    except catalog.CatalogError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "folder": folder}
+
+
+class RecompressRequest(BaseModel):
+    folder: str
+    rel: str
+    convert: dict  # opções avançadas (obrigatórias: é o objetivo do job)
+    replace: bool = True
+    destination_id: int | None = None
+    tmdb_id: int | None = None
+
+
+@app.post("/api/jobs/recompress")
+async def create_recompress_job(req: RecompressRequest):
+    """Recomprime um arquivo já na coleção, sem download nem merge."""
+    try:
+        return await jobs.create_recompress(req.destination_id, req.folder, req.rel,
+                                            req.convert, req.replace, req.tmdb_id)
+    except (ValueError, catalog.CatalogError) as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/api/capabilities")
 async def capabilities():
     """Codecs que o ffmpeg DESTE servidor sabe encodar — a UI de opções

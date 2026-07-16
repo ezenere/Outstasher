@@ -20,6 +20,9 @@ SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup"}
 MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | {".m4a", ".mka", ".ac3", ".dts", ".flac", ".mp3", ".aac"}
 
 _YEAR_RE = re.compile(r"\((\d{4})\)")
+# [tmdbid-123] no nome da pasta: é assim que o Jellyfin identifica o filme sem
+# depender do título (https://jellyfin.org/docs/general/server/media/movies)
+_TMDBID_RE = re.compile(r"\s*\[tmdbid-(\d+)\]", re.I)
 
 
 class CatalogError(Exception):
@@ -59,10 +62,32 @@ def _bitrate(bits_per_s: str | int | None) -> str | None:
 
 
 def _title_and_year(folder_name: str) -> tuple[str, str | None]:
-    m = _YEAR_RE.search(folder_name)
+    name = _TMDBID_RE.sub("", folder_name)  # o [tmdbid-N] não faz parte do título
+    m = _YEAR_RE.search(name)
     year = m.group(1) if m else None
-    title = _YEAR_RE.sub("", folder_name).strip(" -.[]") if m else folder_name
+    title = _YEAR_RE.sub("", name).strip(" -.[]") if m else name
     return title.strip(), year
+
+
+def tmdb_id_in(folder_name: str) -> int | None:
+    """O id do TMDB marcado no nome da pasta, se houver."""
+    m = _TMDBID_RE.search(folder_name)
+    return int(m.group(1)) if m else None
+
+
+def safe_name(text: str) -> str:
+    """Tira o que não pode ir em nome de arquivo/pasta (Windows + POSIX)."""
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", text).strip()
+
+
+def folder_name(title: str, year: str | None, tmdb_id: int | None = None) -> str:
+    """Nome da pasta do filme: 'Título (Ano) [tmdbid-N]'.
+
+    O [tmdbid-N] deixa o Jellyfin identificar o filme sem depender do título —
+    útil em remakes, títulos localizados e nomes com pontuação diferente.
+    """
+    name = safe_name(f"{title} ({year})" if year else title)
+    return f"{name} [tmdbid-{tmdb_id}]" if tmdb_id else name
 
 
 # -------------------- resolucao de destino --------------------
@@ -299,6 +324,49 @@ def rename_file(destination_id: int | None, folder: str, rel: str, new_name: str
         raise CatalogError(f"Já existe um arquivo chamado '{clean}' nesta pasta")
     src.rename(target)
     return target.relative_to(item_dir).as_posix()
+
+
+def media_path(destination_id: int | None, folder: str, rel: str) -> Path:
+    """Caminho absoluto de um arquivo de VÍDEO do item (para recomprimir)."""
+    dest = _resolve_dest(destination_id)
+    target = _safe_join(Path(dest["path"]), folder, rel)
+    if not target.is_file():
+        raise CatalogError("Arquivo não encontrado")
+    if target.suffix.lower() not in VIDEO_EXTENSIONS:
+        raise CatalogError(f"'{target.name}' não é um arquivo de vídeo")
+    return target
+
+
+def rename_folder(destination_id: int | None, folder: str, new_name: str) -> str:
+    """Renomeia a pasta do filme dentro do mesmo destino. Retorna o novo nome."""
+    dest = _resolve_dest(destination_id)
+    root = Path(dest["path"])
+    src = _safe_join(root, folder)
+    if not src.is_dir():
+        raise CatalogError("Pasta não encontrada")
+    raw = (new_name or "").strip()
+    # rejeita em vez de sanear: um nome com barra/'..' é engano de quem chamou,
+    # e renomear para uma versão "limpa" dele seria surpresa (não segurança)
+    if "/" in raw or "\\" in raw or raw in (".", ".."):
+        raise CatalogError("O nome da pasta não pode conter barras")
+    clean = safe_name(raw)
+    if not clean:
+        raise CatalogError("Nome vazio")
+    target = _safe_join(root, clean)
+    if target == src:
+        return folder
+    if target.exists():
+        raise CatalogError(f"Já existe uma pasta chamada '{clean}'")
+    src.rename(target)
+    invalidate_library()  # o nome da pasta alimenta o cache da coleção
+    return clean
+
+
+def tag_folder_with_tmdb(destination_id: int | None, folder: str, tmdb_id: int) -> str:
+    """Marca a pasta com [tmdbid-N] (o Jellyfin usa isso para identificar o
+    filme). Se já houver um id no nome, é substituído."""
+    title, year = _title_and_year(folder)
+    return rename_folder(destination_id, folder, folder_name(title, year, tmdb_id))
 
 
 def delete_folder(destination_id: int | None, folder: str) -> None:

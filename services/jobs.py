@@ -556,6 +556,159 @@ async def _run_manual(job: dict, video_file: Path, audio_file: Path):
         _fail(job, f"{type(e).__name__}: {e}")
 
 
+async def create_recompress(destination_id: int | None, folder: str, rel: str,
+                            convert: dict, replace: bool = True,
+                            tmdb_id: int | None = None) -> dict:
+    """Recomprime um arquivo que JÁ ESTÁ na coleção, no lugar.
+
+    Sem download e sem merge: só o convert_single com as opções avançadas. A
+    saída vai para um arquivo temporário na mesma pasta; com replace=True o
+    original só é trocado quando o ffmpeg termina — cancelar/falhar deixa o
+    filme intacto (ver _run_recompress).
+    """
+    src = catalog.media_path(destination_id, folder, rel)
+    opts = transcode.validate(convert)
+    if not opts.wants_video_encode() and opts.audio_codec == "keep" \
+            and opts.channels == "keep" and opts.audio_tracks == "all" \
+            and opts.subtitles == "default":
+        raise ValueError("Nenhuma opção de conversão escolhida — não há o que recomprimir")
+
+    dest = store.get_destination(destination_id) if destination_id else store.default_destination()
+    if dest is None:
+        raise ValueError("Nenhum destino cadastrado")
+
+    job = {
+        "id": uuid.uuid4().hex[:10],
+        "tmdb_id": tmdb_id or catalog.tmdb_id_in(folder),
+        "language": "pt",  # só rotula o job; a recompressão não troca idioma
+        "mode": "recompress",
+        "kind": "both",
+        "convert": opts.to_dict(),
+        "status": "merging",
+        "detail": "Preparando recompressão...",
+        "movie": None,
+        "video_torrent": None,
+        "audio_torrent": None,
+        "progress": {"video": None, "audio": None},
+        "output": None,
+        "destination_id": dest["id"],
+        "destination_label": dest["label"],
+        "destination_path": dest["path"],
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "recompress": {"folder": folder, "rel": rel, "replace": bool(replace),
+                       "source": str(src), "source_size": src.stat().st_size},
+        "search": None,
+        "fallbacks": None,
+        "current": None,
+    }
+    _jobs[job["id"]] = job
+    conv = transcode.describe(opts)
+    mode_label = "substituindo o original" if replace else "mantendo o original"
+    _event(job, "status", f"Recompressão criada ({mode_label}) — {folder}/{rel}"
+                          + (f" — conversão: {', '.join(conv)}" if conv else ""))
+    _spawn(job["id"], _run_recompress(job, src))
+    return _public(job)
+
+
+async def _run_recompress(job: dict, src: Path):
+    """Recompressão: TMDB (só para a capa/descrição) -> fila -> convert_single."""
+    # .tmp na MESMA pasta: rename atômico no fim e sem cópia entre discos
+    tmp = src.with_name(f".{src.stem}.recompress-{job['id']}.mkv")
+    try:
+        if job.get("tmdb_id"):
+            try:
+                job["movie"] = await tmdb.details(job["tmdb_id"], job["language"])
+            except Exception:  # noqa: BLE001 - metadado é cosmético aqui
+                pass
+        lock = _get_merge_lock()
+        if lock.locked():
+            _set(job, "merging", "Na fila de conversão...")
+        async with lock:
+            await _recompress(job, src, tmp)
+    except asyncio.CancelledError:
+        tmp.unlink(missing_ok=True)  # cancelado: nada de lixo (o original nem foi tocado)
+        raise
+    except Exception as e:  # noqa: BLE001
+        tmp.unlink(missing_ok=True)
+        _fail(job, f"{type(e).__name__}: {e}")
+
+
+async def _recompress(job: dict, src: Path, tmp: Path):
+    info = job["recompress"]
+    opts = transcode.validate(job["convert"])
+    movie = job.get("movie") or {}
+    # o parcial é o .tmp: o cancel() apaga ele, nunca o filme original
+    job["output"] = str(tmp)
+    job["merge_started_at"] = datetime.now().isoformat(timespec="seconds")
+    _set(job, "merging", f"Recomprimindo {src.name}...")
+
+    def log(msg):
+        job["detail"] = str(msg)
+        _event(job, "merge", str(msg))
+
+    last_persist = [0.0]
+
+    def on_progress(p: dict):
+        job["progress"]["merge"] = p
+        now = time.monotonic()
+        if now - last_persist[0] > 15:
+            last_persist[0] = now
+            store.upsert_job(job)
+
+    try:
+        result = await asyncio.to_thread(
+            transcode.convert_single, str(src), str(tmp), opts,
+            None, movie.get("original_language"),
+            log=log, on_progress=on_progress, on_start=_register_proc(job["id"]))
+    finally:
+        _ffmpeg_procs.pop(job["id"], None)
+    job["progress"]["merge"] = None
+
+    out = Path(result.output)
+    if result.linked:
+        # o plano inteiro virou cópia: o hardlink do convert_single não tem
+        # valor aqui (a origem é o próprio filme) — nada mudou no disco
+        out.unlink(missing_ok=True)
+        job["output"] = str(src)
+        _set(job, "done", "Nada a recomprimir com as opções escolhidas — arquivo mantido")
+        return
+
+    before, after = info["source_size"], out.stat().st_size
+    if after >= before:
+        # recomprimir e ficar MAIOR é o contrário do objetivo: descarta e avisa
+        out.unlink(missing_ok=True)
+        job["output"] = str(src)
+        _set(job, "done", f"Recompressão descartada: o resultado ficou maior "
+                          f"({catalog._human_size(after)} vs {catalog._human_size(before)}) — "
+                          f"arquivo original mantido")
+        return
+
+    if info["replace"]:
+        out.replace(src)  # atômico: o filme nunca some, só troca de conteúdo
+        final = src
+    else:
+        final = _free_name(src.with_name(f"{src.stem} [recomprimido].mkv"))
+        out.replace(final)
+    job["output"] = str(final)
+    saved = before - after
+    _set(job, "done", f"Recomprimido: {catalog._human_size(before)} → "
+                      f"{catalog._human_size(after)} "
+                      f"(-{saved * 100 // before}%, {catalog._human_size(saved)} livres) — "
+                      f"{final.name}")
+    catalog.invalidate_library()
+
+
+def _free_name(path: Path) -> Path:
+    """path, ou 'nome (2).ext', 'nome (3).ext'... se já existir."""
+    if not path.exists():
+        return path
+    for i in range(2, 100):
+        cand = path.with_name(f"{path.stem} ({i}){path.suffix}")
+        if not cand.exists():
+            return cand
+    raise ValueError(f"Não achei um nome livre para {path.name}")
+
+
 # -------------------- acoes da UI --------------------
 
 async def select(job_id: str, audio_id: str | None, video_id: str | None) -> dict | None:
@@ -641,7 +794,8 @@ async def cancel(job_id: str, delete_torrents: bool = False) -> dict | None:
     if was_merging:
         _delete_output(job)
     _cancelling.discard(job_id)
-    if delete_torrents and is_active and not job.get("manual_files"):
+    if delete_torrents and is_active and not job.get("manual_files") \
+            and not job.get("recompress"):
         # limpeza no qBittorrent com teto de tempo: se ele estiver fora do ar,
         # a remoção do job NÃO pode ficar travada esperando o timeout de rede
         for kind in ("video", "audio"):
@@ -674,6 +828,11 @@ async def retry(job_id: str) -> dict | None:
     old = _lookup(job_id)  # jobs em erro/cancelados vivem só no banco agora
     if not old or old["status"] not in ("error", "cancelled"):
         return None
+    if old.get("recompress"):
+        r = old["recompress"]
+        return await create_recompress(old.get("destination_id"), r["folder"], r["rel"],
+                                       old["convert"], r.get("replace", True),
+                                       old.get("tmdb_id"))
     if old.get("manual_files"):
         return await create_manual(old["tmdb_id"], old["language"],
                                    old["manual_files"]["video"],
@@ -1012,7 +1171,7 @@ async def _start_download(job: dict, a: dict | None, v: dict | None):
                                 "size": a["size"], "score": a["score"], "edition": a["edition"],
                                 "id": a.get("id"), "tracker": a.get("tracker")}
     if v:
-        _event(job, "chosen", f"🎥 Vídeo: {v['title']} (score {v['score']}, "
+        _event(job, "chosen", f"Vídeo: {v['title']} (score {v['score']}, "
                               f"{v['seeders']} seeds, corte {v['edition'] or 'normal'})")
         job["video_torrent"] = {"title": v["title"], "seeders": v["seeders"],
                                 "size": v["size"], "score": v["score"], "edition": v["edition"],
@@ -1198,7 +1357,7 @@ async def _wait_downloads(job: dict) -> dict:
                 torrents = await _qbit.info_by_tag(_tag(job, kind))
                 if conn_lost:
                     conn_lost = False
-                    _event(job, "qbit", "✅ Conexão com o qBittorrent restabelecida")
+                    _event(job, "qbit", "Conexão com o qBittorrent reestabelecida")
                     job["detail"] = ("Baixando torrent..." if len(needed) == 1
                                      else "Baixando torrents...")
                     # o tempo desconectado não conta como stall nem como sumiço
@@ -1273,9 +1432,8 @@ async def _wait_downloads(job: dict) -> dict:
             # qBittorrent fora do ar / rede caiu: avisa uma vez e segue tentando
             if not conn_lost:
                 conn_lost = True
-                _event(job, "qbit",
-                       f"⚠️ Perdi a conexão com o qBittorrent ({type(e).__name__}: {e}) — "
-                       f"mantendo o download e tentando reconectar...")
+                reason = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                _event(job, "qbit", f"Conexão com o qBittorrent perdida ({reason})")
             job["detail"] = "Sem conexão com o qBittorrent — tentando reconectar..."
         if len(paths) < len(needed):
             await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
@@ -1392,14 +1550,15 @@ async def _deliver_single(job: dict, files: dict):
     _event(job, "info", f"Arquivo baixado: {src_file}")
 
     movie = job["movie"]
-    safe_title = re.sub(r'[<>:"/\\|?*]', "", f"{movie['original_title']} ({movie['year']})")
+    safe_title = catalog.safe_name(f"{movie['original_title']} ({movie['year']})")
+    folder = catalog.folder_name(movie["original_title"], movie["year"], job.get("tmdb_id"))
     tag = "orig" if job["kind"] == "original" else job["language"]
     dest_dir = Path(job.get("destination_path") or config.OUTPUT_DIR)
     label = "original" if job["kind"] == "original" else f"dublado ({job['language']})"
 
     if job.get("convert"):
         opts = transcode.validate(job["convert"])
-        output = dest_dir / safe_title / f"{safe_title} [{tag}].mkv"
+        output = dest_dir / folder / f"{safe_title} [{tag}].mkv"
         # registra o destino antes do ffmpeg: cancel() apaga o parcial (ver _merge)
         job["output"] = str(output)
         job["merge_started_at"] = datetime.now().isoformat(timespec="seconds")
@@ -1432,7 +1591,7 @@ async def _deliver_single(job: dict, files: dict):
         await _cleanup_torrents(job)
         return
 
-    output = dest_dir / safe_title / f"{safe_title} [{tag}]{src_file.suffix}"
+    output = dest_dir / folder / f"{safe_title} [{tag}]{src_file.suffix}"
     job["merge_started_at"] = datetime.now().isoformat(timespec="seconds")
     _set(job, "merging", f"Entregando {label} no destino...")
 
@@ -1453,10 +1612,11 @@ async def _merge(job: dict, video_file: Path, audio_file: Path,
     _event(job, "merge", f"Arquivo de áudio: {audio_file}")
 
     movie = job["movie"]
-    safe_title = re.sub(r'[<>:"/\\|?*]', "", f"{movie['original_title']} ({movie['year']})")
+    safe_title = catalog.safe_name(f"{movie['original_title']} ({movie['year']})")
     # subpasta por filme dentro do destino escolhido (bom para Jellyfin/Plex)
+    folder = catalog.folder_name(movie["original_title"], movie["year"], job.get("tmdb_id"))
     dest_dir = Path(job.get("destination_path") or config.OUTPUT_DIR)
-    output = dest_dir / safe_title / f"{safe_title} [{job['language']}+orig].mkv"
+    output = dest_dir / folder / f"{safe_title} [{job['language']}+orig].mkv"
     # registra o destino JÁ: se o usuário cancelar durante o ffmpeg, o cancel()
     # precisa saber qual arquivo parcial apagar
     job["output"] = str(output)
