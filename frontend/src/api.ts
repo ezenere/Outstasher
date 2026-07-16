@@ -162,6 +162,9 @@ export interface TorrentInfo {
   size: number
   score: number
   edition?: string | null
+  /** id/tracker do candidato escolhido — casam a linha exata em uso na tabela. */
+  id?: string | null
+  tracker?: string | null
 }
 
 export interface Candidate {

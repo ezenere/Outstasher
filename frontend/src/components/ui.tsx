@@ -345,17 +345,24 @@ interface CandidatesTableProps {
   selectedId?: string
   onSelect?: (id: string) => void
   showReason?: boolean
-  /** Título do torrent em uso agora: marca a linha com o bookmark. */
-  currentTitle?: string | null
+  /** Torrent em uso agora: marca a linha com o bookmark. Casa por `id` (único);
+   *  sem id, cai para título + tracker para não marcar releases homônimos de
+   *  outros trackers. */
+  current?: { id?: string | null; title: string; tracker?: string | null } | null
   /** Cola a tabela no container-pai (sem margem/borda própria — ver Collapsible flush). */
   flush?: boolean
 }
 
 export function CandidatesTable({
-  candidates, selectable, selectedId, onSelect, showReason, currentTitle, flush,
+  candidates, selectable, selectedId, onSelect, showReason, current, flush,
 }: CandidatesTableProps) {
   if (!candidates.length)
     return <div className={flush ? 'px-3 py-2' : ''}><Empty>Nenhum candidato.</Empty></div>
+  const matchesCurrent = (c: Candidate) => {
+    if (!current) return false
+    if (current.id && c.id) return c.id === current.id     // id é único: match exato
+    return c.title === current.title && (c.tracker ?? null) === (current.tracker ?? null)
+  }
   return (
     <div className={`max-h-72 overflow-auto ${flush ? 'rounded-b-xl' : 'mb-2 rounded-lg border border-zinc-800'}`}>
       <table className="w-full border-collapse text-xs">
@@ -373,7 +380,7 @@ export function CandidatesTable({
         </thead>
         <tbody>
           {candidates.map((c, i) => {
-            const isCurrent = !!currentTitle && c.title === currentTitle
+            const isCurrent = matchesCurrent(c)
             const rowCls = c.chosen
               ? 'text-emerald-400 font-semibold'
               : c.rejected
@@ -391,8 +398,6 @@ export function CandidatesTable({
                 <td className="px-2 py-1.5">
                   {selectable && c.id ? (
                     <input type="radio" checked={selectedId === c.id} onChange={() => onSelect?.(c.id!)} />
-                  ) : isCurrent ? (
-                    <BookmarkSolid width={14} height={14} className="text-rose-400" />
                   ) : c.chosen ? (
                     <Check width={14} height={14} className="text-emerald-400" />
                   ) : null}

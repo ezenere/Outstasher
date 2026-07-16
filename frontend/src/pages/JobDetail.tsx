@@ -179,7 +179,7 @@ export default function JobDetail() {
   function switchControls(kind: 'video' | 'audio') {
     if (job?.status !== 'downloading') return null
     const list = kind === 'video' ? job.search?.video : job.search?.audio
-    const currentTitle = (kind === 'video' ? job.video_torrent : job.audio_torrent)?.title
+    const current = kind === 'video' ? job.video_torrent : job.audio_torrent
     return (
       <div className="mt-1.5">
         <div className="flex flex-wrap items-center gap-2">
@@ -205,7 +205,7 @@ export default function JobDetail() {
             <div className="mb-1 text-xs text-zinc-500">
               O torrent atual está destacado. Clique em outro para trocar.
             </div>
-            <CandidatesTable candidates={list} selectable currentTitle={currentTitle} onSelect={(cid) => trySwitch(kind, cid)} />
+            <CandidatesTable candidates={list} selectable current={current} onSelect={(cid) => trySwitch(kind, cid)} />
           </div>
         )}
       </div>
@@ -395,7 +395,7 @@ export default function JobDetail() {
         <section className="mt-6 space-y-2">
           {candEvents.map((ev, i) => {
             // torrent em uso na role desta avaliação (áudio/vídeo) — destaca o bookmark
-            const inUse = (ev.data!.role === 'video' ? job.video_torrent : ev.data!.role === 'audio' ? job.audio_torrent : null)?.title
+            const inUse = ev.data!.role === 'video' ? job.video_torrent : ev.data!.role === 'audio' ? job.audio_torrent : null
             return (
               <Collapsible
                 key={i}
@@ -403,7 +403,7 @@ export default function JobDetail() {
                 title={ev.message}
                 right={<span className="text-xs text-zinc-500">{ev.data!.candidates!.length} candidatos</span>}
               >
-                <CandidatesTable candidates={ev.data!.candidates!} showReason currentTitle={inUse} flush />
+                <CandidatesTable candidates={ev.data!.candidates!} showReason current={inUse} flush />
               </Collapsible>
             )
           })}

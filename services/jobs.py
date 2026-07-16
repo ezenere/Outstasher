@@ -1009,12 +1009,14 @@ async def _start_download(job: dict, a: dict | None, v: dict | None):
         _event(job, "chosen", f"🔊 Áudio: {a['title']} (score {a['score']}, "
                               f"{a['seeders']} seeds, corte {a['edition'] or 'normal'})")
         job["audio_torrent"] = {"title": a["title"], "seeders": a["seeders"],
-                                "size": a["size"], "score": a["score"], "edition": a["edition"]}
+                                "size": a["size"], "score": a["score"], "edition": a["edition"],
+                                "id": a.get("id"), "tracker": a.get("tracker")}
     if v:
         _event(job, "chosen", f"🎥 Vídeo: {v['title']} (score {v['score']}, "
                               f"{v['seeders']} seeds, corte {v['edition'] or 'normal'})")
         job["video_torrent"] = {"title": v["title"], "seeders": v["seeders"],
-                                "size": v["size"], "score": v["score"], "edition": v["edition"]}
+                                "size": v["size"], "score": v["score"], "edition": v["edition"],
+                                "id": v.get("id"), "tracker": v.get("tracker")}
 
     # reservas do mesmo corte, para o watchdog trocar se o download travar
     search = job.get("search") or {"audio": [], "video": []}
