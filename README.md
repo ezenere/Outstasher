@@ -10,51 +10,36 @@ torrent para cada uma, e junta tudo em um único arquivo: **melhor imagem + todo
 
 ## Fluxo
 
-1. Você escolhe um filme (busca ou populares do TMDB) e um idioma de áudio no frontend.
-2. O serviço busca no **Jackett**:
-   - o título traduzido / com marcadores de idioma (dublado, dual, castellano...) →
-     melhor **qualidade de áudio** (TrueHD, DTS, EAC3...). Releases com o
-     **título no idioma dublado** têm preferência absoluta; título original +
-     marcador é só fallback — e marcadores fortes ("Dublado",
-     "Dual Áudio" com acento) ganham bônus sobre o "dual" genérico, que pode
-     ser qualquer par de idiomas. Acentos e entidades HTML são normalizados
-     ("Tóquio" = "Toquio" = "T&amp;oacute;quio"). Um título só **legendado**
-     ("legendado", "leg", "subbed", "VOSE"...) sem nenhuma marca de dublagem é
-     descartado — tem áudio original, não serve como faixa dublada;
-   - o título original → melhor **qualidade de vídeo** (resolução, remux/bluray, seeds),
-     **restrito ao mesmo corte** da versão dublada: se o dublado é o corte normal, um
-     "extended/director's cut" original é rejeitado (e vice-versa) — cortes diferentes
-     não alinham. Se não houver vídeo com o corte do melhor áudio, tenta o próximo
-     candidato de áudio.
-3. Manda os dois torrents para o **qBittorrent** via Web API e acompanha o progresso.
-   Se o Jackett devolver um link HTTP da própria API (em vez de um `magnet:`), o
-   serviço resolve antes de mandar: segue o redirect (que costuma virar um
-   `magnet:`) ou baixa os bytes do `.torrent` e envia como arquivo — o qBittorrent
-   nem sempre segue esse redirect sozinho.
-4. Quando os dois terminam, faz o merge internamente:
-   - se o arquivo de melhor vídeo **já tem áudio no idioma alvo**, não faz merge —
-     cria um **hardlink** no destino (fallback: cópia; nunca symlink);
-   - senão: melhor áudio **por língua** entre os dois arquivos, legendas só das
-     línguas com áudio, capítulos, offset medido por **GCC-PHAT** em duas janelas:
-     - offset **constante** (o caso comum): sync aplicado no container via
-       `-itsoffset` com **stream copy total** — a trilha dublada
-       (TrueHD/DTS/EAC3...) sobrevive intacta, sem re-encode;
-     - offset com **drift** (janelas divergem): correção via `-filter_complex`
-       com re-encode (AAC se mono/estéreo, AC3 se multicanal — preserva a
-       ordem dos canais surround).
-
-Nas buscas por áudio dublado, torrents cujo nome traz o **ano do filme**
-(`(2014)`, `.2014.`) ganham um bônus de score — é um sinal confiável de que o
-release é do filme certo.
+1. Você escolhe um filme (busca ou populares do TMDB) e um idioma de áudio.
+2. Busca no **Jackett**:
+   - título traduzido / com marcadores de idioma → melhor **áudio**. Título no
+     idioma dublado tem preferência; título original + marcador é fallback.
+     Marcadores fortes ("Dublado", "Dual Áudio") valem mais que "dual" genérico.
+     Torrents só **legendado** (sem marca de dublagem) são descartados. Torrents
+     com o **ano do filme** no nome ganham bônus de score.
+   - título original → melhor **vídeo**, **restrito ao mesmo corte** do áudio
+     (cortes diferentes não alinham). Sem vídeo do corte do melhor áudio, tenta o
+     próximo candidato de áudio.
+3. Envia os dois torrents ao **qBittorrent** via Web API. Se o Jackett devolve um
+   link HTTP em vez de `magnet:`, o serviço resolve antes (segue o redirect ou
+   baixa o `.torrent` e envia como arquivo — o qBittorrent nem sempre segue).
+4. Quando terminam, faz o merge:
+   - se o melhor vídeo **já tem o áudio alvo**, pula o merge e cria um **hardlink**
+     no destino (fallback: cópia; nunca symlink);
+   - senão: melhor áudio por língua, legendas só das línguas com áudio, capítulos,
+     e offset medido por **GCC-PHAT** em duas janelas. Offset **constante**: sync
+     no container via `-itsoffset`, **stream copy total** (trilha dublada intacta,
+     sem re-encode). Com **drift** (janelas divergem): re-encode via
+     `-filter_complex` (AAC mono/estéreo, AC3 multicanal para preservar o layout
+     surround).
 
 ## Requisitos
 
 - Python 3.11+
 - Node 18+ (para buildar o frontend React; `python main.py` builda sozinho)
-- [ffmpeg](https://ffmpeg.org/) (ffmpeg + ffprobe no PATH). As **opções avançadas
-  de conversão** só oferecem os codecs que o *seu* ffmpeg sabe encodar (checado em
-  runtime): libx264/libx265, libsvtav1/libaom/librav1e (AV1), libvvenc (VVC),
-  aac/ac3/flac/libopus/libvorbis
+- [ffmpeg](https://ffmpeg.org/) (ffmpeg + ffprobe no PATH). As opções avançadas
+  de conversão só oferecem os codecs que o seu ffmpeg tem encoder (detectado em
+  runtime).
 - [Jackett](https://github.com/Jackett/Jackett) rodando com indexadores configurados
 - [qBittorrent](https://www.qbittorrent.org/) com a Web UI habilitada
   (Ferramentas → Opções → Web UI)
@@ -81,16 +66,12 @@ faz proxy de `/api` para o backend e recarrega o frontend a cada mudança).
 
 ### Senha de acesso
 
-Na primeira vez que abrir, o serviço pede para **criar uma senha** (estilo
-Jackett/qBittorrent). Depois disso, toda chamada da API exige estar logado. A
-senha é guardada com hash PBKDF2 na tabela `settings` do `jobs.db` (junto de uma
-`API_KEY` gerada no setup, que também vale como token permanente via header
-`Authorization: Bearer <api_key>` para scripts).
+No primeiro acesso o serviço pede para criar uma senha; depois disso a API exige
+login. O setup também gera uma `API_KEY` que vale como token permanente via
+header `Authorization: Bearer <api_key>` (para scripts).
 
-O login gera um token de sessão guardado no `sessionStorage` do navegador:
-fechou o navegador/aba, precisa digitar de novo; reiniciar o servidor também
-derruba as sessões. Trocar a senha (aba **Configurações → Senha de acesso**)
-desconecta as outras sessões abertas.
+O login gera um token de sessão no `sessionStorage`: fechar o navegador ou
+reiniciar o servidor derruba a sessão. Trocar a senha desconecta as outras.
 
 ## Docker
 
@@ -101,158 +82,115 @@ cp .env.example .env      # edite com suas chaves/URLs
 docker compose up -d --build
 ```
 
-Abra http://localhost:8008. O build é multi-stage: o frontend é compilado num
-estágio Node e só o `dist` vai para a imagem final Python — nada de Node/npm no
-runtime. O `ffmpeg`/`ffprobe` já vêm instalados.
+Abra http://localhost:8008. Imagem multi-stage (Node builda o front, runtime só
+Python + ffmpeg).
 
 Pontos de atenção do `.env`/`docker-compose.yml`:
 
-- **qBittorrent / Jackett na sua máquina**: dentro do container `localhost` é o
-  *próprio container*, não o host. Troque para `host.docker.internal` nas URLs
-  (`QBIT_URL`, `JACKETT_URL`). O compose já mapeia esse nome no Linux via
-  `extra_hosts`.
-- **Pastas de download e destino**: o container precisa enxergar os mesmos
-  arquivos que o qBittorrent baixou. Monte-as no compose e use os caminhos *de
-  dentro do container* (`/downloads`, `/output`) ao cadastrar destinos na UI.
-  Ajuste `DOWNLOADS_DIR`/`OUTPUT_DIR_HOST` no `.env` para os caminhos reais da
-  sua máquina; o "caminho local" do destino de torrents deve ser `/downloads`
-  (ou o que você montou).
-- **Persistência**: o `jobs.db` fica no volume `downloader-data` (`/data` no
-  container, via `DB_DIR`), então sobrevive a `docker compose down`/rebuild.
+- **qBittorrent / Jackett na sua máquina**: use `host.docker.internal` nas URLs
+  (`QBIT_URL`, `JACKETT_URL`) — dentro do container `localhost` é o container. O
+  compose já mapeia esse nome no Linux via `extra_hosts`.
+- **Pastas de download e destino**: monte-as no compose e cadastre os destinos na
+  UI com os caminhos *de dentro do container* (`/downloads`, `/output`). Ajuste
+  `DOWNLOADS_DIR`/`OUTPUT_DIR_HOST` no `.env`; o "caminho local" do destino de
+  torrents deve ser `/downloads`.
+- **Persistência**: `jobs.db` fica no volume `downloader-data` (`/data`, via
+  `DB_DIR`).
 
-Parar: `docker compose down` (mantém o volume). Ver logs: `docker compose logs -f`.
+Parar: `docker compose down`. Logs: `docker compose logs -f`.
 
-Busque um filme, clique nele, escolha o idioma e o **destino**, e escolha o que
-baixar. Resultados da busca que **já estão na coleção** (existe uma pasta do filme
-em algum destino) ganham um selo *✓ Na coleção* — a checagem usa um cache em
-memória de 30 min, refeito sob demanda na próxima busca depois que vence ou
-quando algo muda de verdade (um job conclui, uma pasta é removida, um destino é
-editado).
+## Downloads
+
+Busque um filme, clique nele, escolha o idioma e o **destino**. Resultados que
+já estão na coleção ganham um selo *✓ Na coleção* (ver *Cache da coleção*).
 
 Opções de download:
 
-- **Baixar e fazer merge** — baixa a versão original + a dublada e junta tudo
-  num MKV (o fluxo completo descrito acima).
-- **🎥 Só original** — baixa apenas o melhor vídeo no idioma original e entrega
-  o arquivo direto no destino, sem merge.
-- **🔊 Só dublado** — baixa apenas a melhor versão dublada e entrega direto, sem
-  merge.
+- **Baixar e fazer merge** — original + dublada, junta num MKV (fluxo acima).
+- **🎥 Só original** / **🔊 Só dublado** — baixa uma versão só e entrega por
+  hardlink (fallback cópia) numa subpasta do destino, sem merge.
+- **Apenas baixar** — só baixa pelo qBittorrent e conclui; sem merge/hardlink/
+  cópia. Os arquivos ficam onde o qBittorrent os deixou (destino final não se
+  aplica).
 
-Nos dois modos "só um", o arquivo baixado é **hardlinkado** (fallback cópia) para
-o destino, numa subpasta própria — sem re-encodar nada. O modo manual (escolher
-torrents) e o destino dos torrents funcionam igual nos três. O andamento aparece
-na aba *Downloads*. O arquivo final vai para a pasta de destino escolhida (veja
-*Destinos* abaixo).
-
-Há também a opção **"Apenas baixar"**: baixa a(s) versão(ões) escolhida(s) pelo
-qBittorrent e conclui aí mesmo — sem merge, hardlink ou cópia. Os arquivos ficam
-onde o qBittorrent os deixou (seguem seedando), então o destino do arquivo final
-não se aplica.
+O modo manual e o destino dos torrents funcionam igual em todas. O andamento
+aparece na aba *Downloads*.
 
 ### Opções avançadas de conversão
 
-Um bloco recolhível **"Opções avançadas"** (no modal de download e no de
-conversão manual) permite converter o resultado em vez de só copiá-lo — útil
-quando o bitrate está desnecessariamente alto ou você quer economizar espaço
-naquele filme. Sem marcar **"Habilitar opções avançadas"**, tudo fica desabilitado
-e a conversão sai como sempre (stream copy). As opções:
+Bloco **"Opções avançadas"** (no modal de download e no de conversão manual) para
+converter o resultado em vez de copiá-lo. Desabilitado por padrão (sai em stream
+copy). Opções:
 
-- **Codec de vídeo**: manter original, VVC/H.266, AV1, HEVC, H.264. A lista é
-  filtrada pelas **capacidades do ffmpeg do servidor** (`GET /api/capabilities`) —
-  codec sem encoder disponível aparece desabilitado.
-- **Preset**: cinco níveis (muito rápido → muito lento) mapeados por encoder
-  (`medium/slow` no x264/x265, `-preset 10..2` no SVT-AV1, `-cpu-used` no aom).
-- **Resolução**: 8K/4K/Full HD/HD/SD. O corte é por **largura** com 8% de
-  tolerância (filme scope 3840×1608 conta como 4K; DCI 4096×2160 não vira 2160p à
-  força) e **nunca aumenta** a resolução da fonte.
-- **Qualidade**: bitrate alvo (slider 100 kbps–150 Mbps, escala logarítmica) ou
-  **CRF** (qualidade constante — o encoder gasta só o bitrate necessário em cada
-  cena, melhor para economizar espaço).
-- **Profundidade de cor**: manter / 10-bit / 8-bit. (H.264 evita 10-bit por
-  padrão — High10 quase nada reproduz.)
-- **Áudios**: manter todos, ou **apenas original + dublagem** (o idioma original
-  vem do TMDB; faixas de idioma desconhecido são sempre mantidas).
-- **Codec de áudio**: manter / AC3 / FLAC / Opus / OGG Vorbis / AAC — também
-  filtrado pelas capacidades do servidor. A UI avisa dos limites de canais (AC3
-  até 5.1, AAC só estéreo, FLAC lossless sem bitrate).
-- **Canais**: manter / máx. 5.1 / estéreo (downmix).
+- **Codec de vídeo**: manter / VVC / AV1 / HEVC / H.264 (só os que o ffmpeg tem
+  encoder aparecem).
+- **Preset**: muito rápido → muito lento.
+- **Resolução**: 8K/4K/Full HD/HD/SD. Corta por **largura** com 8% de tolerância
+  e **nunca aumenta** a resolução da fonte.
+- **Qualidade**: bitrate alvo (100 kbps–150 Mbps) ou **CRF**.
+- **Profundidade de cor**: manter / 10-bit / 8-bit.
+- **Áudios**: manter todos, ou **apenas original + dublagem** (idioma original vem
+  do TMDB; faixas de idioma desconhecido são sempre mantidas).
+- **Codec de áudio**: manter / AC3 / FLAC / Opus / OGG Vorbis / AAC.
+- **Canais**: manter / máx. 5.1 / estéreo.
 - **Bitrate de áudio** por faixa e **legendas** (padrão / todas / nenhuma).
 
-Toda validação acontece **no servidor, com o arquivo real**, seguindo a regra de
-nunca "converter para cima": se o bitrate pedido for maior do que a fonte
-entrega, o stream original é mantido; se o re-encode for inevitável por outro
-motivo (mudança de codec/resolução/canais), o alvo é rebaixado ao teto estimado
-da fonte (ajustado pela redução de resolução). Se o plano inteiro cair em cópia,
-a saída volta a ser um hardlink. Como jobs de torrent só têm o arquivo em mãos
-**depois** do download, o resultado dessas regras ("vídeo mantido", "alvo
-rebaixado") aparece nos eventos do job (🔍). Payload inválido (codec sem encoder,
-bitrate fora da faixa) é recusado na criação do job.
+A validação roda **no servidor, com o arquivo real**, e nunca "converte para
+cima": se o bitrate pedido excede o da fonte, mantém o stream original; se o
+re-encode é inevitável por outro motivo, rebaixa o alvo ao teto estimado da
+fonte. Se o plano inteiro vira cópia, a saída volta a ser hardlink. Em jobs de
+torrent o arquivo só existe **depois** do download, então o resultado dessas
+regras aparece nos eventos do job.
 
 ### Conversão manual (Catálogo → Adicionar filme)
 
-Na aba **Catálogo**, o botão **"+ Adicionar filme"** cria uma conversão a partir
-de dois arquivos que já estão no disco do servidor: você escolhe o filme no TMDB,
-digita os caminhos do arquivo de **vídeo** e do de **áudio dublado**, o destino e
-(opcionalmente) as mesmas opções avançadas acima. É o mesmo pipeline dos jobs
-normais — alinhamento, fila de conversão, pausa por drift, progresso no detalhe —
-só que sem busca nem torrents. Arquivos inexistentes ou que não são de vídeo/áudio
-são recusados na hora (via `ffprobe`).
+O botão **"+ Adicionar filme"** cria uma conversão a partir de dois arquivos já
+no disco do servidor (filme do TMDB + caminhos de vídeo e áudio dublado + destino
++ opcionalmente as opções avançadas). Mesmo pipeline dos jobs normais, sem busca
+nem torrents. Arquivos inexistentes ou não-mídia são recusados na hora (ffprobe).
 
-O frontend é React + TypeScript + Tailwind + Iconoir + React Router (`frontend/`),
-com rotas `/` (filmes), `/jobs` (downloads), `/jobs/:id` (detalhe/lupa — é também
-onde se escolhe os torrents no modo manual), `/catalog` (biblioteca já baixada) e
-`/settings` (destinos do arquivo final e dos torrents). O `python main.py` roda
-`npm install`/`npm run build` automaticamente quando o build está ausente ou desatualizado.
+### Cache da coleção
 
-Os jobs ficam salvos em **SQLite** (`jobs.db`, WAL): o documento do job numa
-tabela e os eventos em outra, append-only — escrita atômica, sem risco de
-corromper o histórico num crash. Se o servidor
-reiniciar durante um download, ele retoma o acompanhamento sozinho.
+O selo *✓ Na coleção* na busca vem de um scan das pastas dos destinos, mantido em
+memória por 30 min. Refeito sob demanda na próxima busca após vencer, ou quando
+algo muda (job conclui, pasta removida, destino editado).
 
-### Modo manual (toggle na barra de seleção)
+### Modo manual
 
 Marcando **"Escolher torrents manualmente"**, o job faz as buscas e para em
-*Aguardando escolha*: o botão **Escolher** abre as tabelas de candidatos viáveis
-(áudio e vídeo, com corte e score) e você decide o que baixar. Se os cortes
-escolhidos forem diferentes, a UI avisa antes de confirmar.
+*Aguardando escolha*: **Escolher** abre as tabelas de candidatos (áudio e vídeo,
+com corte e score) para você decidir. Cortes diferentes geram aviso antes de
+confirmar.
 
 ### Watchdog de download travado
 
-Se um download ficar `STALL_TIMEOUT_MINUTES` (padrão 15) sem progresso, o serviço
-remove o torrent e troca automaticamente pelo próximo candidato viável **do mesmo
-corte**. Sem reserva disponível, ele avisa na timeline e continua esperando.
+Download parado por `STALL_TIMEOUT_MINUTES` (padrão 15) é trocado pelo próximo
+candidato **do mesmo corte**. Sem reserva, avisa e continua esperando.
 
 ### Validação do alinhamento
 
-O offset é medido em duas janelas (início e ~60% do filme). Se divergirem, é
-sinal de corte diferente ou drift — o merge continua com o offset do início, mas
-o aviso fica registrado na timeline e nas notas do job.
+O offset é medido em duas janelas (início e ~60% do filme). Se divergirem (corte
+diferente ou drift), o merge continua com o offset do início e registra o aviso.
 
 ### Limpeza pós-merge (QBIT_CLEANUP)
 
-`keep` (padrão) mantém tudo seedando; `remove` remove os torrents mantendo os
-arquivos; `remove_data` apaga também os dados. Quando o merge é pulado (o vídeo
-já tinha o áudio alvo), a saída é um **hardlink** — que compartilha os bytes com
-o download, então apagar o arquivo do qBittorrent com `remove_data` não quebra a
-saída (o dado sobrevive pelo hardlink). No fallback de cópia, a saída é
-independente de qualquer forma.
+`keep` (padrão) mantém seedando; `remove` remove os torrents mantendo os arquivos;
+`remove_data` apaga também os dados. Quando o merge é pulado (hardlink), o dado
+sobrevive pelo hardlink mesmo com `remove_data`.
 
 ### Cancelar / repetir
 
-Cada card tem **✕** (remove o job, perguntando se apaga também os torrents) e,
-para jobs com erro ou cancelados, **↻** (cria um novo job com os mesmos
-parâmetros).
+Cada card tem **✕** (remove o job; pergunta se apaga os torrents) e, para
+erro/cancelado, **↻** (recria com os mesmos parâmetros). Cancelar durante a
+conversão mata o ffmpeg e apaga o arquivo parcial.
 
-### Detalhes de um job (🔍)
+### Detalhes de um job
 
-Cada card de download tem um botão de lupa que abre um painel ao vivo (atualiza a
-cada 2s) com: barras de download com velocidade/ETA/seeds, **todos os candidatos
-avaliados** em cada busca (com score e motivo de rejeição — "sem seeders",
-"sem marcador de idioma", "título não bate"...), qual foi escolhido e por quê,
-e a timeline completa de eventos, incluindo o log do merge. Durante a conversão,
-uma **barra de progresso do ffmpeg** (via `-progress`) mostra a posição no filme,
-velocidade (x tempo real), fps, tamanho escrito, bitrate e ETA — no card da lista
-e no detalhe.
+O botão de lupa abre um painel ao vivo: barras de download (velocidade/ETA/seeds),
+todos os candidatos avaliados por busca (com score e motivo de rejeição), o que
+foi escolhido, e a timeline de eventos com o log do merge. Durante a conversão,
+uma barra de progresso do ffmpeg mostra posição no filme, velocidade, fps,
+tamanho, bitrate e ETA.
 
 ## Configurações
 
@@ -261,86 +199,71 @@ gerenciáveis pela interface (adicionar/editar/remover, marcar padrão).
 
 ### Destinos do arquivo final
 
-Pastas onde o filme finalizado pode ser salvo. Ao criar um download, o destino
-padrão vem pré-selecionado e você pode trocar antes de iniciar. Cada filme sai
-numa subpasta própria dentro do destino escolhido (bom para o Jellyfin/Plex
-parsearem o nome). O destino fica registrado no job, então repetir um job (↻)
-mantém a mesma pasta. O `OUTPUT_DIR` do `.env` é usado só para criar o destino
-"Padrão" na primeira execução.
+Pastas onde o filme finalizado pode ser salvo. Cada filme sai numa subpasta
+própria (para o Jellyfin/Plex parsearem o nome). O destino fica registrado no
+job (repetir um job mantém a mesma pasta). O `OUTPUT_DIR` do `.env` só cria o
+destino "Padrão" na primeira execução.
 
-Cada destino mostra o **uso do disco** do volume que o contém (na visão desta
-máquina): uma barra `usado / total · livres` nas Configurações e o espaço livre
-compacto (`350 GB livre`) ao lado do seletor na hora do download. A barra fica
-amarela acima de 75% e vermelha acima de 90%. Se o caminho ainda não existir, o
-serviço sobe pelos diretórios pais até achar um volume montado. Nos destinos de
-torrents, o disco mostrado é o do **caminho local** (onde os downloads caem nesta
-máquina).
+Cada destino mostra o **uso do disco** do volume (barra `usado / total · livre`
+nas Configurações; espaço livre ao lado do seletor no download). Se o caminho
+ainda não existe, sobe pelos pais até achar um volume montado.
 
 ### Destinos dos torrents (qBittorrent)
 
-Cada destino de torrents tem duas partes:
+Cada destino tem duas partes:
 
-- **Caminho no qBittorrent** (`save_path`): onde o qBittorrent grava os torrents,
-  do ponto de vista *dele* (vazio = pasta padrão do qBittorrent). Ao baixar, o
-  serviço manda esse caminho no `add` e desliga o auto-management só nesses torrents.
-- **Caminho local**: onde a mesma pasta está montada *nesta máquina* — usado para
-  traduzir o `content_path` que a API do qBittorrent reporta e achar o arquivo
-  para o merge. Deixe vazio se o qBittorrent roda na mesma máquina/mesmo caminho.
+- **Caminho no qBittorrent** (`save_path`): onde o qBittorrent grava, do ponto de
+  vista dele (vazio = pasta padrão). Enviado no `add`, com auto-management
+  desligado só nesses torrents.
+- **Caminho local**: onde essa pasta está montada *nesta máquina* — traduz o
+  `content_path` que a API reporta para achar o arquivo. Vazio se o qBittorrent
+  roda na mesma máquina/mesmo caminho.
 
-O par `save_path → caminho local` substitui o antigo `QBIT_PATH_MAP` por
-download. Na criação do job você escolhe o **destino dos torrents** (padrão
-pré-selecionado); sem nenhum cadastrado, usa a pasta padrão do qBittorrent e o
-`QBIT_PATH_MAP` global do `.env` como fallback. `QBIT_SAVE_PATH`/`QBIT_PATH_MAP`
-do `.env` só semeiam o destino de torrents "Padrão (.env)" na primeira execução.
-
-Dentro do caminho local, o serviço pega o maior arquivo de vídeo (ignorando "sample").
+Na criação do job você escolhe o destino dos torrents; sem nenhum cadastrado, usa
+a pasta padrão do qBittorrent e o `QBIT_PATH_MAP` global do `.env` como fallback.
+`QBIT_SAVE_PATH`/`QBIT_PATH_MAP` só semeiam o destino "Padrão (.env)" na primeira
+execução. Dentro do caminho local, pega o maior arquivo de vídeo (ignorando
+"sample").
 
 ### Catálogo
 
-A aba **Catálogo** lê uma pasta de destino e lista os filmes já baixados (cada
-subpasta é um filme), com a barra de uso do disco do destino no topo. Clicando num item abre o detalhe: correspondência no TMDB
-(pôster, título original, nota, sinopse), tamanho total, e a lista de arquivos.
-Cada arquivo é um **dropdown** — expandindo, mostra o `ffprobe` parseado em
-detalhe: container, bitrate total, capítulos e cada track (vídeo com resolução,
-FPS, HDR/10-bit, espaço de cor, perfil/nível; áudio com layout de canais, sample
-rate, bitrate; legendas com idioma/forced/SDH), além dos campos crus do ffprobe.
-Dá para **renomear** ou **remover** um arquivo individual, ou remover a **pasta
-inteira** do filme. Caminhos são validados contra traversal — nada fora do
-destino é tocado. É também aqui que fica o **"+ Adicionar filme"** (conversão
-manual, descrita acima).
+Lista os filmes de uma pasta de destino (cada subpasta é um filme). Cada arquivo
+é um dropdown com o `ffprobe` parseado: container, bitrate, capítulos e cada
+track (vídeo: resolução/FPS/HDR/10-bit/cor/perfil; áudio: canais/sample
+rate/bitrate; legendas: idioma/forced/SDH). Dá para **renomear**/**remover** um
+arquivo ou remover a **pasta inteira** (caminhos validados contra traversal).
+Também é aqui que fica o **"+ Adicionar filme"** (conversão manual).
 
 ## merge.py avulso
 
-O merge também funciona como ferramenta independente:
+O merge também roda como ferramenta independente:
 
 ```sh
 python merge.py "filme.1080p.mkv" "filme.dublado.mkv" "resultado.mkv" --audio-lang pt
 ```
 
-- Escolhe automaticamente qual dos dois tem a melhor imagem.
-- Melhor áudio por língua entre os dois arquivos (se ambos têm a mesma língua,
-  ganha o de melhor codec/canais/bitrate); tags como `pob`/`pt-br` são normalizadas.
-- Se o arquivo de melhor vídeo já tem o idioma alvo, sai com hardlink (fallback: cópia) em vez de merge.
-- Offset detectado por GCC-PHAT em duas janelas (5 min a partir de 30s + outra no
-  meio do filme — música e efeitos coincidem mesmo com falas em idiomas diferentes).
-- Offset constante (janelas concordam): sync no container via `-itsoffset`, tudo em
-  stream copy — nenhum áudio é re-encodado. Com drift (janelas divergem): os áudios
-  do outro arquivo são re-encodados via filtros (AAC para mono/estéreo, AC3 para
-  multicanal — o AAC nativo do ffmpeg perde a sinalização do layout surround e os
-  players embaralham os canais), o resto é stream copy.
+Mesma lógica do merge interno: escolhe o melhor vídeo, melhor áudio por língua
+(tags como `pob`/`pt-br` normalizadas), hardlink se o vídeo já tem o idioma alvo,
+e offset por GCC-PHAT em duas janelas (stream copy se constante; re-encode dos
+áudios do outro arquivo se houver drift).
 
-Duas opções extras do CLI:
+Opções extras do CLI:
 
-- `--series`: os dois primeiros argumentos viram **diretórios**. O script escaneia
-  recursivamente os dois, casa os arquivos por `SxxExx` e faz o merge de cada par,
-  salvando no diretório de saída com o nome do episódio. Saídas que já existem são
-  puladas (retomável) e o erro de um episódio não interrompe o lote.
-- `--segments`: alinhamento **por segmentos** em vez de um offset único para o
-  filme todo. Detecta cortes (trechos em preto validados por silêncio) e alinha
-  cada segmento separadamente — útil quando as versões têm quebras diferentes de
-  comerciais/intervalos. A validação cruzada black↔silence pode ser afinada
-  (`--black-*`, `--silence-*`) ou reduzida a um só modo (`--disable-black` /
-  `--disable-silence`). Fica num módulo à parte; o merge padrão não muda.
+- `--series`: os dois argumentos viram **diretórios**. Escaneia recursivamente,
+  casa arquivos por `SxxExx` e faz o merge de cada par (nome de saída = episódio).
+  Retomável (pula saídas existentes); erro de um episódio não para o lote.
+- `--segments`: alinhamento **por segmentos** em vez de um offset único. Detecta
+  cortes (preto validado por silêncio) e alinha cada segmento — útil quando as
+  versões têm quebras de comercial/intervalo diferentes. A validação cruzada pode
+  ser afinada (`--black-*`, `--silence-*`) ou reduzida a um modo (`--disable-black`
+  / `--disable-silence`).
+
+## Arquitetura
+
+Backend FastAPI serve a API e o frontend React buildado (`python main.py` roda
+`npm install`/`npm run build` quando o `dist` está desatualizado). Jobs e eventos
+ficam em SQLite (`jobs.db`); se o servidor reinicia durante um download, ele
+retoma o acompanhamento sozinho.
 
 ## Estrutura
 
