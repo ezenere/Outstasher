@@ -266,7 +266,16 @@ export interface JobCounts {
   done: number
 }
 
-/** Card enxuto da lista de Downloads (/api/jobs/list). Progresso já é % puro. */
+/** Progresso de um torrent no card da lista: % + baixado/total (velocidade,
+ *  ETA e seeds só no detalhe do job). */
+export interface SlimProgress {
+  pct: number
+  downloaded: number | null
+  size: number | null
+  state: string | null
+}
+
+/** Card enxuto da lista de Downloads (/api/jobs/list). */
 export interface JobListItem {
   id: string
   tmdb_id: number
@@ -284,7 +293,12 @@ export interface JobListItem {
   video_torrent: TorrentInfo | null
   audio_torrent: TorrentInfo | null
   output: string | null
-  progress: { video: number | null; audio: number | null; merge: number | null; merge_read?: number | null }
+  progress: {
+    video: SlimProgress | null
+    audio: SlimProgress | null
+    merge: number | null
+    merge_read?: number | null
+  }
 }
 
 /** Tick de 1s do detalhe do job (/api/jobs/{id}/progress). */

@@ -85,6 +85,30 @@ def test_retry_preserves_convert(no_pipeline, monkeypatch):
     asyncio.run(go())
 
 
+def test_slim_progress_carries_size(no_pipeline):
+    """Os cards da lista mostram % + baixado/total: o _slim_job precisa levar
+    downloaded/size/state junto do percentual (velocidade/ETA/seeds não)."""
+    async def go():
+        job = await jobs.create(1, "pt")
+        full = jobs._jobs[job["id"]]
+        full["progress"]["video"] = {
+            "pct": 42.5, "speed": 5e6, "eta": 300, "state": "downloading",
+            "seeds": 12, "name": "f", "size": 8_000_000_000, "downloaded": 3_400_000_000}
+        p = jobs._slim_job(full)["progress"]["video"]
+        assert p == {"pct": 42.5, "downloaded": 3_400_000_000,
+                     "size": 8_000_000_000, "state": "downloading"}
+
+        # job antigo do banco: progresso pode ser só o número (sem tamanhos)
+        full["progress"]["audio"] = 77.0
+        assert jobs._slim_job(full)["progress"]["audio"] == {
+            "pct": 77.0, "downloaded": None, "size": None, "state": None}
+
+        # sem progresso ainda (searching): nada de barra
+        full["progress"]["video"] = None
+        assert jobs._slim_job(full)["progress"]["video"] is None
+    asyncio.run(go())
+
+
 def test_convert_persisted_in_db(no_pipeline):
     async def go():
         job = await jobs.create(1, "pt", convert=CONV)

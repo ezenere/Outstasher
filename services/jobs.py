@@ -203,6 +203,19 @@ def _pct(p) -> float | None:
     return None
 
 
+def _slim_progress(p) -> dict | None:
+    """Progresso de um torrent para o card da lista: % + baixado/total.
+
+    Velocidade, ETA e seeds continuam só no detalhe do job. Jobs antigos (do
+    banco) podem ter só o número do percentual — daí o _pct no meio."""
+    pct = _pct(p)
+    if pct is None:
+        return None
+    d = p if isinstance(p, dict) else {}
+    return {"pct": pct, "downloaded": d.get("downloaded"), "size": d.get("size"),
+            "state": d.get("state")}
+
+
 # status -> estado visual do filme/processo (menor rank = maior prioridade).
 # cancelled não vira estado (some da UI). done/error contam como histórico.
 _STATE_OF = {"merging": "converting", "downloading": "downloading",
@@ -281,8 +294,8 @@ def counts() -> dict[str, int]:
 
 def _slim_job(job: dict) -> dict:
     """Job enxuto para os cards da lista de Downloads: sem search/eventos/
-    candidatos. Progresso vem só como percentual (a lista não mostra ETA/velo-
-    cidade detalhados — isso é o detalhe do job)."""
+    candidatos. Nos torrents vai % + baixado/total; velocidade, ETA e seeds
+    ficam no detalhe do job."""
     return {
         "id": job["id"], "tmdb_id": job.get("tmdb_id"), "language": job["language"],
         "mode": job.get("mode"), "kind": job.get("kind", "both"),
@@ -295,8 +308,8 @@ def _slim_job(job: dict) -> dict:
         "audio_torrent": job.get("audio_torrent"),
         "output": job.get("output"),
         "progress": {
-            "video": _pct(job["progress"].get("video")),
-            "audio": _pct(job["progress"].get("audio")),
+            "video": _slim_progress(job["progress"].get("video")),
+            "audio": _slim_progress(job["progress"].get("audio")),
             "merge": (job["progress"].get("merge") or {}).get("pct")
             if job["progress"].get("merge") else None,
             # leitura (frames lidos pelo encoder) para a barra sobreposta do card

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { MediaVideo, Movie, Refresh, Search, SoundHigh, Trash, Xmark } from 'iconoir-react'
-import { api, fmtSize, post, type JobCounts, type JobListItem } from '../api'
+import {
+  api, fmtSize, post, qbitIsComplete, type JobCounts, type JobListItem, type SlimProgress,
+} from '../api'
 import { Badge, ClampText, Empty, KindTags } from '../components/ui'
 import { useDialog, type DialogApi } from '../components/Dialog'
 
@@ -229,8 +231,8 @@ export default function Jobs() {
             )}
             {j.status === 'downloading' && (
               <>
-                <MiniBar label="Vídeo" pct={j.progress.video} />
-                <MiniBar label="Áudio" pct={j.progress.audio} />
+                <TorrentBar label="Vídeo" p={j.progress.video} />
+                <TorrentBar label="Áudio" p={j.progress.audio} />
               </>
             )}
             {j.status === 'merging' && (
@@ -240,6 +242,33 @@ export default function Jobs() {
           </div>
         )
       })}
+    </div>
+  )
+}
+
+/** Barra de um torrent no card: % + baixado/total. Velocidade/ETA/seeds ficam
+ *  no detalhe do job. Torrent completo fica verde (o card ainda mostra o job
+ *  como "baixando" enquanto o outro torrent não termina). */
+function TorrentBar({ label, p }: { label: string; p: SlimProgress | null }) {
+  if (!p) return null
+  const complete = qbitIsComplete(p.state) || p.pct >= 100
+  const size = p.size
+    ? complete
+      ? fmtSize(p.size)
+      : `${fmtSize(p.downloaded ?? 0)} / ${fmtSize(p.size)}`
+    : null
+  return (
+    <div className="mt-2">
+      <div className="h-2 overflow-hidden rounded bg-zinc-800">
+        <div
+          className={`h-full transition-all duration-500 ${complete ? 'bg-emerald-500' : 'bg-blue-500'}`}
+          style={{ width: `${complete ? 100 : p.pct}%` }}
+        />
+      </div>
+      <div className="mt-1 flex flex-wrap items-center gap-x-1.5 text-xs text-zinc-400">
+        <span>{label}: {complete ? 'concluído' : `${Math.round(p.pct)}%`}</span>
+        {size && <span className="text-zinc-500">· {size}</span>}
+      </div>
     </div>
   )
 }
