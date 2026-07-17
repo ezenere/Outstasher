@@ -528,7 +528,7 @@ export const STATUS_LABEL: Record<string, string> = {
   searching: 'Buscando',
   awaiting: 'Aguardando escolha',
   downloading: 'Baixando',
-  merging: 'Fazendo merge',
+  merging: 'Convertendo',
   done: 'Concluído',
   error: 'Erro',
   cancelled: 'Cancelado',

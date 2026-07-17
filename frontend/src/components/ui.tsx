@@ -120,7 +120,7 @@ export function MergeBar({ p }: { p?: MergeProgress | null }) {
         />
       </div>
       <div className="mt-1 text-xs text-zinc-400">
-        Conversão: {write}%
+        Progresso: {write}%
         {buffering && <span className="text-purple-300/80"> (lidos {Math.round(read)}%)</span>}
         {extra ? ` — ${extra}` : ''}
       </div>

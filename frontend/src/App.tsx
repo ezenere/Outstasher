@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { BrowserRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom'
-import { Bookmark, Download, LogOut, MediaVideo, Settings as SettingsIcon } from 'iconoir-react'
+import { Bookmark, Cube, LogOut, MediaVideo, Settings as SettingsIcon } from 'iconoir-react'
 import { api, authStatus, getToken, logout, type JobSummary } from './api'
 import { JobsSummaryContext } from './jobsSummary'
 import Movies from './pages/Movies'
@@ -106,7 +106,7 @@ export default function App() {
                 <MediaVideo width={16} height={16} /> Filmes
               </Tab>
               <Tab to="/jobs" dot={pending}>
-                <Download width={16} height={16} /> Downloads
+                <Cube width={16} height={16} /> Jobs
               </Tab>
               <Tab to="/catalog">
                 <Bookmark width={16} height={16} /> Catálogo
