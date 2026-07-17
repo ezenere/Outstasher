@@ -39,17 +39,23 @@ const QBIT_TONE_TEXT: Record<QbitTone, string> = {
   neutral: 'text-zinc-400',
 }
 
+/** Um torrent está completo? (seedando OU 100%). Fonte única para as barras. */
+export const torrentComplete = (p: { pct?: number; state?: string | null }) =>
+  qbitIsComplete(p.state) || (p.pct || 0) >= 100
+
+/** "3.2 GB / 7.4 GB" durante o download, "7.4 GB" ao concluir; null sem tamanho. */
+export function torrentSize(p: { size?: number | null; downloaded?: number | null; pct?: number; state?: string | null }): string | null {
+  if (!p.size) return null
+  return torrentComplete(p) ? fmtSize(p.size) : `${fmtSize(p.downloaded ?? 0)} / ${fmtSize(p.size)}`
+}
+
 export function ProgressBar({ label, p }: { label: string; p: Progress | null }) {
   if (!p) return null
-  const complete = qbitIsComplete(p.state) || (p.pct || 0) >= 100
+  const complete = torrentComplete(p)
   const st = qbitState(p.state)
   // torrent concluído: barra verde, sem velocidade/ETA — só o estado (seedando)
   const tone = complete ? 'done' : st.tone
-  const size = p.size
-    ? complete
-      ? fmtSize(p.size)
-      : `${fmtSize(p.downloaded ?? 0)} / ${fmtSize(p.size)}`
-    : null
+  const size = torrentSize(p)
   const extra = complete
     ? [size, p.seeds != null ? `${p.seeds} seeds` : null]
     : [
@@ -243,12 +249,17 @@ export function KindTags({ kind, language, downloadOnly, convert, mode }: KindTa
   const convTitle = convSummary.length
     ? `Conversão customizada: ${convSummary.join(', ')}`
     : 'Conversão customizada (opções avançadas)'
-  // recompressão não tem idioma/original: o job só re-encoda um filme que já existe
+  // recompressão não tem idioma/original: o job só re-encoda um filme que já
+  // existe. A tag "Recomprimir" carrega o resumo da conversão no tooltip (ela é
+  // sempre custom), então a tag "Custom" genérica fica redundante e some.
   const isRecompress = mode === 'recompress'
+  const recompressTitle = convSummary.length
+    ? `Recompressão de um filme da coleção: ${convSummary.join(', ')}`
+    : 'Recompressão de um filme da coleção'
   return (
     <span className="inline-flex flex-wrap items-center gap-1 align-middle">
       {isRecompress && (
-        <Tag tone="custom" title="Recompressão de um filme da coleção">Recomprimir</Tag>
+        <Tag tone="custom" title={recompressTitle}>Recomprimir</Tag>
       )}
       {!isRecompress && kind !== 'original' && (
         <Tag tone="lang" title={`Áudio dublado em ${lang}`}>{lang}</Tag>
@@ -394,6 +405,7 @@ export function CandidatesTable({
             <th className="px-2 py-1.5" />
             <th className="px-2 py-1.5">Título</th>
             <th className="px-2 py-1.5">Tracker</th>
+            <th className="px-2 py-1.5">Qualidade</th>
             <th className="px-2 py-1.5">Seeds</th>
             <th className="px-2 py-1.5">Tamanho</th>
             <th className="px-2 py-1.5">Corte</th>
@@ -442,6 +454,7 @@ export function CandidatesTable({
                   {c.title}
                 </td>
                 <td className="px-2 py-1.5">{c.tracker ?? ''}</td>
+                <td className="px-2 py-1.5 whitespace-nowrap">{c.quality ?? '—'}</td>
                 <td className="px-2 py-1.5">{c.seeders}</td>
                 <td className="px-2 py-1.5">{fmtSize(c.size)}</td>
                 <td className="px-2 py-1.5">{c.edition ?? 'normal'}</td>

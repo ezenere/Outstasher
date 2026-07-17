@@ -47,6 +47,26 @@ _TERMINAL_STATUSES = ("done", "error", "cancelled")
 _ACTIVE_STATUSES = ("searching", "awaiting", "downloading", "merging")
 # _jobs guarda APENAS os jobs ativos. Terminais são lidos do banco sob demanda.
 _jobs: dict[str, dict] = {}
+
+
+# -------------------- modo do job --------------------
+# Um job pode vir do qBittorrent (auto/manual), de dois arquivos locais
+# (manual_files) ou da recompressão de um filme da coleção (recompress). Em vez
+# de espalhar `job.get("manual_files")` / `job.get("recompress")` por cada ação
+# que dispara em torrents, o tipo é decidido AQUI e consultado por todos.
+
+def _is_recompress(job: dict) -> bool:
+    return job.get("mode") == "recompress" or bool(job.get("recompress"))
+
+
+def _is_local_files(job: dict) -> bool:
+    """Conversão manual de dois arquivos já no disco (sem torrents)."""
+    return bool(job.get("manual_files"))
+
+
+def _has_torrents(job: dict) -> bool:
+    """O job baixa/limpa torrents no qBittorrent? (só os modos de download)."""
+    return not _is_recompress(job) and not _is_local_files(job)
 _tasks: dict[str, asyncio.Task] = {}
 # processo ffmpeg ativo por job: cancelar a task async NÃO interrompe o
 # subprocess (roda numa thread via to_thread), então guardamos o Popen aqui
@@ -76,6 +96,29 @@ def _register_proc(job_id: str):
     def _on_start(proc):
         _ffmpeg_procs[job_id] = proc
     return _on_start
+
+
+def _ffmpeg_hooks(job: dict):
+    """(log, on_progress) para as conversões de ffmpeg. log escreve no detalhe
+    + evento 'merge'; on_progress guarda o progresso em memória (a UI lê via
+    polling) e persiste no banco no máximo a cada 15s (não martela o SQLite a
+    cada tick). Usado por merge, entrega single e recompressão."""
+    def log(msg):
+        job["detail"] = str(msg)
+        _event(job, "merge", str(msg))
+
+    last_persist = [0.0]
+
+    def on_progress(info: dict):
+        job["progress"]["merge"] = info
+        now = time.monotonic()
+        # 15s: mais apertado que o PROGRESS_PERSIST_SECONDS do download, porque
+        # a barra de merge muda depressa e vale persistir para retomar após crash
+        if now - last_persist[0] > 15:
+            last_persist[0] = now
+            store.upsert_job(job)
+
+    return log, on_progress
 
 
 def _kill_ffmpeg(job_id: str):
@@ -130,7 +173,9 @@ def resume_pending():
     """Retoma jobs interrompidos por um restart do servidor."""
     # cópia: _set(..., "error") remove o job de _jobs no meio da iteração
     for job in list(_jobs.values()):
-        if job.get("manual_files"):
+        if _is_recompress(job):
+            _resume_recompress(job)
+        elif _is_local_files(job):
             _resume_manual(job)
         elif job["status"] in ("downloading", "merging"):
             job["status"] = "downloading"
@@ -138,6 +183,21 @@ def resume_pending():
         elif job["status"] == "searching":
             _set(job, "error", "Servidor reiniciado durante a busca — use ↻ para repetir")
         # awaiting: candidatos estao persistidos; segue esperando a escolha
+
+
+def _resume_recompress(job: dict):
+    """Retoma uma recompressão interrompida por restart: recomeça do zero (o
+    filme de origem está no disco). O .tmp parcial do run anterior, se sobrou,
+    é ignorado — cada run usa um nome próprio com o id do job."""
+    if job["status"] == "awaiting":
+        return
+    try:
+        src = catalog.media_path(job.get("destination_id"),
+                                 job["recompress"]["folder"], job["recompress"]["rel"])
+    except catalog.CatalogError:
+        _set(job, "error", "Arquivo da coleção não existe mais — recompressão cancelada")
+        return
+    _spawn(job["id"], _run_recompress(job, src))
 
 
 def _resume_manual(job: dict):
@@ -261,6 +321,11 @@ def summary() -> list[dict]:
         state = _STATE_OF.get(j["status"])
         if state in (None, "done"):  # dropdown ignora concluídos e cancelados
             continue
+        # recompressão não é um "download do filme": ela reusa o tmdb_id do
+        # item, então incluí-la faria o card do filme na busca aparecer como
+        # "convertendo"/"concluído" por engano (Movies.tsx chaveia por tmdb_id)
+        if _is_recompress(j):
+            continue
         pct = ((j["progress"].get("merge") or {}).get("pct") if state == "converting"
                else _download_pct(j))
         out.append({"id": j["id"], "tmdb_id": j.get("tmdb_id"),
@@ -382,8 +447,14 @@ KINDS = ("both", "original", "dubbed")
 
 
 def _needed_torrents(job: dict) -> tuple[str, ...]:
-    """Quais torrents este job baixa: ('video',), ('audio',) ou os dois."""
-    kind = job.get("kind", "both")
+    """Quais torrents este job baixa: ('video',), ('audio',) ou os dois.
+
+    Recompressão não baixa torrents (kind=None) — não é chamada no pipeline de
+    download, mas o None não pode virar ('video','audio') se algum caminho a
+    alcançar por engano."""
+    if _is_recompress(job):
+        return ()
+    kind = job.get("kind") or "both"
     if kind == "original":
         return ("video",)
     if kind == "dubbed":
@@ -579,23 +650,30 @@ async def create_recompress(destination_id: int | None, folder: str, rel: str,
     original só é trocado quando o ffmpeg termina — cancelar/falhar deixa o
     filme intacto (ver _run_recompress).
     """
-    src = catalog.media_path(destination_id, folder, rel)
-    opts = transcode.validate(convert)
-    if not opts.wants_video_encode() and opts.audio_codec == "keep" \
-            and opts.channels == "keep" and opts.audio_tracks == "all" \
-            and opts.subtitles == "default":
-        raise ValueError("Nenhuma opção de conversão escolhida — não há o que recomprimir")
+    # o preparo bloqueia: media_path/stat batem no disco (destinos podem ser
+    # montagens de rede) e validate() com HW dispara um test-encode de ffmpeg.
+    # Sai do event loop para não travar o polling de todos os clientes.
+    def _prepare():
+        src = catalog.media_path(destination_id, folder, rel)
+        opts = transcode.validate(convert)
+        if opts.is_noop():
+            raise ValueError("Nenhuma opção de conversão escolhida — não há o que recomprimir")
+        dest = store.get_destination(destination_id) if destination_id \
+            else store.default_destination()
+        if dest is None:
+            raise ValueError("Nenhum destino cadastrado")
+        return src, opts, dest
 
-    dest = store.get_destination(destination_id) if destination_id else store.default_destination()
-    if dest is None:
-        raise ValueError("Nenhum destino cadastrado")
+    src, opts, dest = await asyncio.to_thread(_prepare)
 
     job = {
         "id": uuid.uuid4().hex[:10],
         "tmdb_id": tmdb_id or catalog.tmdb_id_in(folder),
-        "language": "pt",  # só rotula o job; a recompressão não troca idioma
+        # recompressão não troca idioma nem baixa torrents: sem kind, e o idioma
+        # serve só para buscar os metadados do TMDB (capa/descrição do detalhe)
+        "language": "pt",
         "mode": "recompress",
-        "kind": "both",
+        "kind": None,
         "convert": opts.to_dict(),
         "status": "merging",
         "detail": "Preparando recompressão...",
@@ -608,8 +686,7 @@ async def create_recompress(destination_id: int | None, folder: str, rel: str,
         "destination_label": dest["label"],
         "destination_path": dest["path"],
         "created_at": datetime.now().isoformat(timespec="seconds"),
-        "recompress": {"folder": folder, "rel": rel, "replace": bool(replace),
-                       "source": str(src), "source_size": src.stat().st_size},
+        "recompress": {"folder": folder, "rel": rel, "replace": bool(replace)},
         "search": None,
         "fallbacks": None,
         "current": None,
@@ -619,12 +696,17 @@ async def create_recompress(destination_id: int | None, folder: str, rel: str,
     mode_label = "substituindo o original" if replace else "mantendo o original"
     _event(job, "status", f"Recompressão criada ({mode_label}) — {folder}/{rel}"
                           + (f" — conversão: {', '.join(conv)}" if conv else ""))
-    _spawn(job["id"], _run_recompress(job, src))
+    _spawn(job["id"], _run_recompress(job, src, opts))
     return _public(job)
 
 
-async def _run_recompress(job: dict, src: Path):
-    """Recompressão: TMDB (só para a capa/descrição) -> fila -> convert_single."""
+async def _run_recompress(job: dict, src: Path, opts: "transcode.ConvertOptions | None" = None):
+    """Recompressão: TMDB (só para a capa/descrição) -> fila -> convert_single.
+
+    `opts` já validado vem do create; no resume (job relido do banco) é None e
+    a validação roda uma vez aqui."""
+    if opts is None:
+        opts = transcode.validate(job["convert"])
     # .tmp na MESMA pasta: rename atômico no fim e sem cópia entre discos
     tmp = src.with_name(f".{src.stem}.recompress-{job['id']}.mkv")
     try:
@@ -637,7 +719,7 @@ async def _run_recompress(job: dict, src: Path):
         if lock.locked():
             _set(job, "merging", "Na fila de conversão...")
         async with lock:
-            await _recompress(job, src, tmp)
+            await _recompress(job, src, tmp, opts)
     except asyncio.CancelledError:
         tmp.unlink(missing_ok=True)  # cancelado: nada de lixo (o original nem foi tocado)
         raise
@@ -646,27 +728,15 @@ async def _run_recompress(job: dict, src: Path):
         _fail(job, f"{type(e).__name__}: {e}")
 
 
-async def _recompress(job: dict, src: Path, tmp: Path):
-    info = job["recompress"]
-    opts = transcode.validate(job["convert"])
+async def _recompress(job: dict, src: Path, tmp: Path, opts: "transcode.ConvertOptions"):
     movie = job.get("movie") or {}
+    before = src.stat().st_size
     # o parcial é o .tmp: o cancel() apaga ele, nunca o filme original
     job["output"] = str(tmp)
     job["merge_started_at"] = datetime.now().isoformat(timespec="seconds")
     _set(job, "merging", f"Recomprimindo {src.name}...")
 
-    def log(msg):
-        job["detail"] = str(msg)
-        _event(job, "merge", str(msg))
-
-    last_persist = [0.0]
-
-    def on_progress(p: dict):
-        job["progress"]["merge"] = p
-        now = time.monotonic()
-        if now - last_persist[0] > 15:
-            last_persist[0] = now
-            store.upsert_job(job)
+    log, on_progress = _ffmpeg_hooks(job)
 
     try:
         result = await asyncio.to_thread(
@@ -681,33 +751,38 @@ async def _recompress(job: dict, src: Path, tmp: Path):
     if result.linked:
         # o plano inteiro virou cópia: o hardlink do convert_single não tem
         # valor aqui (a origem é o próprio filme) — nada mudou no disco
-        out.unlink(missing_ok=True)
+        await asyncio.to_thread(out.unlink, missing_ok=True)
         job["output"] = str(src)
         _set(job, "done", "Nada a recomprimir com as opções escolhidas — arquivo mantido")
         return
 
-    before, after = info["source_size"], out.stat().st_size
-    if after >= before:
-        # recomprimir e ficar MAIOR é o contrário do objetivo: descarta e avisa
-        out.unlink(missing_ok=True)
-        job["output"] = str(src)
-        _set(job, "done", f"Recompressão descartada: o resultado ficou maior "
-                          f"({catalog._human_size(after)} vs {catalog._human_size(before)}) — "
-                          f"arquivo original mantido")
-        return
-
-    if info["replace"]:
-        out.replace(src)  # atômico: o filme nunca some, só troca de conteúdo
-        final = src
-    else:
+    replace = job["recompress"]["replace"]
+    # a finalização mexe no disco (stat/unlink/replace) — em destino de rede
+    # cada op custa; agrupa num só to_thread para não travar o event loop
+    def _finalize() -> tuple[str, int, str | None]:
+        after = out.stat().st_size
+        if after >= before:  # ficou MAIOR: recomprimir para inflar é inútil
+            out.unlink(missing_ok=True)
+            return str(src), after, None
+        if replace:
+            out.replace(src)  # atômico: o filme nunca some, só troca de conteúdo
+            return str(src), after, str(src)
         final = _free_name(src.with_name(f"{src.stem} [recomprimido].mkv"))
         out.replace(final)
-    job["output"] = str(final)
+        return str(final), after, str(final)
+
+    final_path, after, wrote = await asyncio.to_thread(_finalize)
+    job["output"] = final_path
+    if wrote is None:
+        _set(job, "done", f"Recompressão descartada: o resultado ficou maior "
+                          f"({catalog.human_size(after)} vs {catalog.human_size(before)}) — "
+                          f"arquivo original mantido")
+        return
     saved = before - after
-    _set(job, "done", f"Recomprimido: {catalog._human_size(before)} → "
-                      f"{catalog._human_size(after)} "
-                      f"(-{saved * 100 // before}%, {catalog._human_size(saved)} livres) — "
-                      f"{final.name}")
+    _set(job, "done", f"Recomprimido: {catalog.human_size(before)} → "
+                      f"{catalog.human_size(after)} "
+                      f"(-{saved * 100 // before}%, {catalog.human_size(saved)} livres) — "
+                      f"{Path(final_path).name}")
     catalog.invalidate_library()
 
 
@@ -807,8 +882,7 @@ async def cancel(job_id: str, delete_torrents: bool = False) -> dict | None:
     if was_merging:
         _delete_output(job)
     _cancelling.discard(job_id)
-    if delete_torrents and is_active and not job.get("manual_files") \
-            and not job.get("recompress"):
+    if delete_torrents and is_active and _has_torrents(job):
         # limpeza no qBittorrent com teto de tempo: se ele estiver fora do ar,
         # a remoção do job NÃO pode ficar travada esperando o timeout de rede
         for kind in ("video", "audio"):
@@ -841,12 +915,12 @@ async def retry(job_id: str) -> dict | None:
     old = _lookup(job_id)  # jobs em erro/cancelados vivem só no banco agora
     if not old or old["status"] not in ("error", "cancelled"):
         return None
-    if old.get("recompress"):
+    if _is_recompress(old):
         r = old["recompress"]
         return await create_recompress(old.get("destination_id"), r["folder"], r["rel"],
                                        old["convert"], r.get("replace", True),
                                        old.get("tmdb_id"))
-    if old.get("manual_files"):
+    if _is_local_files(old):
         return await create_manual(old["tmdb_id"], old["language"],
                                    old["manual_files"]["video"],
                                    old["manual_files"]["audio"],
@@ -1577,18 +1651,7 @@ async def _deliver_single(job: dict, files: dict):
         job["merge_started_at"] = datetime.now().isoformat(timespec="seconds")
         _set(job, "merging", f"Convertendo arquivo {label} ({src_file.name})...")
 
-        def log(msg):
-            job["detail"] = str(msg)
-            _event(job, "merge", str(msg))
-
-        last_persist = [0.0]
-
-        def on_progress(info: dict):
-            job["progress"]["merge"] = info
-            now = time.monotonic()
-            if now - last_persist[0] > 15:
-                last_persist[0] = now
-                store.upsert_job(job)
+        log, on_progress = _ffmpeg_hooks(job)
 
         try:
             result = await asyncio.to_thread(
@@ -1637,20 +1700,7 @@ async def _merge(job: dict, video_file: Path, audio_file: Path,
     job["merge_started_at"] = datetime.now().isoformat(timespec="seconds")
     _set(job, "merging", f"Fazendo merge ({video_file.name} + {audio_file.name})...")
 
-    def log(msg):
-        job["detail"] = str(msg)
-        _event(job, "merge", str(msg))
-
-    # progresso do ffmpeg: atualiza em memória (a UI le via polling); persiste
-    # no banco só de vez em quando para não martelar o SQLite a cada tick
-    last_persist = [0.0]
-
-    def on_progress(info: dict):
-        job["progress"]["merge"] = info
-        now = time.monotonic()
-        if now - last_persist[0] > 15:
-            last_persist[0] = now
-            store.upsert_job(job)
+    log, on_progress = _ffmpeg_hooks(job)
 
     # opções avançadas (se o job tiver): re-valida contra o servidor atual
     convert_opts = transcode.validate(job["convert"]) if job.get("convert") else None
@@ -1677,8 +1727,8 @@ async def _merge(job: dict, video_file: Path, audio_file: Path,
 
 
 async def _cleanup_torrents(job: dict):
-    if job.get("manual_files"):
-        return  # conversão manual: não há torrents para limpar
+    if not _has_torrents(job):
+        return  # conversão manual / recompressão: não há torrents para limpar
     if config.QBIT_CLEANUP == "keep":
         return
     # hardlink/cópia são independentes do arquivo do qBittorrent (nada de symlink),

@@ -261,6 +261,14 @@ class ConvertOptions:
         return (self.video_codec != "keep" or self.resolution != "keep"
                 or self.bit_depth != "keep")
 
+    def is_noop(self) -> bool:
+        """Nenhuma opção mexe em nada (tudo no padrão): a conversão não teria o
+        que fazer independentemente da fonte. Usado pela recompressão para
+        recusar um job vazio antes de tocar no ffmpeg."""
+        return (not self.wants_video_encode() and self.audio_codec == "keep"
+                and self.channels == "keep" and self.audio_tracks == "all"
+                and self.subtitles == "default")
+
 
 def _expect(value, name: str, allowed: tuple) -> None:
     if value not in allowed:
@@ -385,12 +393,7 @@ class VideoPlan:
 
 
 def _fps_of(vstream: dict) -> float:
-    raw = str(vstream.get("avg_frame_rate") or vstream.get("r_frame_rate") or "")
-    num, _, den = raw.partition("/")
-    try:
-        return float(num) / float(den or 1)
-    except (ValueError, ZeroDivisionError):
-        return 0.0
+    return _frac(vstream.get("avg_frame_rate") or vstream.get("r_frame_rate")) or 0.0
 
 
 def _estimate_video_bitrate(probe: dict, vstream: dict) -> int:

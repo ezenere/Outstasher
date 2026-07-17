@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { MediaVideo, Movie, Refresh, Search, SoundHigh, Trash, Xmark } from 'iconoir-react'
-import {
-  api, fmtSize, post, qbitIsComplete, type JobCounts, type JobListItem, type SlimProgress,
-} from '../api'
-import { Badge, ClampText, Empty, KindTags } from '../components/ui'
+import { api, fmtSize, post, type JobCounts, type JobListItem, type SlimProgress } from '../api'
+import { Badge, ClampText, Empty, KindTags, torrentComplete, torrentSize } from '../components/ui'
 import { useDialog, type DialogApi } from '../components/Dialog'
 
 // jobTitle aceita tanto o job completo quanto o item enxuto da lista
@@ -251,12 +249,8 @@ export default function Jobs() {
  *  como "baixando" enquanto o outro torrent não termina). */
 function TorrentBar({ label, p }: { label: string; p: SlimProgress | null }) {
   if (!p) return null
-  const complete = qbitIsComplete(p.state) || p.pct >= 100
-  const size = p.size
-    ? complete
-      ? fmtSize(p.size)
-      : `${fmtSize(p.downloaded ?? 0)} / ${fmtSize(p.size)}`
-    : null
+  const complete = torrentComplete(p)
+  const size = torrentSize(p)
   return (
     <div className="mt-2">
       <div className="h-2 overflow-hidden rounded bg-zinc-800">

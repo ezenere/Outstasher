@@ -15,23 +15,130 @@ import unicodedata
 
 import config
 
-RESOLUTION_SCORES = {
-    "2160p": 40, "4k": 40, "uhd": 40,
-    "1080p": 30,
-    "720p": 18,
-    "480p": 6, "sd": 4,
-}
+# -------------------- qualidade estilo Radarr --------------------
+# A qualidade é (fonte, resolução) resolvida num TIER ordinal — a "escada". A
+# ordenação é pelo tier primeiro (não por um score somado onde seeders/áudio
+# empurrariam um 1080p acima de um 4K remux); o tamanho do arquivo desempata
+# dentro do tier. Quem executa a ordenação é rank(); score() só expõe o tier
+# como número para o trace/UI.
 
-SOURCE_SCORES = {
-    "remux": 25,
-    "blu-ray": 18, "bluray": 18, "bdrip": 14, "brrip": 12,
-    "web-dl": 14, "webdl": 14, "web dl": 14,
-    "webrip": 10, "web": 8,
-    "hdtv": 5,
-    "dvdrip": 4,
-    "hdcam": -60, "camrip": -60, "cam": -60, "telesync": -60, "hdts": -60,
-    " ts ": -60, ".ts.": -60, "tc": -30,
-}
+# resolução: cada padrão -> rótulo canônico. Ordem importa (mais específico
+# primeiro). Comparado contra o título _fold() (sem acento, "_/./- " viram espaço).
+RESOLUTION_PATTERNS = [
+    (re.compile(r"\b(?:2160p|4k|uhd)\b", re.I), "2160p"),
+    (re.compile(r"\b(?:1440p|2k)\b", re.I), "1440p"),
+    (re.compile(r"\b1080p\b", re.I), "1080p"),
+    (re.compile(r"\b1080i\b", re.I), "1080i"),
+    (re.compile(r"\b720p\b", re.I), "720p"),
+    (re.compile(r"\b(?:576p|480p|480i|sd)\b", re.I), "480p"),
+]
+
+# fonte: padrão -> rótulo canônico. Ordem importa (remux antes de bluray;
+# web-dl antes de web; bdrip antes de bluray para não classificar rip como disco).
+SOURCE_PATTERNS = [
+    (re.compile(r"\bremux\b", re.I), "remux"),
+    (re.compile(r"\b(?:bdrip|brrip)\b", re.I), "bdrip"),
+    (re.compile(r"\b(?:blu-?ray|bd25|bd50|complete\s*bluray)\b", re.I), "bluray"),
+    (re.compile(r"\b(?:web-?dl|web\s?dl|amzn|nf|dsnp|hmax|atvp|itunes|\bit\b)\b", re.I), "webdl"),
+    (re.compile(r"\bwebrip\b", re.I), "webrip"),
+    (re.compile(r"\bweb\b", re.I), "web"),
+    (re.compile(r"\b(?:hdtv|pdtv|sdtv|dsr)\b", re.I), "hdtv"),
+    (re.compile(r"\b(?:dvdrip|dvd)\b", re.I), "dvdrip"),
+    (re.compile(r"\b(?:hdcam|cam-?rip|\bcam\b|telesync|\bts\b|hdts|telecine|\btc\b)\b", re.I), "cam"),
+]
+
+# upscale de IA: a resolução ANUNCIADA (ex.: 4K) é falsa — a fonte real é menor,
+# só interpolada. Vale para filmes antigos "remasterizados" por IA. Detectado no
+# título, rebaixa a resolução efetiva para não competir com 4K/1080p nativos.
+AI_UPSCALE_RE = re.compile(
+    r"\bai[ ._-]?(?:up(?:scale|scaled|scaling)|enhanced|remaster(?:ed)?)\b"
+    r"|\b(?:up(?:scale|scaled)|enhanced)[ ._-]?(?:by[ ._-]?)?ai\b"
+    r"|\bneural[ ._-]?(?:upscale|enhance)", re.I)
+
+# quando a resolução é fruto de upscale de IA, ela conta como este degrau (abaixo
+# de 1080p nativo: um upscale para "4K" tem qualidade real de fonte menor)
+_AI_UPSCALE_RES_RANK = 2  # mesmo degrau de 720p (< 1080p, que é 3)
+
+
+def is_ai_upscale(title: str) -> bool:
+    """True se o título indica upscale/enhance por IA (resolução inflada)."""
+    return bool(AI_UPSCALE_RE.search(_fold(title)))
+
+
+# fontes de disco/web usam a resolução como degrau; TV/DVD/CAM são degraus
+# fixos no fundo (independem da resolução anunciada).
+_TIERED_SOURCES = ("remux", "bluray", "bdrip", "webdl", "webrip", "web")
+
+# a ESCADA: (fonte, resolução) -> tier. Maior = melhor. Espelha a ordem do
+# Radarr: remux no topo por resolução, depois bluray, depois web-dl/webrip...
+# Resolução desconhecida numa fonte boa fica abaixo do mesmo source em 480p
+# (não dá para confiar num release que nem diz a resolução).
+_RES_RANK = {"2160p": 4, "1440p": 3, "1080p": 3, "1080i": 2, "720p": 2, "480p": 1, None: 0}
+# dentro da MESMA resolução: remux (disco intacto) > bluray (encode do disco) >
+# web-dl (stream sem re-encode) > webrip (re-encode do stream) > web (genérico)
+# > bdrip/brrip (re-encode do disco, o pior dos "bons")
+_SOURCE_RANK = {"remux": 6, "bluray": 5, "webdl": 4, "webrip": 3, "web": 2, "bdrip": 1}
+
+# degraus fixos abaixo das fontes com resolução (valores negativos ficam no
+# fundo da escada, mas ainda acima de "sem nada")
+_FIXED_TIER = {"hdtv": 5, "dvdrip": 3, "cam": -100}
+UNKNOWN_TIER = 1  # nem fonte nem resolução reconhecidas
+
+
+def resolution_of(title: str) -> str | None:
+    """Resolução canônica do título, ou None. Se o título anuncia MAIS DE UMA
+    resolução distinta (ex.: '1080p' e '2160p' no mesmo nome — pacote/erro de
+    release), retorna None: não dá para confiar em qual é a do arquivo."""
+    folded = _fold(title)
+    found = {label for pat, label in RESOLUTION_PATTERNS if pat.search(folded)}
+    return found.pop() if len(found) == 1 else None
+
+
+def source_of(title: str) -> str | None:
+    """Fonte canônica do título (remux/bluray/webdl/...), ou None."""
+    folded = _fold(title)
+    for pat, label in SOURCE_PATTERNS:
+        if pat.search(folded):
+            return label
+    return None
+
+
+def quality_tier(title: str) -> tuple[int, str]:
+    """(tier ordinal, rótulo legível) da qualidade do título — a escada Radarr.
+
+    Maior tier = melhor. O rótulo ('4K Remux', '1080p WEB-DL', 'Desconhecida')
+    aparece no trace/UI. CAM & cia. ficam no fundo (tier negativo)."""
+    res = resolution_of(title)
+    src = source_of(title)
+    res_label = {"2160p": "4K", "1440p": "1440p", "1080p": "1080p",
+                 "1080i": "1080i", "720p": "720p", "480p": "480p"}.get(res)
+    src_label = {"remux": "Remux", "bluray": "BluRay", "bdrip": "BDRip",
+                 "webdl": "WEB-DL", "webrip": "WEBRip", "web": "WEB",
+                 "hdtv": "HDTV", "dvdrip": "DVDRip", "cam": "CAM"}.get(src)
+
+    # upscale de IA: a resolução anunciada é interpolada, não nativa. Rebaixa o
+    # degrau de resolução (só quando o anunciado é MAIOR que o degrau de upscale
+    # — não "melhora" um 480p enhanced) e marca no rótulo.
+    res_rank = _RES_RANK[res]
+    upscaled = is_ai_upscale(title)
+    if upscaled and res_rank > _AI_UPSCALE_RES_RANK:
+        res_rank = _AI_UPSCALE_RES_RANK
+    ai_tag = " (AI Upscale)" if upscaled else ""
+
+    if src in _TIERED_SOURCES:
+        # tier = degrau da resolução * 8 + degrau da fonte: a resolução manda, e
+        # a fonte desempata dentro da mesma resolução (a escada Radarr é por
+        # resolução primeiro dentro de disco/web).
+        tier = res_rank * 8 + _SOURCE_RANK[src]
+        label = " ".join(x for x in (res_label, src_label) if x) or "Desconhecida"
+        return tier, label + ai_tag
+    if src in _FIXED_TIER:
+        return _FIXED_TIER[src], (src_label or "Desconhecida") + ai_tag
+    # sem fonte reconhecida: usa só a resolução (rebaixada se upscale), se houver
+    if res:
+        return res_rank, (res_label or "Desconhecida") + ai_tag
+    return UNKNOWN_TIER, "Desconhecida" + ai_tag
+
 
 AUDIO_SCORES = {
     "truehd": 30, "true-hd": 30, "atmos": 30,
@@ -43,6 +150,9 @@ AUDIO_SCORES = {
     "5.1": 10, "7.1": 12,
     "aac": 6,
 }
+
+# CAM/TS e cia. têm tier muito negativo — abaixo disto o candidato é rejeitado
+MIN_TIER = -50
 
 MAX_TRACE = 40
 
@@ -285,19 +395,24 @@ def is_subs_only(title: str, language: str, dubbed_title: str | None = None) -> 
     return bool(_subs_re().search(_fold(title)))
 
 
+def _audio_score(title: str) -> int:
+    """Qualidade do áudio anunciada no nome (TrueHD/Atmos/DTS...), 0 se nenhum.
+    Desempate FINO dentro do mesmo tier+tamanho — não move de tier."""
+    return _keyword_score(" " + _clean(title) + " ", AUDIO_SCORES)
+
+
 def score(result: dict, mode: str, language: str | None = None,
           dubbed_title: str | None = None) -> float:
-    t = " " + _clean(result["title"]) + " "
-    s = _seeders_score(result["seeders"])
-    s += _keyword_score(t, SOURCE_SCORES)
-    if mode == "video":
-        s += _keyword_score(t, RESOLUTION_SCORES) * 2
-        s += _keyword_score(t, AUDIO_SCORES) * 0.3
-    else:  # audio
-        s += _keyword_score(t, AUDIO_SCORES) * 2
-        s += _keyword_score(t, RESOLUTION_SCORES) * 0.5
-        if language and marker_strength(result["title"], language, dubbed_title) == 2:
-            s += STRONG_MARKER_BONUS
+    """Score exposto no trace/UI. É o TIER de qualidade (a escada) com um
+    ajuste pequeno de áudio/dublagem, só para o número não empatar entre
+    releases do mesmo tier. A ordenação de verdade é por (tier, tamanho) em
+    rank() — este número não decide sozinho o ranking."""
+    tier, _label = quality_tier(result["title"])
+    s = float(tier * 100)  # o tier domina a ordem de grandeza
+    s += _audio_score(result["title"]) * (2 if mode == "audio" else 0.3)
+    if mode == "audio" and language \
+            and marker_strength(result["title"], language, dubbed_title) == 2:
+        s += STRONG_MARKER_BONUS
     return s
 
 
@@ -308,9 +423,12 @@ def rank(results: list[dict], mode: str, movie_title: str, year: str,
          dubbed_title: str | None = None) -> tuple[list[dict], list[dict]]:
     """Retorna (viáveis ordenados, trace de todos os avaliados).
 
-    Ordem: score desc; no modo audio, quem tem o ANO do filme no nome vem
-    ANTES de quem não tem (year_match), e o score só ordena dentro do grupo.
-    Cada viável é o resultado completo (magnet/link) + score + edition + year_match.
+    Ordenação estilo Radarr: TIER de qualidade (a escada remux 4k > bluray 4k >
+    webdl 4k > ... > desconhecida) primeiro; dentro do mesmo tier, o TAMANHO do
+    arquivo (maior = mais bitrate); e por fim áudio/seeders como desempate fino.
+    No modo áudio, o ANO no nome e o marcador FORTE de dublagem têm preferência
+    absoluta sobre a qualidade (identificação e idioma vêm antes da imagem).
+
     required_edition: ANY_EDITION libera qualquer corte; None exige corte normal;
     uma string ("extended", ...) exige aquele corte — para as duas versões
     baixadas serem do MESMO corte e os áudios alinharem.
@@ -320,12 +438,18 @@ def rank(results: list[dict], mode: str, movie_title: str, year: str,
     pairs: list[tuple[dict, dict]] = []
     for r in results:
         edition = edition_of(r["title"])
+        tier, quality = quality_tier(r["title"])
+        # marcador forte (só áudio): dublagem confirmada vence qualidade de
+        # imagem — 2 grupos acima de tudo que não tem, como o ano
+        strong = (mode == "audio" and language
+                  and marker_strength(r["title"], language, dubbed_title) == 2)
         cand = {
             "title": r["title"],
             "tracker": r.get("tracker"),
             "seeders": r["seeders"],
             "size": r["size"],
             "edition": edition,
+            "quality": quality,
             "score": None,
             "rejected": None,
             "chosen": False,
@@ -343,31 +467,40 @@ def rank(results: list[dict], mode: str, movie_title: str, year: str,
                                 f"({edition or 'normal'} ≠ {required_edition or 'normal'})")
         elif r["seeders"] <= 0:
             cand["rejected"] = "sem seeders"
+        elif tier <= MIN_TIER:
+            cand["rejected"] = "qualidade muito baixa (CAM/TS)"
         else:
-            s = score(r, mode, language, dubbed_title)
-            cand["score"] = round(s, 1)
-            if s <= -30:
-                cand["rejected"] = "qualidade muito baixa (CAM/TS)"
+            cand["score"] = round(score(r, mode, language, dubbed_title), 1)
         # áudio dublado: ano no nome = identificação confiável -> preferência
-        # absoluta sobre score (vídeo não precisa: a busca já vai com o ano)
+        # absoluta (vídeo não precisa: a busca já vai com o ano)
         cand["year_match"] = mode == "audio" and has_year(r["title"], year)
+        # chave de ordenação (só para viáveis): grupos absolutos primeiro
+        # (ano, dublagem forte), depois a escada de qualidade, depois tamanho
+        cand["_sort"] = (
+            cand["year_match"], bool(strong), tier,
+            r["size"] or 0,               # maior primeiro (0/desconhecido no fim)
+            _audio_score(r["title"]),
+            _seeders_score(r["seeders"]),
+        )
         pairs.append((cand, r))
 
     viable = [(c, r) for c, r in pairs if c["rejected"] is None]
-    viable.sort(key=lambda p: (not p[0]["year_match"], -p[0]["score"]))
+    viable.sort(key=lambda p: p[0]["_sort"], reverse=True)
     ranked = []
     for c, r in viable:
         item = dict(r)
         item["score"] = c["score"]
         item["edition"] = c["edition"]
+        item["quality"] = c["quality"]
         item["year_match"] = c["year_match"]
         ranked.append(item)
 
     trace = sorted(
         (c for c, _ in pairs),
         key=lambda c: (not c["chosen"], c["rejected"] is not None,
-                       not c["year_match"],
-                       -(c["score"] if c["score"] is not None else -1e9)))
+                       tuple(-x for x in c["_sort"])))
+    for c in pairs:  # _sort é interno: não vaza para o trace/JSON
+        c[0].pop("_sort", None)
     return ranked, trace[:MAX_TRACE]
 
 

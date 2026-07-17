@@ -23,16 +23,20 @@ que o das dependências Python, use o interpretador do lado que enxerga os dois.
 
 ## O que roda onde
 
-- **Sem `ffmpeg` real** (lógica pura, rápido): `test_transcode.py`,
-  `test_selector_year.py`, `test_catalog_rename.py`, `test_library_cache.py`,
+- **Sem `ffmpeg` real** (lógica pura, rápido): `test_selector_year.py`,
+  `test_catalog_rename.py`, `test_catalog_naming.py`, `test_library_cache.py`,
   `test_jobs_convert.py`, `test_jobs_download_only.py`, `test_jobs_manual.py`,
-  `test_cli_series.py`, `test_merger_segments.py`.
+  `test_cli_series.py`, `test_merger_segments.py`. A maior parte de
+  `test_transcode.py` também é lógica pura (planejamento), com uma exceção
+  marcada `ffmpeg` (o round-trip de metadados HDR).
   (Ainda exigem o ffmpeg no PATH: o `conftest.py` valida o ambiente inteiro
   antes de qualquer teste, e `services.transcode` lê os encoders reais.)
 - **Com `ffmpeg` real** (marcados `@pytest.mark.ffmpeg`, mais lentos):
   `test_convert_ffmpeg.py` (conversão), `test_align_ffmpeg.py` (alinhamento
-  GCC-PHAT medindo um offset conhecido) e `test_cancel_ffmpeg.py` (cancelar no
-  meio de uma conversão de verdade).
+  GCC-PHAT medindo um offset conhecido), `test_cancel_ffmpeg.py` (cancelar no
+  meio de uma conversão de verdade), `test_jobs_recompress.py` (recompressão de
+  um filme da coleção, com a origem gerada por ffmpeg) e o
+  `test_hdr_metadata_roundtrip` de `test_transcode.py`.
 
 Pular os lentos (ainda exige ffmpeg instalado, por causa da checagem de
 ambiente e das capacidades reais):

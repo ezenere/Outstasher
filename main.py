@@ -396,6 +396,12 @@ async def catalog_item(folder: str, destination_id: int | None = None):
         detail["tmdb"] = await tmdb.match(detail["title"], detail["year"])
     except Exception:  # noqa: BLE001
         detail["tmdb"] = None
+    # nome que a pasta teria com o [tmdbid-N] — computado pelo backend (mesmo
+    # safe_name/folder_name da renomeação real) para o dialog não prometer um
+    # nome diferente do que será criado. None se ainda não há match nem tag.
+    tid = detail.get("tmdb_id") or ((detail["tmdb"] or {}).get("id"))
+    detail["proposed_folder"] = (
+        catalog.folder_name(detail["title"], detail["year"], tid) if tid else None)
     return detail
 
 

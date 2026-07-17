@@ -31,7 +31,8 @@ class CatalogError(Exception):
 
 # -------------------- helpers de formatacao --------------------
 
-def _human_size(n: int) -> str:
+def human_size(n: int) -> str:
+    """Tamanho legível (B/KB/MB/GB/TB). Público: jobs.py também usa."""
     x = float(n)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if x < 1024 or unit == "TB":
@@ -136,7 +137,7 @@ def list_items(destination_id: int | None) -> dict:
                 "title": title,
                 "year": year,
                 "size": size,
-                "size_human": _human_size(size),
+                "size_human": human_size(size),
                 "file_count": file_count,
                 "has_video": has_video,
             })
@@ -218,7 +219,7 @@ def _probe_file(path: Path) -> dict:
     }
     try:
         info["size"] = path.stat().st_size
-        info["size_human"] = _human_size(info["size"])
+        info["size_human"] = human_size(info["size"])
     except OSError:
         pass
 
@@ -274,8 +275,10 @@ def item_detail(destination_id: int | None, folder: str) -> dict:
         "folder": folder,
         "title": title,
         "year": year,
+        # id do TMDB já marcado no nome da pasta (None = pasta ainda não marcada)
+        "tmdb_id": tmdb_id_in(folder),
         "size": total,
-        "size_human": _human_size(total),
+        "size_human": human_size(total),
         "files": files,
     }
 

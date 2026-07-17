@@ -1,8 +1,12 @@
 """Recompressão de um filme da coleção (jobs.create_recompress).
 
 O ponto sensível é a segurança do arquivo do usuário: o original só pode sumir
-quando a conversão termina bem. Os testes marcados com `ffmpeg` rodam o
-convert_single de verdade num .mkv gerado na hora — sem falsear o encoder.
+quando a conversão termina bem. Os testes marcados com `ffmpeg` precisam do
+ffmpeg real (o .mkv de origem vem do make_media, e create_recompress valida os
+codecs contra os encoders instalados). A maioria roda o convert_single de
+verdade e observa o disco; os que testam o tratamento de FALHA/segurança
+substituem só o convert_single por um stub que explode ou infla, para provocar
+o caminho de erro sem depender de uma opção que o encoder recuse.
 """
 import asyncio
 
@@ -53,7 +57,7 @@ def test_rejects_non_video(library, tmp_path):
 def test_job_shape(library, monkeypatch):
     """O job nasce com o modo/metadados certos (sem rodar o ffmpeg)."""
     did, folder, src = library
-    async def _noop(job, s):
+    async def _noop(job, src, opts=None):
         return None
     monkeypatch.setattr(jobs, "_run_recompress", _noop)
 
@@ -62,11 +66,12 @@ def test_job_shape(library, monkeypatch):
         full = jobs._jobs[job["id"]]
         assert full["mode"] == "recompress"
         assert full["recompress"]["folder"] == folder
+        assert full["recompress"]["rel"] == "filme.mkv"
         assert full["recompress"]["replace"] is False
-        assert full["recompress"]["source_size"] == src.stat().st_size
         assert full["convert"]["video_codec"] == "hevc"
-        # não é job de torrent: nada de busca/candidatos
+        # não é job de torrent: nada de busca/candidatos/kind
         assert full["search"] is None and full["video_torrent"] is None
+        assert full["kind"] is None
     asyncio.run(go())
 
 
@@ -75,7 +80,7 @@ def test_tmdb_id_from_folder(library, monkeypatch):
     did, _folder, src = library
     tagged = src.parent.with_name("Filme (2020) [tmdbid-603]")
     src.parent.rename(tagged)
-    async def _noop(job, s):
+    async def _noop(job, src, opts=None):
         return None
     monkeypatch.setattr(jobs, "_run_recompress", _noop)
 
@@ -197,7 +202,7 @@ def test_discards_when_result_is_bigger(library, monkeypatch):
 @pytest.mark.ffmpeg
 def test_retry_recreates_recompress(library, monkeypatch):
     did, folder, _src = library
-    async def _noop(job, s):
+    async def _noop(job, src, opts=None):
         return None
     monkeypatch.setattr(jobs, "_run_recompress", _noop)
 
@@ -213,4 +218,61 @@ def test_retry_recreates_recompress(library, monkeypatch):
         assert full["mode"] == "recompress"
         assert full["recompress"]["rel"] == "filme.mkv"
         assert full["recompress"]["replace"] is False  # a escolha do usuário sobrevive
+    asyncio.run(go())
+
+
+def test_resume_after_restart_uses_recompress_pipeline(library, monkeypatch):
+    """Job de recompressão interrompido por restart tem de voltar para
+    _run_recompress — NUNCA para _run_from_download (que procuraria torrents
+    inexistentes e deixaria o .tmp órfão)."""
+    did, folder, src = library
+    routed = {}
+
+    async def fake_recompress(job, s, opts=None):
+        routed["recompress"] = (job["id"], str(s))
+
+    async def fake_download(job):
+        routed["download"] = job["id"]  # nunca deve ser chamado
+
+    monkeypatch.setattr(jobs, "_run_recompress", fake_recompress)
+    monkeypatch.setattr(jobs, "_run_from_download", fake_download)
+
+    async def go():
+        # job de recompressão como fica no banco após restart (status ativo,
+        # sem manual_files, kind None) — recriado direto para simular o reload
+        job = {"id": "rc1", "tmdb_id": None, "language": "pt", "mode": "recompress",
+               "kind": None, "convert": CONV, "status": "merging", "detail": "",
+               "movie": None, "video_torrent": None, "audio_torrent": None,
+               "output": None, "destination_id": did,
+               "created_at": "2026-01-01T00:00:00",
+               "progress": {"video": None, "audio": None},
+               "recompress": {"folder": folder, "rel": "filme.mkv", "replace": True},
+               "search": None, "fallbacks": None, "current": None}
+        jobs._jobs["rc1"] = job
+        jobs.resume_pending()
+        await asyncio.gather(*jobs._tasks.values())
+        assert routed.get("recompress") == ("rc1", str(src))
+        assert "download" not in routed  # não caiu no pipeline de torrents
+    asyncio.run(go())
+
+
+def test_resume_missing_source_errors(library, monkeypatch):
+    """Se o filme sumiu do disco entre o restart e o resume, o job vai a erro
+    em vez de tentar rodar sobre um arquivo inexistente."""
+    did, folder, _src = library
+    monkeypatch.setattr(jobs, "_run_recompress",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("não deveria rodar")))
+
+    async def go():
+        job = {"id": "rc2", "tmdb_id": None, "language": "pt", "mode": "recompress",
+               "kind": None, "convert": CONV, "status": "merging", "detail": "",
+               "movie": None, "video_torrent": None, "audio_torrent": None,
+               "output": None, "destination_id": did,
+               "created_at": "2026-01-01T00:00:00",
+               "progress": {"video": None, "audio": None},
+               "recompress": {"folder": folder, "rel": "sumiu.mkv", "replace": True},
+               "search": None, "fallbacks": None, "current": None}
+        jobs._jobs["rc2"] = job
+        jobs.resume_pending()
+        assert jobs._lookup("rc2")["status"] == "error"
     asyncio.run(go())

@@ -184,6 +184,8 @@ export interface Candidate {
   seeders: number
   size: number
   edition?: string | null
+  /** Rótulo da qualidade estilo Radarr ("4K Remux", "1080p WEB-DL", "Desconhecida"). */
+  quality?: string | null
   score: number | null
   rejected?: string | null
   chosen?: boolean
@@ -384,6 +386,10 @@ export interface CatalogDetail {
   folder: string
   title: string
   year: string | null
+  /** id do TMDB já marcado no nome da pasta ([tmdbid-N]); null = ainda não marcada. */
+  tmdb_id: number | null
+  /** nome que a pasta teria com o [tmdbid-N] (backend); null se sem id/match. */
+  proposed_folder: string | null
   size: number
   size_human: string
   files: CatalogFile[]

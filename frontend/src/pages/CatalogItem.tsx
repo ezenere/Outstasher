@@ -21,8 +21,6 @@ export default function CatalogItem() {
   const navigate = useNavigate()
 
   const qs = `destination_id=${destId}&folder=${encodeURIComponent(folder)}`
-  // o [tmdbid-N] na pasta é o que o Jellyfin usa para identificar o filme
-  const taggedId = /\[tmdbid-(\d+)\]/i.exec(folder)?.[1]
 
   const reload = useCallback(async () => {
     try {
@@ -78,11 +76,12 @@ export default function CatalogItem() {
   }
 
   async function tagTmdbId() {
-    if (!detail?.tmdb) return
-    const novo = `${detail.title}${detail.year ? ` (${detail.year})` : ''} [tmdbid-${detail.tmdb.id}]`
+    if (!detail?.tmdb || !detail.proposed_folder) return
+    // proposed_folder vem do backend (mesmo safe_name/folder_name da renomeação
+    // real), então o dialog mostra exatamente o nome que será criado
     if (!(await dialog.confirm({
       title: 'Marcar com o ID do TMDB',
-      message: `Renomear a pasta para "${novo}"? O Jellyfin usa esse ID para identificar o filme sem depender do título.`,
+      message: `Renomear a pasta para "${detail.proposed_folder}"? O Jellyfin usa esse ID para identificar o filme sem depender do título.`,
       confirmText: 'Renomear',
     }))) return
     try {
@@ -127,7 +126,7 @@ export default function CatalogItem() {
           {detail.title}
           {detail.year && <span className="ml-1 font-normal text-zinc-400">({detail.year})</span>}
         </h1>
-        {m && !taggedId && (
+        {m && detail.tmdb_id == null && (
           <button
             onClick={tagTmdbId}
             title={`Renomear a pasta para incluir [tmdbid-${m.id}]`}
