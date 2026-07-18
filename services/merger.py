@@ -598,6 +598,17 @@ def _run_ffmpeg_progress(cmd: list[str], duration_s: float,
     t.join(timeout=5)
     if proc.returncode != 0:
         tail = "".join(stderr_lines)[-3000:]
+        # código -9 = SIGKILL: o ffmpeg foi MORTO de fora, não errou o encode.
+        # O cancelamento pela UI também usa SIGKILL, mas esse caminho é tratado
+        # antes (jobs._cancelling); um -9 que chega aqui é morte externa — quase
+        # sempre o OOM killer do kernel (encode grande demais para a RAM).
+        if proc.returncode == -9:
+            raise MergeError(
+                "ffmpeg foi morto (SIGKILL, código -9) — quase sempre falta de "
+                "memória: o kernel (OOM killer) mata o encoder quando ele passa "
+                "da RAM disponível. Encodes AV1 em 4K são os mais pesados; tente "
+                "HEVC, uma resolução menor, ou mais RAM na máquina.\n"
+                "Saída do ffmpeg:\n" + tail)
         raise MergeError(f"ffmpeg falhou (código {proc.returncode}):\n{tail}")
 
 

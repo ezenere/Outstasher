@@ -19,12 +19,14 @@ pipeline fica exatamente como sempre foi.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+import config
 from services import merger  # o merger só importa este módulo dentro de função (sem ciclo)
 
 # -------------------- catálogo do que oferecemos --------------------
@@ -111,6 +113,60 @@ CHANNEL_CAPS = {"stereo": 2, "surround51": 6}
 
 # fontes lossless (regra do FLAC: lossy -> FLAC só infla o arquivo)
 _LOSSLESS_AUDIO = {"truehd", "flac", "mlp", "alac"}
+
+# Lookahead do SVT-AV1: quanto MAIOR, melhor a análise temporal — e mais RAM,
+# porque o encoder segura todos esses frames em voo. Cada frame em voo em 4K
+# 10-bit custa MUITO mais que o frame cru: o SVT-AV1 mantém estruturas de
+# análise, referências e mini-gops por frame. Calibrado pelo caso real que
+# estourou (RSS ~13 GB com ~76 frames em voo => ~170 MB/frame em 4K 10-bit).
+# O default do encoder passa de 12 GB e o OOM killer mata o ffmpeg em máquinas
+# de 16 GB. Derivamos um teto SEGURO da RAM real da máquina no 1º uso.
+_SVTAV1_INFLIGHT_4K10_BYTES = 170 * 1024 * 1024
+# além do lookahead, o encoder mantém referências/mini-gops em voo (fixo)
+_SVTAV1_BASE_INFLIGHT = 40
+# lookahead efetivo do default do SVT-AV1 (o caso real de OOM tinha ~76 frames
+# em voo com o default) — usado só para ESTIMAR o pico quando o limite está off
+_SVTAV1_DEFAULT_LOOKAHEAD = 76
+_svtav1_lookahead_cache: int | None = None
+
+
+def _total_ram_bytes() -> int:
+    """RAM física total da máquina, 0 se indeterminável."""
+    try:  # POSIX: caminho barato e sem deps
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        pass
+    try:  # fallback multiplataforma
+        import psutil
+        return psutil.virtual_memory().total
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def svtav1_lookahead() -> int | None:
+    """Teto de lookahead do SVT-AV1 seguro para a RAM desta máquina (cacheado).
+
+    Reserva ~40% da RAM total ao buffer do encoder (o resto é SO + qBittorrent +
+    o próprio app) e converte em frames de 4K 10-bit, descontando as referências
+    fixas em voo. Entre 16 (mínimo útil) e 120 (acima o ganho satura). Sem RAM
+    detectável, cai no piso conservador de 16 — que gerou o OOM foi o default,
+    não um lookahead baixo.
+
+    Retorna None quando IGNORE_AV1_LOOKAHEAD_LIMITS está ligado: nesse caso o
+    encode não passa `-svtav1-params lookahead=` e o SVT-AV1 usa o próprio
+    default (arriscando OOM em 4K — escolha explícita de quem ligou a flag)."""
+    if config.IGNORE_AV1_LOOKAHEAD_LIMITS:
+        return None
+    global _svtav1_lookahead_cache
+    if _svtav1_lookahead_cache is None:
+        ram = _total_ram_bytes()
+        if not ram:
+            _svtav1_lookahead_cache = 16
+        else:
+            budget = ram * 0.4
+            frames = int(budget / _SVTAV1_INFLIGHT_4K10_BYTES) - _SVTAV1_BASE_INFLIGHT
+            _svtav1_lookahead_cache = max(16, min(120, frames))
+    return _svtav1_lookahead_cache
 
 # libopus não aceita layouts "(side)" (5.1(side) de fontes DTS/E-AC3);
 # este aformat força um layout que ele conhece antes do encode
@@ -496,6 +552,14 @@ def plan_video(probe: dict, vstream: dict, opts: ConvertOptions,
         args += ["-speed", preset]
     else:
         args += ["-preset", preset]
+    if encoder == "libsvtav1":
+        # teto de lookahead derivado da RAM da máquina: o default do SVT-AV1
+        # segura frames demais e, em 4K 10-bit, o pico passa de 12 GB (OOM em
+        # máquinas de 16 GB). Ver svtav1_lookahead(). None = flag de ignorar o
+        # limite ligada: não passa o param, o encoder usa o próprio default.
+        la = svtav1_lookahead()
+        if la is not None:
+            args += ["-svtav1-params", f"lookahead={la}"]
 
     if opts.quality_mode == "crf":
         crf = opts.crf if opts.crf is not None \
@@ -584,8 +648,46 @@ def plan_video(probe: dict, vstream: dict, opts: ConvertOptions,
         args += ["-vf", f"scale={cap}:-2"]
         notes.append(f"resolução reduzida: {width}x{height} → {cap}px de largura")
 
+    # aviso de RAM: SVT-AV1 em alta resolução pode exceder a RAM da máquina e
+    # ser morto pelo OOM killer no meio do encode (horas perdidas). Estima o
+    # pico e compara com a RAM disponível — só avisa, não bloqueia.
+    if encoder == "libsvtav1":
+        out_w = cap if downscale else width
+        out_h = (cap * height // width) if (downscale and width) else height
+        warn = _svtav1_ram_warning(out_w, out_h, ten_bit_out)
+        if warn:
+            notes.append(warn)
+
     return VideoPlan(encode=True, encoder=encoder, args=args,
                      input_args=input_args, notes=notes)
+
+
+def _svtav1_ram_warning(width: int, height: int, ten_bit: bool) -> str | None:
+    """Nota de aviso se o pico estimado de RAM do SVT-AV1 se aproxima do que a
+    máquina tem. None se cabe folgado ou se a RAM não é detectável."""
+    ram = _total_ram_bytes()
+    if not (ram and width and height):
+        return None
+    # custo por frame escalado do valor calibrado em 4K 10-bit, por pixels e
+    # bytes/amostra (10-bit = 2 bytes, 8-bit = 1)
+    ref_px = 3840 * 2160
+    per_frame = _SVTAV1_INFLIGHT_4K10_BYTES * (width * height / ref_px) * (1 if ten_bit else 0.5)
+    # com o limite ligado, estima pelo lookahead escolhido; com ele DESLIGADO
+    # (svtav1_lookahead()==None), estima pelo default alto do SVT-AV1 — é
+    # justamente quando o aviso mais importa
+    la = svtav1_lookahead()
+    frames = (la if la is not None else _SVTAV1_DEFAULT_LOOKAHEAD) + _SVTAV1_BASE_INFLIGHT
+    peak = int(per_frame * frames)
+    # o limiter já dimensiona o lookahead para caber em ~40% da RAM; só avisa
+    # quando o pico passa de 75% do total (folga real ameaçada) — senão todo
+    # 4K AV1 numa máquina "no limite" viraria ruído mesmo já cabendo
+    if peak < ram * 0.75:
+        return None  # cabe com folga
+    gb = lambda n: f"{n / 1024**3:.1f} GB"  # noqa: E731
+    return (f"⚠️ encode AV1 {width}x{height}{'10-bit' if ten_bit else ''}: pico de "
+            f"RAM estimado ~{gb(peak)} de {gb(ram)} disponíveis — risco de o "
+            f"encoder ser morto por falta de memória (OOM). Considere HEVC, uma "
+            f"resolução menor, ou mais RAM na máquina.")
 
 
 # -------------------- plano de cada faixa de áudio --------------------

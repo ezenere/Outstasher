@@ -29,6 +29,29 @@ def fixed_offset(monkeypatch):
     monkeypatch.setattr(merger, "_measure_offset", lambda *a, **k: 0.0)
 
 
+def test_sigkill_reports_oom(tmp_path, make_media):
+    """ffmpeg morto por SIGKILL (código -9) — o que o OOM killer faz — vira uma
+    MergeError que EXPLICA o OOM e ainda mostra a saída do ffmpeg. Aqui matamos
+    o processo à mão via on_start para simular a morte externa."""
+    import threading
+
+    src = tmp_path / "in.mkv"
+    make_media(src, ["eng"], dur=30, w=1280, h=536)  # longo para dar tempo de matar
+    out = tmp_path / "out.mkv"
+
+    def kill_soon(proc):
+        # mata o ffmpeg com SIGKILL logo após ele começar (== OOM killer)
+        threading.Timer(1.0, proc.kill).start()
+
+    opts = tc.validate({"video_codec": "hevc", "quality_mode": "crf", "crf": 30,
+                        "preset": "veryslow"})  # lento, garante que ainda roda quando matamos
+    with pytest.raises(merger.MergeError) as ei:
+        tc.convert_single(str(src), str(out), opts, log=quiet, on_start=kill_soon)
+    msg = str(ei.value)
+    assert "OOM" in msg or "memória" in msg or "SIGKILL" in msg, msg
+    assert "-9" in msg  # o código bruto continua visível
+
+
 def test_convert_single_hevc_downscale_target_aac(tmp_path, make_media, ffprobe_streams):
     src = tmp_path / "single.mkv"
     make_media(src, ["eng", "por", "fra"], w=1920, h=800)

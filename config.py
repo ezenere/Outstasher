@@ -60,6 +60,19 @@ STALL_TIMEOUT_MINUTES = int(os.getenv("STALL_TIMEOUT_MINUTES", "15") or "15")
 # O que fazer com os torrents apos o merge: keep | remove | remove_data
 QBIT_CLEANUP = (os.getenv("QBIT_CLEANUP", "keep").strip() or "keep").lower()
 
+
+def _env_bool(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# SVT-AV1 (AV1 por software) segura frames em buffer proporcional ao lookahead;
+# em 4K 10-bit isso passa de 12 GB e o kernel mata o ffmpeg (OOM). Por padrão o
+# app limita o lookahead à RAM da máquina. Defina IGNORE_AV1_LOOKAHEAD_LIMITS=true
+# para DESLIGAR esse teto e deixar o SVT-AV1 usar o próprio default — só faça
+# isso se a máquina tiver RAM de sobra ou você encodar abaixo de 4K, senão o
+# encode volta a arriscar OOM. Ver services/transcode.svtav1_lookahead().
+IGNORE_AV1_LOOKAHEAD_LIMITS = _env_bool("IGNORE_AV1_LOOKAHEAD_LIMITS")
+
 # quão rápido o watchdog consulta o qBittorrent (atualiza o progresso em
 # memória). Fica abaixo do tick de 1s do detalhe do job na UI, para a barra
 # sempre ler um valor fresco.

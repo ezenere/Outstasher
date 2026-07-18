@@ -175,6 +175,77 @@ def test_plan_video_crf_svtav1():
     assert "-preset" in p.args and "6" in p.args
 
 
+def test_svtav1_caps_lookahead(monkeypatch):
+    # todo encode SVT-AV1 leva um teto de lookahead (evita o pico de RAM que
+    # matava o ffmpeg por OOM)
+    monkeypatch.setattr(tc, "_svtav1_lookahead_cache", None)
+    monkeypatch.setattr(tc, "_total_ram_bytes", lambda: 16 * 1024**3)
+    vs = vstream(codec="h264", br=20_000_000)
+    p = tc.plan_video(probe(vs), vs, tc.validate({"video_codec": "av1", "video_bitrate": 8000}))
+    assert "-svtav1-params" in p.args
+    la = p.args[p.args.index("-svtav1-params") + 1]
+    assert la.startswith("lookahead=")
+
+
+def test_svtav1_lookahead_scales_with_ram(monkeypatch):
+    def la_for(gb):
+        monkeypatch.setattr(tc, "_svtav1_lookahead_cache", None)
+        monkeypatch.setattr(tc, "_total_ram_bytes", lambda g=gb: g * 1024**3)
+        return tc.svtav1_lookahead()
+    # mais RAM -> mais lookahead (melhor qualidade); menos RAM -> piso seguro
+    assert la_for(8) == 16                     # piso
+    assert la_for(64) > la_for(16)             # cresce com a RAM
+    assert 16 <= la_for(16) <= 120             # dentro dos limites
+    # RAM indeterminável -> piso conservador (não o default perigoso do encoder)
+    monkeypatch.setattr(tc, "_svtav1_lookahead_cache", None)
+    monkeypatch.setattr(tc, "_total_ram_bytes", lambda: 0)
+    assert tc.svtav1_lookahead() == 16
+
+
+def test_svtav1_ram_warning(monkeypatch):
+    monkeypatch.setattr(tc.config, "IGNORE_AV1_LOOKAHEAD_LIMITS", False)
+    monkeypatch.setattr(tc, "_svtav1_lookahead_cache", None)
+    # 8 GB: nem o mínimo cabe para 4K 10-bit -> avisa
+    monkeypatch.setattr(tc, "_total_ram_bytes", lambda: 8 * 1024**3)
+    assert tc._svtav1_ram_warning(3840, 2160, True) is not None
+    # 64 GB: cabe folgado -> sem aviso
+    monkeypatch.setattr(tc, "_svtav1_lookahead_cache", None)
+    monkeypatch.setattr(tc, "_total_ram_bytes", lambda: 64 * 1024**3)
+    assert tc._svtav1_ram_warning(3840, 2160, True) is None
+    # 1080p cabe em qualquer RAM razoável
+    monkeypatch.setattr(tc, "_total_ram_bytes", lambda: 16 * 1024**3)
+    monkeypatch.setattr(tc, "_svtav1_lookahead_cache", None)
+    assert tc._svtav1_ram_warning(1920, 1080, True) is None
+    # RAM indeterminável -> não inventa aviso
+    monkeypatch.setattr(tc, "_total_ram_bytes", lambda: 0)
+    assert tc._svtav1_ram_warning(3840, 2160, True) is None
+
+
+def test_ignore_av1_lookahead_flag(monkeypatch):
+    """IGNORE_AV1_LOOKAHEAD_LIMITS=true: não passa o -svtav1-params lookahead
+    (encoder usa o próprio default), e o aviso de RAM ainda dispara em 4K porque
+    o default é alto — o usuário optou pelo risco conscientemente."""
+    vs = vstream(codec="h264", w=3840, h=2160, br=80_000_000, pix="yuv420p10le")
+    opts = tc.validate({"video_codec": "av1", "video_bitrate": 23000})
+
+    # limite LIGADO (default): passa o param
+    monkeypatch.setattr(tc.config, "IGNORE_AV1_LOOKAHEAD_LIMITS", False)
+    monkeypatch.setattr(tc, "_svtav1_lookahead_cache", None)
+    monkeypatch.setattr(tc, "_total_ram_bytes", lambda: 15 * 1024**3)
+    on = tc.plan_video(probe(vs), vs, opts)
+    assert any(a.startswith("lookahead=") for a in on.args)
+    assert isinstance(tc.svtav1_lookahead(), int)  # número, não None
+
+    # limite DESLIGADO: nenhum -svtav1-params, mas AVISA (default alto em 15 GB)
+    monkeypatch.setattr(tc.config, "IGNORE_AV1_LOOKAHEAD_LIMITS", True)
+    monkeypatch.setattr(tc, "_svtav1_lookahead_cache", None)
+    off = tc.plan_video(probe(vs), vs, opts)
+    assert not any(a.startswith("lookahead=") for a in off.args)
+    assert "-svtav1-params" not in off.args
+    assert tc.svtav1_lookahead() is None
+    assert any("OOM" in n or "memória" in n for n in off.notes)
+
+
 def test_estimate_video_bitrate():
     vs = vstream(codec="h264")  # sem bit_rate no stream
     pr = probe(vs, audios=(astream(br=640_000),), fmt_br=8_000_000)

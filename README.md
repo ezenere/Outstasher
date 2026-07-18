@@ -128,7 +128,15 @@ converter o resultado em vez de copiá-lo. Desabilitado por padrão (sai em stre
 copy). Opções:
 
 - **Codec de vídeo**: manter / VVC / AV1 / HEVC / H.264 (só os que o ffmpeg tem
-  encoder aparecem).
+  encoder aparecem). Em **AV1 por software** (SVT-AV1) o lookahead é limitado a
+  um teto derivado da RAM da máquina — o default do encoder segura frames demais
+  em buffer e, em 4K 10-bit, o pico de RAM passa de 12 GB e o kernel mata o
+  ffmpeg (OOM). O teto é calculado no 1º uso (mais RAM → lookahead maior,
+  melhor qualidade); num servidor de 16 GB fica no piso. Um encode que ainda
+  tende a não caber gera uma nota de aviso no job; se o ffmpeg é morto por
+  SIGKILL, o erro explica que foi falta de memória. Para **desligar o teto** e
+  usar o default do SVT-AV1, defina `IGNORE_AV1_LOOKAHEAD_LIMITS=true` (só com
+  RAM de sobra ou encodando abaixo de 4K — senão o OOM volta).
 - **Encoder**: software (CPU) / **NVENC** (GPU NVIDIA) / **Quick Sync** (GPU
   Intel/Arc), para H.264/HEVC/AV1. A disponibilidade é testada com um encode
   real na GPU; a faixa de qualidade (CQ/ICQ, 1–51) e o 10-bit (não existe em
