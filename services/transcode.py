@@ -124,9 +124,11 @@ _LOSSLESS_AUDIO = {"truehd", "flac", "mlp", "alac"}
 _SVTAV1_INFLIGHT_4K10_BYTES = 170 * 1024 * 1024
 # além do lookahead, o encoder mantém referências/mini-gops em voo (fixo)
 _SVTAV1_BASE_INFLIGHT = 40
-# lookahead efetivo do default do SVT-AV1 (o caso real de OOM tinha ~76 frames
-# em voo com o default) — usado só para ESTIMAR o pico quando o limite está off
-_SVTAV1_DEFAULT_LOOKAHEAD = 76
+# lookahead efetivo do default do SVT-AV1, usado só para ESTIMAR o pico quando
+# o limite está desligado. O caso real de OOM tinha ~76 frames TOTAIS em voo
+# com o default; no nosso modelo total = lookahead + base, logo 76 - 40 = 36
+# (usar 76 aqui somaria a base duas vezes e superestimaria o pico em ~50%).
+_SVTAV1_DEFAULT_LOOKAHEAD = 36
 _svtav1_lookahead_cache: int | None = None
 
 
@@ -148,9 +150,12 @@ def svtav1_lookahead() -> int | None:
 
     Reserva ~40% da RAM total ao buffer do encoder (o resto é SO + qBittorrent +
     o próprio app) e converte em frames de 4K 10-bit, descontando as referências
-    fixas em voo. Entre 16 (mínimo útil) e 120 (acima o ganho satura). Sem RAM
-    detectável, cai no piso conservador de 16 — que gerou o OOM foi o default,
-    não um lookahead baixo.
+    fixas em voo. Entre 16 (mínimo útil) e 120 (o máximo do encoder). ATENÇÃO:
+    no piso o orçamento de 40% é ultrapassado — 16+40 frames ≈ 9.3 GB, ~62% de
+    uma máquina de 15 GiB. É aceito porque ainda deixa folga real (validado
+    contra o caso de OOM: o default usava 12.4 GiB e estourava) e o aviso de
+    75% (_svtav1_ram_warning) cobre máquinas onde nem o piso cabe. Sem RAM
+    detectável, cai no piso de 16.
 
     Retorna None quando IGNORE_AV1_LOOKAHEAD_LIMITS está ligado: nesse caso o
     encode não passa `-svtav1-params lookahead=` e o SVT-AV1 usa o próprio
