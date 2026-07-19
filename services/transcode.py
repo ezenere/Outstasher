@@ -148,14 +148,14 @@ def _total_ram_bytes() -> int:
 def svtav1_lookahead() -> int | None:
     """Teto de lookahead do SVT-AV1 seguro para a RAM desta máquina (cacheado).
 
-    Reserva ~40% da RAM total ao buffer do encoder (o resto é SO + qBittorrent +
+    Reserva ~50% da RAM total ao buffer do encoder (o resto é SO + qBittorrent +
     o próprio app) e converte em frames de 4K 10-bit, descontando as referências
     fixas em voo. Entre 16 (mínimo útil) e 120 (o máximo do encoder). ATENÇÃO:
-    no piso o orçamento de 40% é ultrapassado — 16+40 frames ≈ 9.3 GB, ~62% de
-    uma máquina de 15 GiB. É aceito porque ainda deixa folga real (validado
-    contra o caso de OOM: o default usava 12.4 GiB e estourava) e o aviso de
-    75% (_svtav1_ram_warning) cobre máquinas onde nem o piso cabe. Sem RAM
-    detectável, cai no piso de 16.
+    no piso o orçamento de 50% pode ser ultrapassado — 16+40 frames ≈ 9.3 GB,
+    ~62% de uma máquina de 15 GiB. É aceito porque ainda deixa folga real
+    (validado contra o caso de OOM: o default usava 12.4 GiB e estourava) e o
+    aviso de 75% (_svtav1_ram_warning) cobre máquinas onde nem o piso cabe. Sem
+    RAM detectável, cai no piso de 16.
 
     Retorna None quando IGNORE_AV1_LOOKAHEAD_LIMITS está ligado: nesse caso o
     encode não passa `-svtav1-params lookahead=` e o SVT-AV1 usa o próprio
@@ -168,7 +168,7 @@ def svtav1_lookahead() -> int | None:
         if not ram:
             _svtav1_lookahead_cache = 16
         else:
-            budget = ram * 0.4
+            budget = ram * 0.5
             frames = int(budget / _SVTAV1_INFLIGHT_4K10_BYTES) - _SVTAV1_BASE_INFLIGHT
             _svtav1_lookahead_cache = max(16, min(120, frames))
     return _svtav1_lookahead_cache
@@ -683,7 +683,7 @@ def _svtav1_ram_warning(width: int, height: int, ten_bit: bool) -> str | None:
     la = svtav1_lookahead()
     frames = (la if la is not None else _SVTAV1_DEFAULT_LOOKAHEAD) + _SVTAV1_BASE_INFLIGHT
     peak = int(per_frame * frames)
-    # o limiter já dimensiona o lookahead para caber em ~40% da RAM; só avisa
+    # o limiter já dimensiona o lookahead para caber em ~50% da RAM; só avisa
     # quando o pico passa de 75% do total (folga real ameaçada) — senão todo
     # 4K AV1 numa máquina "no limite" viraria ruído mesmo já cabendo
     if peak < ram * 0.75:
