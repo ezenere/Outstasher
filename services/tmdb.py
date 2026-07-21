@@ -73,14 +73,35 @@ async def match(title: str, year: str | None = None) -> dict | None:
     return _slim(results[0]) if results else None
 
 
+def _english_title(data: dict) -> str | None:
+    """Título em inglês de translations (append_to_response). None se não houver
+    ou se coincidir com o original (nada a ganhar). Trackers costumam indexar
+    filmes estrangeiros pelo nome em inglês, não pelo original — daí buscar por
+    ele também na versão original (ver jobs._search)."""
+    original = (data.get("original_title") or "").strip()
+    if (data.get("original_language") or "").lower() == "en":
+        return None  # o original já é o inglês
+    for tr in ((data.get("translations") or {}).get("translations") or []):
+        if (tr.get("iso_639_1") or "").lower() == "en":
+            title = ((tr.get("data") or {}).get("title") or "").strip()
+            if title and title.lower() != original.lower():
+                return title
+    return None
+
+
 async def details(movie_id: int, language: str) -> dict:
-    """Retorna titulo original e titulo traduzido no idioma pedido."""
+    """Retorna titulo original, titulo traduzido no idioma pedido e (para filmes
+    nao-ingleses) o titulo em ingles — trackers indexam estrangeiros pelo nome
+    em ingles. O append_to_response traz as traducoes na MESMA requisicao."""
     tmdb_lang = config.LANGUAGES[language]["tmdb"]
-    data = await _get(f"/movie/{movie_id}", {"language": tmdb_lang})
+    data = await _get(f"/movie/{movie_id}",
+                      {"language": tmdb_lang, "append_to_response": "translations"})
     return {
         "id": data["id"],
         "original_title": data.get("original_title"),
         "localized_title": data.get("title"),
+        # título em inglês (só quando o original não é inglês e difere); None senão
+        "english_title": _english_title(data),
         # ISO 639-1 ("en", "ja"...): usado pelo filtro "apenas original + dublagem"
         "original_language": data.get("original_language"),
         "year": (data.get("release_date") or "")[:4],

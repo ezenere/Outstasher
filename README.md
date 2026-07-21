@@ -21,7 +21,10 @@ torrent para cada uma, e junta tudo em um único arquivo: **melhor imagem + todo
      o score só ordena dentro de cada grupo.
    - título original → melhor **vídeo**, **restrito ao mesmo corte** do áudio
      (cortes diferentes não alinham). Sem vídeo do corte do melhor áudio, tenta o
-     próximo candidato de áudio.
+     próximo candidato de áudio. Filmes cujo título original **não é inglês**
+     (anime, cinema europeu...) são buscados **também pelo nome em inglês** — os
+     trackers costumam indexar estrangeiros assim; o matching aceita qualquer um
+     dos dois nomes.
 3. Envia os dois torrents ao **qBittorrent** via Web API. Se o Jackett devolve um
    link HTTP em vez de `magnet:`, o serviço resolve antes (segue o redirect ou
    baixa o `.torrent` e envia como arquivo — o qBittorrent nem sempre segue).

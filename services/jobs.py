@@ -1092,6 +1092,17 @@ async def _search(job: dict):
     has_localized = bool(localized and localized.lower() != (original or "").lower())
     query_localized = f"{localized} {year}".strip() if has_localized else None
 
+    # título em inglês: filmes cujo original NÃO é inglês (anime, cinema europeu...)
+    # são indexados nos trackers pelo nome em inglês, não pelo original. Buscamos
+    # por ele TAMBÉM e mesclamos na "versão original" (é o mesmo filme em áudio
+    # original, só com outro nome). english_title vem None quando o original já
+    # é inglês ou coincide — aí não há busca extra.
+    english = movie.get("english_title")
+    query_english = f"{english} {year}".strip() if english else None
+    # títulos que identificam a versão original no matching: o original e (se
+    # houver) o inglês — um release pode vir com qualquer um dos dois nomes
+    original_titles = [original] + ([english] if english else [])
+
     # grafias do título localizado: o próprio + variantes de caractere especial
     # (& vs "e", @ vs a, ...). SÓ para o localizado (dublado), onde os trackers
     # BR bagunçam a grafia. O original fica como o TMDB dá (buscar "Fast e
@@ -1107,6 +1118,10 @@ async def _search(job: dict):
     extra_specs = _extra_searches(loc_spellings, year, lang) if want_audio else []
 
     _set(job, "searching", f"Procurando '{query_original}' no Jackett...")
+    if query_english:
+        _event(job, "search",
+               f"Título original não é inglês — buscando também pelo nome em "
+               f"inglês '{query_english}' (trackers indexam estrangeiros assim)")
     if extra_specs:
         _event(job, "search",
                f"{len(extra_specs)} busca(s) extra(s) configurada(s) para {label} "
@@ -1119,6 +1134,10 @@ async def _search(job: dict):
     # dispara TODAS as buscas em paralelo. Guardamos os índices de cada grupo
     # para separar os resultados depois.
     tasks = [jackett.search(query_original)]
+    i_english = None
+    if query_english:
+        i_english = len(tasks)
+        tasks.append(jackett.search(query_english))
     if query_localized:
         tasks.append(jackett.search(query_localized))
     i_loc_var = len(tasks)
@@ -1129,9 +1148,17 @@ async def _search(job: dict):
         tasks.append(_run_extra_search(job, spec))
     all_results = await asyncio.gather(*tasks)
 
-    results_original = _dedup_results(all_results[0])
-    _event(job, "search", f"Jackett devolveu {len(results_original)} resultados para '{query_original}'")
-    idx = 1
+    # a busca pelo nome em inglês é a MESMA versão original (áudio original, só
+    # indexado com outro nome) — mescla no pool do original antes do dedup
+    original_pool = list(all_results[0])
+    if i_english is not None:
+        eng_hits = all_results[i_english]
+        original_pool.extend(eng_hits)
+        _event(job, "search", f"Nome em inglês '{query_english}' → {len(eng_hits)} resultados")
+    results_original = _dedup_results(original_pool)
+    _event(job, "search", f"Jackett devolveu {len(results_original)} resultados para '{query_original}'"
+           + (" (+ nome em inglês)" if query_english else ""))
+    idx = 1 + (1 if query_english else 0)
     results_localized = []
     if query_localized:
         results_localized = all_results[idx]
@@ -1167,7 +1194,7 @@ async def _search(job: dict):
                 c["tier"] = 0  # titulo no idioma dublado: preferencia maxima
             audio_ranked.extend(ranked)
 
-        ranked, trace = selector.rank(results_original, "audio", original, year,
+        ranked, trace = selector.rank(results_original, "audio", original_titles, year,
                                       language=lang, require_language=True,
                                       dubbed_title=dubbed_title)
         _event(job, "candidates",
@@ -1205,7 +1232,7 @@ async def _search(job: dict):
     # ---- video: titulo original, qualquer corte (o filtro vem depois) ----
     video_viable = []
     if want_video:
-        video_viable, trace = selector.rank(results_original, "video", original, year)
+        video_viable, trace = selector.rank(results_original, "video", original_titles, year)
         _event(job, "candidates", f"Avaliação para VÍDEO — busca '{query_original}'",
                {"role": "video", "query": query_original, "candidates": trace})
 

@@ -61,6 +61,27 @@ def test_video_mode_ignores_year(temp_db):
     assert ranked[0]["title"] == "Ex Machina 1080p BluRay x264"
 
 
+def test_rank_matches_any_alternative_title(temp_db):
+    # filme estrangeiro: releases vêm com o nome original OU o nome em inglês —
+    # rank aceita uma lista e casa QUALQUER um dos dois
+    results = [cand("Spirited Away 2001 1080p BluRay x264"),
+               cand("Sen to Chihiro no Kamikakushi 2001 2160p BluRay REMUX"),
+               cand("Filme Aleatorio 2001 1080p")]
+    titles = ["Sen to Chihiro no Kamikakushi", "Spirited Away"]
+    ranked, _ = selector.rank(results, "video", titles, "2001")
+    got = {r["title"] for r in ranked}
+    assert "Spirited Away 2001 1080p BluRay x264" in got          # nome inglês
+    assert "Sen to Chihiro no Kamikakushi 2001 2160p BluRay REMUX" in got  # nome original
+    assert "Filme Aleatorio 2001 1080p" not in got               # nenhum dos dois
+
+
+def test_rank_single_title_still_works(temp_db):
+    # retrocompat: passar uma STRING (não lista) continua casando normalmente
+    results = [cand("Ex Machina 2014 1080p BluRay")]
+    ranked, _ = selector.rank(results, "video", "Ex Machina", "2014")
+    assert len(ranked) == 1
+
+
 def test_year_match_visible_in_trace(temp_db):
     # o trace expõe year_match (a UI marca com a tag [ano]) e ordena os viáveis
     # com ano antes dos sem ano

@@ -416,7 +416,7 @@ def score(result: dict, mode: str, language: str | None = None,
     return s
 
 
-def rank(results: list[dict], mode: str, movie_title: str, year: str,
+def rank(results: list[dict], mode: str, movie_title, year: str,
          language: str | None = None,
          require_language: bool = False,
          required_edition: str | None = ANY_EDITION,
@@ -429,12 +429,17 @@ def rank(results: list[dict], mode: str, movie_title: str, year: str,
     No modo áudio, o ANO no nome e o marcador FORTE de dublagem têm preferência
     absoluta sobre a qualidade (identificação e idioma vêm antes da imagem).
 
+    movie_title: título a casar OU lista de títulos alternativos (casa se
+    QUALQUER um bater) — para filmes estrangeiros indexados tanto pelo nome
+    original quanto pelo nome em inglês.
     required_edition: ANY_EDITION libera qualquer corte; None exige corte normal;
     uma string ("extended", ...) exige aquele corte — para as duas versões
     baixadas serem do MESMO corte e os áudios alinharem.
     dubbed_title: título no idioma dublado (passar só se ≠ do original) — junto
     de 'dual' vira marcador forte (ver marker_strength).
     """
+    # aceita 1 título ou vários (nome original + nome em inglês); casa qualquer um
+    titles = [movie_title] if isinstance(movie_title, str) else list(movie_title)
     pairs: list[tuple[dict, dict]] = []
     for r in results:
         edition = edition_of(r["title"])
@@ -456,7 +461,7 @@ def rank(results: list[dict], mode: str, movie_title: str, year: str,
         }
         if not (r.get("magnet") or r.get("link")):
             cand["rejected"] = "sem magnet/link"
-        elif not _matches_movie(r["title"], movie_title, year):
+        elif not any(_matches_movie(r["title"], t, year) for t in titles):
             cand["rejected"] = "título não bate"
         elif require_language and language and not has_language_marker(r["title"], language, dubbed_title):
             cand["rejected"] = f"sem marcador de idioma ({config.LANGUAGES[language]['label']})"
