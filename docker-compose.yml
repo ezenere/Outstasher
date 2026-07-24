@@ -13,6 +13,20 @@ services:
     # isso funcionar tambem no Linux (no Docker Desktop ja funciona sem ela).
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+    # --- Aceleracao por HARDWARE Intel (Quick Sync / QSV — GPU Arc) ---
+    # Expoe a GPU ao container. So faz sentido em Linux com uma GPU Intel; sem
+    # ela, remova este bloco (a deteccao em runtime testa a GPU de verdade e
+    # simplesmente nao oferece o QSV se ele nao abrir).
+    #   - /dev/dri: o device de render/encode (renderD128) + card0.
+    #   - group_add: o container precisa pertencer ao grupo dono do renderD128
+    #     para ter permissao de acesso. Descubra o GID no host com:
+    #         getent group render        # ex.: render:x:992:  -> use 992
+    #     e ponha o NUMERO abaixo (nomes de grupo nao existem dentro do container).
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "992"   # GID do grupo 'render' no host (ajuste se o seu for diferente)
     volumes:
       # jobs.db (SQLite) persiste fora do container
       - downloader-data:/data
