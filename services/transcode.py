@@ -239,15 +239,41 @@ def hw_encoder_works(encoder: str) -> bool:
     return _hw_probe(encoder) != "no"
 
 
+"""Nas GPUs Intel o decode é feito por VAAPI, NUNCA por QSV — ver DECODE_QSV.md.
+
+O decoder QSV/oneVPL das Arc descarta frames em silêncio (saiu um filme com 26%
+dos frames, ffmpeg reportando `0 decode errors` e exit 0). O mesmo arquivo pela
+VAAPI, na MESMA GPU, decodifica 100%. Como o defeito não levanta erro nenhum,
+não há como detectá-lo em runtime — só evitando o caminho."""
+VAAPI_RENDER_NODE = "/dev/dri/renderD128"
+
+
 def _hw_decode_args(accel: str) -> list[str]:
-    return (["-init_hw_device", "qsv=hw"] if accel == "qsv" else []) + ["-hwaccel", accel]
+    if accel == "qsv":
+        # decode por VAAPI mesmo com encoder QSV (o encode QSV é íntegro)
+        return ["-hwaccel", "vaapi", "-hwaccel_device", VAAPI_RENDER_NODE]
+    return ["-hwaccel", accel]
+
+
+def _decode_output_format(accel: str) -> str:
+    """Formato do -hwaccel_output_format (manter frames na VRAM).
+
+    QSV é a exceção: os frames vêm da VAAPI e o hand-off VAAPI->QSV em VRAM não
+    funciona (o ffmpeg falha com "Impossible to convert between the formats" —
+    testado também com hwmap=derive_device). Os frames descem para a RAM."""
+    return "vaapi" if accel == "qsv" else accel
 
 
 def _hw_decode_works(path: str, accel: str, v_index: int = 0) -> bool:
     """Decode de 1 frame na GPU. O -hwaccel_output_format impede o fallback
-    silencioso para software — sem ele o ffmpeg retornaria 0 mesmo sem GPU."""
+    silencioso para software — sem ele o ffmpeg retornaria 0 mesmo sem GPU.
+
+    ATENÇÃO: isto prova que a GPU ABRE o arquivo, não que ela o decodifica
+    inteiro. Um decoder pode entregar menos frames e ainda sair com código 0
+    (foi exatamente o bug do QSV). Ver DECODE_QSV.md, item 3."""
     cmd = ["ffmpeg", "-hide_banner", "-v", "error",
-           *_hw_decode_args(accel), "-hwaccel_output_format", accel,
+           *_hw_decode_args(accel),
+           "-hwaccel_output_format", _decode_output_format(accel),
            "-i", path, "-map", f"0:v:{v_index}", "-frames:v", "1", "-f", "null", "-"]
     try:
         return subprocess.run(cmd, capture_output=True, timeout=60).returncode == 0
@@ -623,11 +649,17 @@ def plan_video(probe: dict, vstream: dict, opts: ConvertOptions,
         if _hw_decode_works(src, accel, int(vstream.get("_type_index") or 0)):
             input_args = _hw_decode_args(accel)
             # sem scale nem mudança de bit depth, os frames ficam na VRAM do
-            # decode ao encode (em 4K o round-trip pelo PCIe vira gargalo)
-            vram = not downscale and ten_bit_out == src_10bit
+            # decode ao encode (em 4K o round-trip pelo PCIe vira gargalo).
+            # No QSV isso não se aplica: o decode vem da VAAPI (ver
+            # _hw_decode_args) e o hand-off VAAPI->QSV só funciona pela RAM.
+            vram = (not downscale and ten_bit_out == src_10bit
+                    and accel != "qsv")
             if vram:
                 input_args += ["-hwaccel_output_format", accel]
-            notes.append("decode na GPU" + (" — frames direto na VRAM" if vram else ""))
+            notes.append("decode na GPU"
+                         + (" — frames direto na VRAM" if vram else "")
+                         + (" (VAAPI; o decoder QSV perde frames)"
+                            if accel == "qsv" else ""))
     if not vram:
         if is_hw:
             args += ["-pix_fmt", "p010le" if ten_bit_out else "nv12"]
