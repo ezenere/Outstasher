@@ -293,8 +293,10 @@ def test_hw_plan_or_reject():
                 assert "-cq" in p.args and "25" in p.args and "-crf" not in p.args
                 assert "-rc-lookahead" in p.args  # rate control reforçado
             else:
+                # QSV usa ICQ puro; extbrc/look_ahead_depth foram removidos por
+                # serem inertes sob ICQ na Arc (comprovado empiricamente)
                 assert "-global_quality" in p.args and "-crf" not in p.args
-                assert "-extbrc" in p.args and "-look_ahead_depth" in p.args
+                assert "-extbrc" not in p.args and "-look_ahead_depth" not in p.args
             assert "-g" in p.args    # GOP longo (default de HW é curto)
             assert "nv12" in p.args  # pix_fmt de HW (fonte 8-bit)
         else:

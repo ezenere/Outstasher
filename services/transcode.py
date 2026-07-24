@@ -576,10 +576,16 @@ def plan_video(probe: dict, vstream: dict, opts: ConvertOptions,
                      "-tune", "hq", "-multipass", "fullres", "-rc-lookahead", "32",
                      "-spatial-aq", "1", "-temporal-aq", "1"]
         elif encoder.endswith("_qsv"):
-            # QSV: ICQ; extbrc+lookahead ligam o rate control estendido do
-            # oneVPL (analisa dezenas de frames antes de distribuir bits)
-            args += ["-global_quality", str(crf), "-extbrc", "1",
-                     "-look_ahead_depth", "40"]
+            # QSV: ICQ puro (-global_quality). Nada de extbrc/look_ahead_depth:
+            # foram herdados da era H.264, onde o lookahead do QSV alimentava um
+            # rate control de bitrate-alvo (LA/LA-ICQ). Em ICQ não há orçamento de
+            # bits para redistribuir, então não fazem efeito. Comprovado
+            # empiricamente na Arc A380 (DG2/Alchemist): tanto no av1_qsv quanto
+            # no hevc_qsv, ligar look_ahead_depth (0/40/100) e adaptive_i/b gera
+            # saída byte-idêntica — o AV1 do Alchemist é VDENC-only/low-power e o
+            # oneVPL reseta esses parâmetros em silêncio. Só -global_quality e o
+            # -preset (aplicado acima) importam.
+            args += ["-global_quality", str(crf)]
         elif encoder == "libaom-av1":
             args += ["-crf", str(crf), "-b:v", "0"]
         elif encoder in ("librav1e", "libvvenc"):
