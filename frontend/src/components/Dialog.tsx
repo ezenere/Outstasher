@@ -131,13 +131,13 @@ export function DialogProvider({ children }: { children: React.ReactNode }) {
       {children}
       {state && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-sm"
           onClick={dismiss}
         >
           <div
             role="dialog"
             aria-modal="true"
-            className="w-full max-w-sm rounded-2xl border border-zinc-700 bg-zinc-900 shadow-2xl"
+            className="my-auto h-fit w-full max-w-sm rounded-2xl border border-zinc-700 bg-zinc-900 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start gap-3 p-5">

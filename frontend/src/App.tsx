@@ -7,7 +7,8 @@ import Movies from './pages/Movies'
 import Jobs from './pages/Jobs'
 import JobDetail from './pages/JobDetail'
 import Settings, {
-  DestinationsSection, TorrentTargetsSection, ExtraSearchSection, LanguagesSection, SecuritySection,
+  ConvertPresetsSection, DestinationsSection, TorrentTargetsSection, ExtraSearchSection,
+  LanguagesSection, SecuritySection,
 } from './pages/Settings'
 import Catalog from './pages/Catalog'
 import CatalogItem from './pages/CatalogItem'
@@ -134,6 +135,7 @@ export default function App() {
               <Route index element={<Navigate to="destinations" replace />} />
               <Route path="destinations" element={<DestinationsSection />} />
               <Route path="torrents" element={<TorrentTargetsSection />} />
+              <Route path="presets" element={<ConvertPresetsSection />} />
               <Route path="languages" element={<LanguagesSection />} />
               <Route path="searches" element={<ExtraSearchSection />} />
               <Route path="security" element={<SecuritySection />} />

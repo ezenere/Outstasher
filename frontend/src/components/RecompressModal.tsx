@@ -45,9 +45,12 @@ export default function RecompressModal({ folder, destinationId, file, tmdb, onC
   const radio = 'flex items-start gap-2 rounded-lg border p-3 text-sm cursor-pointer'
 
   return (
-    <div className="fixed inset-0 z-30 flex items-start justify-center overflow-y-auto bg-black/60 p-4 sm:items-center" onClick={onClose}>
+    <div className="fixed inset-0 z-30 flex justify-center overflow-y-auto bg-black/60 p-4" onClick={onClose}>
+      {/* my-auto (e não items-center) centraliza quando cabe, mas deixa o modal
+          crescer para baixo quando o conteúdo passa da tela — com items-center o
+          topo saía da viewport e ficava inacessível ao rolar */}
       <div
-        className="w-full max-w-2xl rounded-2xl border border-zinc-700 bg-zinc-900 p-5"
+        className="my-auto h-fit w-full max-w-2xl rounded-2xl border border-zinc-700 bg-zinc-900 p-5"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2">

@@ -254,11 +254,14 @@ export default function Movies() {
 
       {selected && (
         <div
-          className="fixed inset-0 z-20 flex items-start justify-center overflow-y-auto bg-black/60 p-4 sm:items-center"
+          className="fixed inset-0 z-20 flex justify-center overflow-y-auto bg-black/60 p-4"
           onClick={() => setSelected(null)}
         >
+          {/* my-auto (e não items-center) centraliza quando cabe, mas deixa o
+              modal crescer para baixo quando o conteúdo passa da tela — com
+              items-center o topo saía da viewport e ficava inacessível */}
           <div
-            className="w-full max-w-2xl rounded-2xl border border-zinc-700 bg-zinc-900 p-5"
+            className="my-auto h-fit w-full max-w-2xl rounded-2xl border border-zinc-700 bg-zinc-900 p-5"
             onClick={(e) => e.stopPropagation()}
           >
             {/* cabeçalho: pôster + título + fechar */}

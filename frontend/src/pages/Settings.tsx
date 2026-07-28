@@ -1,21 +1,24 @@
 import { useEffect, useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import {
-  Check, EditPencil, Folder, HardDrive, Language, Lock, NavArrowDown, NavArrowRight,
-  Plus, Refresh, Search, Star, StarSolid, Trash, Xmark,
+  Check, ControlSlider, EditPencil, Folder, HardDrive, Language, Lock, NavArrowDown,
+  NavArrowRight, Plus, Refresh, Search, Star, StarSolid, Trash, Xmark,
 } from 'iconoir-react'
 import {
-  api, changePassword, del, post, put, VARIANT_LABEL,
-  type Destination, type ExtraSearchConfig, type ExtraSearchRules,
-  type JackettIndexer, type LanguageConfig, type LanguageEntry, type TorrentTarget,
+  api, changePassword, convertSummary, del, post, put, VARIANT_LABEL,
+  type ConvertOptions, type ConvertPreset, type Destination, type ExtraSearchConfig,
+  type ExtraSearchRules, type JackettIndexer, type LanguageConfig, type LanguageEntry,
+  type TorrentTarget,
 } from '../api'
 import { DiskBar, Empty } from '../components/ui'
 import { useDialog } from '../components/Dialog'
+import AdvancedOptions, { CONVERT_DEFAULTS } from '../components/AdvancedOptions'
 
 // abas da tela de Configurações (cada uma é uma sub-rota)
 const SETTINGS_TABS: { to: string; label: string; icon: typeof Folder }[] = [
   { to: 'destinations', label: 'Destinos', icon: Folder },
   { to: 'torrents', label: 'Torrents', icon: HardDrive },
+  { to: 'presets', label: 'Presets', icon: ControlSlider },
   { to: 'languages', label: 'Idiomas', icon: Language },
   { to: 'searches', label: 'Buscas extras', icon: Search },
   { to: 'security', label: 'Senha', icon: Lock },
@@ -657,6 +660,128 @@ export function DestinationsSection() {
             <IconBtn title="Remover" onClick={() => remove(d)}><Trash width={15} height={15} /></IconBtn>
           </div>
         ))}
+      </div>
+    </section>
+  )
+}
+
+// ---------------- presets de conversão ----------------
+
+export function ConvertPresetsSection() {
+  const dialog = useDialog()
+  const [presets, setPresets] = useState<ConvertPreset[] | null>(null)
+  // form aberto: null = fechado. name '' + options = novo; name preenchido = edição
+  const [form, setForm] = useState<{ name: string; options: ConvertOptions | null } | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  async function reload() {
+    try {
+      setPresets(await api<ConvertPreset[]>('/api/convert-presets'))
+    } catch {
+      /* proximo tick */
+    }
+  }
+  useEffect(() => void reload(), [])
+
+  async function save() {
+    if (!form) return
+    if (!form.name.trim())
+      return dialog.alert({ title: 'Nome obrigatório', message: 'Dê um nome ao preset.' })
+    if (!form.options)
+      return dialog.alert({
+        title: 'Opções desabilitadas',
+        message: 'Marque "Habilitar opções avançadas" para definir o que o preset faz.',
+      })
+    setSaving(true)
+    try {
+      await post('/api/convert-presets', { name: form.name.trim(), options: form.options })
+      setForm(null)
+      void reload()
+    } catch (e) {
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function remove(p: ConvertPreset) {
+    if (!(await dialog.confirm({
+      title: 'Remover preset',
+      message: `Remover o preset "${p.name}"? Jobs já criados não são afetados.`,
+      confirmText: 'Remover', tone: 'danger',
+    }))) return
+    try {
+      await del(`/api/convert-presets/${p.id}`)
+      void reload()
+    } catch (e) {
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
+    }
+  }
+
+  return (
+    <section>
+      <div className="flex items-center gap-3">
+        <h1 className="flex-1 text-lg font-semibold">Presets de conversão</h1>
+        <button
+          onClick={() => setForm({ name: '', options: CONVERT_DEFAULTS })}
+          className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-semibold hover:bg-blue-500"
+        >
+          <Plus width={16} height={16} /> Novo
+        </button>
+      </div>
+      <p className="mt-1 text-sm text-zinc-400">
+        Conjuntos de opções avançadas salvos com um nome. Nos modais de conversão
+        você escolhe o preset na lista em vez de remontar tudo à mão.
+      </p>
+
+      {form && (
+        <div className="mt-4 rounded-xl border border-zinc-700 bg-zinc-900 p-4">
+          <h2 className="mb-3 font-semibold">
+            {presets?.some((p) => p.name === form.name.trim()) ? 'Editar preset' : 'Novo preset'}
+          </h2>
+          <Field
+            label="Nome"
+            value={form.name}
+            onChange={(v) => setForm({ ...form, name: v })}
+            placeholder="Ex.: QSV AV1 CRF 20"
+          />
+          {/* reusa o mesmo bloco dos modais: um só lugar define os controles */}
+          <AdvancedOptions
+            value={form.options}
+            onChange={(options) => setForm({ ...form, options })}
+            hidePresets
+          />
+          <p className="mt-2 text-xs text-zinc-500">
+            Salvar com o nome de um preset existente substitui as opções dele.
+          </p>
+          <FormButtons saving={saving} onSave={save} onCancel={() => setForm(null)} />
+        </div>
+      )}
+
+      <div className="mt-5 flex flex-col gap-2">
+        {presets === null && <Empty>Carregando...</Empty>}
+        {presets?.length === 0 && <Empty>Nenhum preset salvo. Crie o primeiro.</Empty>}
+        {presets?.map((p) => {
+          const summary = convertSummary(p.options)
+          return (
+            <div key={p.id} className="flex items-start gap-3 rounded-xl bg-zinc-900 px-4 py-3">
+              <ControlSlider width={18} height={18} className="mt-0.5 shrink-0 text-zinc-500" />
+              <div className="min-w-0 flex-1">
+                <span className="font-semibold">{p.name}</span>
+                <div className="text-xs text-zinc-400">
+                  {summary.length ? summary.join(' · ') : 'tudo em stream copy (nada a converter)'}
+                </div>
+              </div>
+              <IconBtn
+                title="Editar"
+                onClick={() => setForm({ name: p.name, options: p.options })}
+              >
+                <EditPencil width={15} height={15} />
+              </IconBtn>
+              <IconBtn title="Remover" onClick={() => remove(p)}><Trash width={15} height={15} /></IconBtn>
+            </div>
+          )
+        })}
       </div>
     </section>
   )

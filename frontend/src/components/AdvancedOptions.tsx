@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, del, post, type Capabilities, type ConvertOptions, type ConvertPreset } from '../api'
+import { useDialog } from './Dialog'
 
 /** Bloco "Opções avançadas" de conversão, compartilhado pelo modal de download
  *  (página de filmes) e pelo modal de conversão manual.
@@ -16,6 +17,10 @@ interface Props {
   onChange: (v: ConvertOptions | null) => void
   /** Motivo para bloquear tudo (ex.: "Apenas baixar" marcado). */
   blocked?: string | null
+  /** Esconde a barra de presets e já abre o painel. Usado pela tela que EDITA
+   *  presets (Configurações): lá escolher/salvar um preset dentro do editor do
+   *  próprio preset seria circular. */
+  hidePresets?: boolean
 }
 
 export const CONVERT_DEFAULTS: ConvertOptions = {
@@ -89,8 +94,8 @@ const getCaps = () => (capsCache ??= api<Capabilities>('/api/capabilities').catc
   throw e
 }))
 
-export default function AdvancedOptions({ value, onChange, blocked }: Props) {
-  const [open, setOpen] = useState(false)
+export default function AdvancedOptions({ value, onChange, blocked, hidePresets }: Props) {
+  const [open, setOpen] = useState(!!hidePresets)
   const [caps, setCaps] = useState<Capabilities | null>(null)
   const [capsError, setCapsError] = useState<string | null>(null)
   const [opts, setOpts] = useState<ConvertOptions>(value ?? CONVERT_DEFAULTS)
@@ -100,12 +105,13 @@ export default function AdvancedOptions({ value, onChange, blocked }: Props) {
   const [presetId, setPresetId] = useState('')
   const [presetError, setPresetError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const dialog = useDialog()
   const enabled = value !== null
 
   useEffect(() => {
     getCaps().then(setCaps).catch((e) => setCapsError((e as Error).message))
-    loadPresets()
-  }, [])
+    if (!hidePresets) loadPresets()
+  }, [hidePresets])
 
   function loadPresets() {
     api<ConvertPreset[]>('/api/convert-presets')
@@ -127,7 +133,11 @@ export default function AdvancedOptions({ value, onChange, blocked }: Props) {
   }
 
   async function savePreset() {
-    const name = window.prompt('Nome do preset (ex.: QSV AV1 CRF 20):')?.trim()
+    const name = (await dialog.prompt({
+      title: 'Salvar preset',
+      message: 'Salvar com o nome de um preset existente substitui as opções dele.',
+      placeholder: 'ex.: QSV AV1 CRF 20',
+    }))?.trim()
     if (!name) return
     setSaving(true)
     setPresetError(null)
@@ -144,7 +154,14 @@ export default function AdvancedOptions({ value, onChange, blocked }: Props) {
 
   async function deletePreset() {
     const p = presets.find((x) => String(x.id) === presetId)
-    if (!p || !window.confirm(`Apagar o preset "${p.name}"?`)) return
+    if (!p) return
+    const ok = await dialog.confirm({
+      title: 'Apagar preset',
+      message: `O preset "${p.name}" será removido.`,
+      confirmText: 'Apagar',
+      tone: 'danger',
+    })
+    if (!ok) return
     try {
       await del(`/api/convert-presets/${p.id}`)
       setPresetId('')
@@ -236,7 +253,7 @@ export default function AdvancedOptions({ value, onChange, blocked }: Props) {
           </label>
 
           {/* presets: escolher da lista evita remontar (e errar) as opções toda vez */}
-          {!blocked && (
+          {!blocked && !hidePresets && (
             <div className="mt-3 flex flex-wrap items-end gap-2">
               <label className="flex min-w-45 flex-1 flex-col gap-1 text-sm">
                 <span className="text-zinc-400">Preset</span>
