@@ -78,6 +78,36 @@ _ffmpeg_procs: dict[str, "subprocess.Popen"] = {}
 _cancelling: set[str] = set()
 _qbit = QbitClient()
 
+# quando a UI pediu progresso pela última vez (time.monotonic()); None = nunca.
+# O watchdog do qBittorrent só corre rápido enquanto alguém está OLHANDO: sem
+# ninguém lendo, o progresso em memória não serve a ninguém e o poll rápido é só
+# carga no qBittorrent. Endpoints de "informação rápida" (progresso do job e a
+# lista de jobs) chamam touch_progress_demand() e reabrem a janela.
+# None (e não 0.0): monotonic() pode começar perto de zero, e aí "nunca pediram"
+# seria lido como "acabaram de pedir".
+_last_progress_demand: float | None = None
+
+
+def touch_progress_demand():
+    """Marca que alguém está acompanhando o progresso agora."""
+    global _last_progress_demand
+    _last_progress_demand = time.monotonic()
+
+
+def progress_demanded() -> bool:
+    """Alguém pediu progresso na janela recente? (define o ritmo do watchdog)"""
+    if _last_progress_demand is None:
+        return False
+    return (time.monotonic() - _last_progress_demand
+            < config.POLL_ACTIVE_WINDOW_SECONDS)
+
+
+def poll_interval() -> float:
+    """Intervalo do watchdog: rápido só com a UI acompanhando."""
+    return (config.POLL_INTERVAL_SECONDS if progress_demanded()
+            else config.POLL_IDLE_INTERVAL_SECONDS)
+
+
 # fila de conversão: só 1 merge/entrega roda por vez (ffmpeg é pesado de CPU/IO).
 # lazy porque o event loop pode não existir no import.
 _merge_lock: asyncio.Lock | None = None
@@ -1581,7 +1611,7 @@ async def _wait_downloads(job: dict) -> dict:
                 _event(job, "qbit", f"Conexão com o qBittorrent perdida ({reason})")
             job["detail"] = "Sem conexão com o qBittorrent — tentando reconectar..."
         if len(paths) < len(needed):
-            await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
+            await asyncio.sleep(poll_interval())
     return paths
 
 

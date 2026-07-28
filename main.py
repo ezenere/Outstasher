@@ -581,6 +581,7 @@ async def jobs_list(group: str = "active", page: int = 1, per_page: int | None =
     """
     if per_page is not None and per_page < 1:
         raise HTTPException(400, "per_page deve ser >= 1")
+    jobs.touch_progress_demand()  # os cards mostram as barras: watchdog acelera
     try:
         return jobs.list_group(group, page, per_page)
     except ValueError as e:
@@ -598,6 +599,7 @@ async def job_detail(job_id: str):
 @app.get("/api/jobs/{job_id}/progress")
 async def job_progress(job_id: str):
     """Só status/detail/progresso — tick de 1s do detalhe do job."""
+    jobs.touch_progress_demand()  # alguém acompanhando: watchdog acelera
     p = jobs.progress(job_id)
     if not p:
         raise HTTPException(404, "Job não encontrado")

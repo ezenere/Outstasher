@@ -75,8 +75,18 @@ IGNORE_AV1_LOOKAHEAD_LIMITS = _env_bool("IGNORE_AV1_LOOKAHEAD_LIMITS")
 
 # quão rápido o watchdog consulta o qBittorrent (atualiza o progresso em
 # memória). Fica abaixo do tick de 1s do detalhe do job na UI, para a barra
-# sempre ler um valor fresco.
+# sempre ler um valor fresco — mas só enquanto alguém está OLHANDO (ver
+# POLL_IDLE_* abaixo).
 POLL_INTERVAL_SECONDS = 0.9
+# sem ninguém olhando o progresso, o ritmo rápido não serve para nada: o valor
+# só existe em memória e ninguém o lê. O watchdog cai para este intervalo, que
+# ainda detecta stall/torrent sumido em tempo hábil com uma fração dos requests
+# ao qBittorrent (0.9s -> 5s é ~5x menos carga por job baixando).
+POLL_IDLE_INTERVAL_SECONDS = 5.0
+# por quanto tempo uma consulta da UI mantém o ritmo rápido. Cobre com folga o
+# tick de 1s do detalhe do job e os 5s da lista; passado isso sem ninguém pedir
+# progresso, o watchdog desacelera sozinho.
+POLL_ACTIVE_WINDOW_SECONDS = 10.0
 # de quanto em quanto tempo o progresso é PERSISTIDO no banco. Consultar o
 # qBittorrent é barato, mas gravar no SQLite a cada tick é desperdício — o
 # progresso é só um número que a UI já lê do backend em memória. Eventos reais
