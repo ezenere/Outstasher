@@ -67,6 +67,14 @@ def init():
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         )""")
+    # presets de conversao (ConvertOptions nomeadas). name UNIQUE: salvar com um
+    # nome existente sobrescreve, em vez de duplicar a entrada na lista.
+    _conn.execute("""
+        CREATE TABLE IF NOT EXISTS convert_presets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            options TEXT NOT NULL
+        )""")
     # idiomas da faixa dublada (editaveis pela UI). markers_* guardados como JSON.
     _conn.execute("""
         CREATE TABLE IF NOT EXISTS languages (
@@ -123,6 +131,51 @@ def get_extra_search_rules() -> dict:
 
 def set_extra_search_rules(rules: dict):
     set_setting(_EXTRA_SEARCH_KEY, json.dumps(rules, ensure_ascii=False))
+
+
+# -------------------- presets de conversao --------------------
+# Conjuntos de ConvertOptions salvos pelo usuario ("QSV AV1 CRF 20" e afins):
+# escolher da lista evita remontar as ~12 opcoes na mao a cada conversao — e
+# errar uma delas sem perceber. As opcoes ficam como JSON opaco: o servidor nao
+# valida aqui, quem valida e o transcode.validate() na hora de converter (assim
+# um preset salvo antes de uma mudanca de capabilities nao quebra a listagem).
+
+def list_convert_presets() -> list[dict]:
+    with _lock:
+        rows = _conn.execute(
+            "SELECT id, name, options FROM convert_presets "
+            "ORDER BY name COLLATE NOCASE").fetchall()
+    return [{"id": r[0], "name": r[1], "options": _json_or_none(r[2])} for r in rows]
+
+
+def _json_or_none(raw: str) -> dict | None:
+    try:
+        v = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return v if isinstance(v, dict) else None
+
+
+def create_convert_preset(name: str, options: dict) -> dict:
+    """Cria ou sobrescreve pelo nome (salvar de novo com o mesmo nome atualiza)."""
+    payload = json.dumps(options, ensure_ascii=False)
+    with _lock:
+        _conn.execute(
+            "INSERT INTO convert_presets (name, options) VALUES (?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET options = excluded.options",
+            (name, payload))
+        _conn.commit()
+        r = _conn.execute(
+            "SELECT id, name, options FROM convert_presets WHERE name = ?",
+            (name,)).fetchone()
+    return {"id": r[0], "name": r[1], "options": _json_or_none(r[2])}
+
+
+def delete_convert_preset(preset_id: int) -> bool:
+    with _lock:
+        cur = _conn.execute("DELETE FROM convert_presets WHERE id = ?", (preset_id,))
+        _conn.commit()
+        return cur.rowcount > 0
 
 
 # -------------------- destinos (pastas de destino do arquivo final) --------------------

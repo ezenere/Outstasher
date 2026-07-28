@@ -254,6 +254,41 @@ class TorrentTargetRequest(BaseModel):
     is_default: bool = False
 
 
+# -------------------- presets de conversão --------------------
+
+class ConvertPresetRequest(BaseModel):
+    name: str
+    options: dict
+
+
+@app.get("/api/convert-presets")
+async def list_convert_presets():
+    return store.list_convert_presets()
+
+
+@app.post("/api/convert-presets")
+async def add_convert_preset(req: ConvertPresetRequest):
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(400, "Dê um nome ao preset")
+    # valida agora para não salvar um preset que sempre falharia ao converter;
+    # o transcode revalida na hora da conversão (com o arquivo real em mãos).
+    # to_thread: validate() com HW dispara um test-encode do ffmpeg, que não
+    # pode bloquear o event loop (mesmo motivo do /api/capabilities)
+    try:
+        await asyncio.to_thread(transcode.validate, req.options)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return store.create_convert_preset(name, req.options)
+
+
+@app.delete("/api/convert-presets/{preset_id}")
+async def delete_convert_preset(preset_id: int):
+    if not store.delete_convert_preset(preset_id):
+        raise HTTPException(404, "Preset não encontrado")
+    return {"ok": True}
+
+
 # -------------------- destinos --------------------
 
 @app.get("/api/destinations")

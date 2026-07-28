@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, type Capabilities, type ConvertOptions } from '../api'
+import { api, del, post, type Capabilities, type ConvertOptions, type ConvertPreset } from '../api'
 
 /** Bloco "Opções avançadas" de conversão, compartilhado pelo modal de download
  *  (página de filmes) e pelo modal de conversão manual.
@@ -94,15 +94,70 @@ export default function AdvancedOptions({ value, onChange, blocked }: Props) {
   const [caps, setCaps] = useState<Capabilities | null>(null)
   const [capsError, setCapsError] = useState<string | null>(null)
   const [opts, setOpts] = useState<ConvertOptions>(value ?? CONVERT_DEFAULTS)
+  const [presets, setPresets] = useState<ConvertPreset[]>([])
+  // id do preset aplicado; mexer em qualquer controle volta para '' (= "Personalizado"),
+  // porque a partir daí as opções não são mais as do preset
+  const [presetId, setPresetId] = useState('')
+  const [presetError, setPresetError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
   const enabled = value !== null
 
   useEffect(() => {
     getCaps().then(setCaps).catch((e) => setCapsError((e as Error).message))
+    loadPresets()
   }, [])
+
+  function loadPresets() {
+    api<ConvertPreset[]>('/api/convert-presets')
+      .then(setPresets)
+      .catch(() => setPresets([]))  // sem presets a tela continua utilizável
+  }
+
+  function applyPreset(id: string) {
+    setPresetId(id)
+    setPresetError(null)
+    if (!id) return
+    const p = presets.find((x) => String(x.id) === id)
+    if (!p) return
+    // o preset pode ter sido salvo com um encoder que sumiu (troca de GPU,
+    // rebuild do ffmpeg): completa com os defaults para nunca virar undefined
+    const next = { ...CONVERT_DEFAULTS, ...p.options }
+    setOpts(next)
+    onChange(next)  // aplicar um preset também liga as opções avançadas
+  }
+
+  async function savePreset() {
+    const name = window.prompt('Nome do preset (ex.: QSV AV1 CRF 20):')?.trim()
+    if (!name) return
+    setSaving(true)
+    setPresetError(null)
+    try {
+      const saved = await post<ConvertPreset>('/api/convert-presets', { name, options: opts })
+      loadPresets()
+      setPresetId(String(saved.id))
+    } catch (e) {
+      setPresetError((e as Error).message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function deletePreset() {
+    const p = presets.find((x) => String(x.id) === presetId)
+    if (!p || !window.confirm(`Apagar o preset "${p.name}"?`)) return
+    try {
+      await del(`/api/convert-presets/${p.id}`)
+      setPresetId('')
+      loadPresets()
+    } catch (e) {
+      setPresetError((e as Error).message)
+    }
+  }
 
   function update(patch: Partial<ConvertOptions>) {
     const next = { ...opts, ...patch }
     setOpts(next)
+    setPresetId('')  // editou à mão: não é mais o preset selecionado
     if (enabled) onChange(next)
   }
 
@@ -123,6 +178,7 @@ export default function AdvancedOptions({ value, onChange, blocked }: Props) {
       next.crf = hw?.crf.default ?? cap?.crf.default ?? 24
     }
     setOpts(next)
+    setPresetId('')  // editou à mão: não é mais o preset selecionado
     if (enabled) onChange(next)
   }
 
@@ -178,6 +234,48 @@ export default function AdvancedOptions({ value, onChange, blocked }: Props) {
             />
             Habilitar opções avançadas
           </label>
+
+          {/* presets: escolher da lista evita remontar (e errar) as opções toda vez */}
+          {!blocked && (
+            <div className="mt-3 flex flex-wrap items-end gap-2">
+              <label className="flex min-w-45 flex-1 flex-col gap-1 text-sm">
+                <span className="text-zinc-400">Preset</span>
+                <select
+                  value={presetId}
+                  onChange={(e) => applyPreset(e.target.value)}
+                  className={selectCls}
+                >
+                  <option value="">
+                    {presets.length ? 'Personalizado' : 'Nenhum preset salvo ainda'}
+                  </option>
+                  {presets.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                onClick={savePreset}
+                disabled={!enabled || saving}
+                className="rounded-lg border border-zinc-700 px-2.5 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+                title={enabled ? 'Salvar as opções atuais como um preset'
+                  : 'Habilite as opções avançadas para salvar um preset'}
+              >
+                {saving ? 'Salvando...' : 'Salvar como preset'}
+              </button>
+              {presetId && (
+                <button
+                  type="button"
+                  onClick={deletePreset}
+                  className="rounded-lg border border-zinc-700 px-2.5 py-1.5 text-sm text-red-300 hover:bg-zinc-800"
+                  title="Apagar o preset selecionado"
+                >
+                  Apagar
+                </button>
+              )}
+            </div>
+          )}
+          {presetError && <p className="mt-1.5 text-xs text-red-300">{presetError}</p>}
 
           <fieldset
             disabled={!enabled || !!blocked}

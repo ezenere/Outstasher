@@ -108,6 +108,13 @@ export interface AudioCodecCap {
   default_kbps: number | null
 }
 
+/** Conjunto de ConvertOptions salvo com um nome (/api/convert-presets). */
+export interface ConvertPreset {
+  id: number
+  name: string
+  options: ConvertOptions
+}
+
 /** O que o ffmpeg do servidor sabe encodar (/api/capabilities). */
 export interface Capabilities {
   video_codecs: VideoCodecCap[]
