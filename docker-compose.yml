@@ -18,14 +18,17 @@ services:
       - QBIT_PASS=
       # Destino "Padrao" criado na primeira execucao. E um caminho DENTRO do
       # container: precisa existir via algum mount de volumes.
-      - OUTPUT_DIR=/mnt/coldstorage/media/movies
+      - OUTPUT_DIR=/mnt/outer/coldstorage/media/movies
     ports:
       - "8008:8008"
 
-    # --- Aceleracao por HARDWARE Intel (Quick Sync / QSV — GPU Arc) ---
-    # Expoe a GPU ao container. So faz sentido em Linux com uma GPU Intel; sem
-    # ela, remova este bloco (a deteccao em runtime testa a GPU de verdade e
-    # simplesmente nao oferece o QSV se ele nao abrir).
+    # --- Aceleracao por HARDWARE ---
+    # O app suporta DUAS familias de GPU: Quick Sync (Intel) e NVENC (NVIDIA),
+    # ambas para H.264/HEVC/AV1. Use o bloco da sua placa; sem GPU, remova os
+    # dois (a deteccao em runtime testa a GPU de verdade e simplesmente nao
+    # oferece o encoder se ele nao abrir). Encode em software (CPU) sempre vale.
+    #
+    # >>> Intel (Quick Sync / QSV — Arc, iGPUs recentes) <<<
     #   - /dev/dri: o device de render/encode (renderD128) + card0.
     #   - group_add: o container precisa pertencer aos grupos donos do device
     #     para ter permissao de acesso. Descubra os GIDs no host com:
@@ -36,6 +39,18 @@ services:
     group_add:
       - "44"    # GID do grupo 'video' no host (ajuste se o seu for diferente)
       - "992"   # GID do grupo 'render' no host (ajuste se o seu for diferente)
+    #
+    # >>> NVIDIA (NVENC) <<<
+    # Troque os dois blocos acima por este. Exige o NVIDIA Container Toolkit
+    # instalado no HOST (o driver vem de la, nao da imagem):
+    #     https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu, video]   # 'video' e o que libera o NVENC
 
     volumes:
       # jobs.db (SQLite) + senha persistem fora do container
