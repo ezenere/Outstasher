@@ -328,3 +328,9 @@ retoma o acompanhamento sozinho.
 | `frontend/` | frontend React (TS + Tailwind + Iconoir + Router) |
 | `Dockerfile` | build multi-stage (Node builda o front, runtime Python + ffmpeg) |
 | `docker-compose.yml` | sobe o serviço local com volume p/ o `jobs.db` e mounts |
+
+## Licença
+
+[MIT](LICENSE) — use, modifique e distribua à vontade, inclusive comercialmente;
+basta manter o aviso de copyright. O software é fornecido "como está", sem
+garantias.
