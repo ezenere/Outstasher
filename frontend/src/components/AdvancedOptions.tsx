@@ -21,6 +21,10 @@ interface Props {
    *  presets (Configurações): lá escolher/salvar um preset dentro do editor do
    *  próprio preset seria circular. */
   hidePresets?: boolean
+  /** Esconde o título de presets */
+  hideTitle?: boolean
+  /** Esconde o botão de "Habilitar opções avançadas" */
+  hideButtton?: boolean
 }
 
 export const CONVERT_DEFAULTS: ConvertOptions = {
@@ -94,7 +98,7 @@ const getCaps = () => (capsCache ??= api<Capabilities>('/api/capabilities').catc
   throw e
 }))
 
-export default function AdvancedOptions({ value, onChange, blocked, hidePresets }: Props) {
+export default function AdvancedOptions({ value, onChange, blocked, hidePresets, hideTitle, hideButtton }: Props) {
   const [open, setOpen] = useState(!!hidePresets)
   const [caps, setCaps] = useState<Capabilities | null>(null)
   const [capsError, setCapsError] = useState<string | null>(null)
@@ -219,7 +223,7 @@ export default function AdvancedOptions({ value, onChange, blocked, hidePresets 
 
   return (
     <div className="mt-3 rounded-xl border border-zinc-800">
-      <button
+      {!hideTitle && <button
         type="button"
         onClick={() => setOpen(!open)}
         className="flex w-full items-center gap-2 px-3 py-2 text-sm font-medium text-zinc-300 hover:text-zinc-100"
@@ -231,10 +235,10 @@ export default function AdvancedOptions({ value, onChange, blocked, hidePresets 
             ativas
           </span>
         )}
-      </button>
+      </button>}
 
       {open && (
-        <div className="border-t border-zinc-800 p-3">
+        <div className={`${!hideTitle ? 'border-t border-zinc-800 ' : ''}p-3`}>
           {blocked && <p className="mb-2 text-xs text-yellow-300/80">{blocked}</p>}
           {capsError && (
             <p className="mb-2 text-xs text-red-300">
@@ -242,7 +246,7 @@ export default function AdvancedOptions({ value, onChange, blocked, hidePresets 
             </p>
           )}
 
-          <label className="flex items-center gap-1.5 text-sm text-zinc-300">
+          {!hideButtton && <label className="flex items-center gap-1.5 text-sm text-zinc-300">
             <input
               type="checkbox"
               checked={enabled && !blocked}
@@ -250,7 +254,7 @@ export default function AdvancedOptions({ value, onChange, blocked, hidePresets 
               onChange={(e) => onChange(e.target.checked ? opts : null)}
             />
             Habilitar opções avançadas
-          </label>
+          </label>}
 
           {/* presets: escolher da lista evita remontar (e errar) as opções toda vez */}
           {!blocked && !hidePresets && (

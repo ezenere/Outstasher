@@ -310,6 +310,15 @@ export interface JobListItem {
   }
 }
 
+/** Resposta paginada de /api/jobs/list. */
+export interface JobListPage {
+  items: JobListItem[]
+  page: number
+  per_page: number
+  total: number
+  pages: number
+}
+
 /** Tick de 1s do detalhe do job (/api/jobs/{id}/progress). */
 export interface JobProgress {
   id: string

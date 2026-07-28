@@ -574,10 +574,15 @@ async def jobs_counts():
 
 
 @app.get("/api/jobs/list")
-async def jobs_list(group: str = "active"):
-    """Cards enxutos da tela de Downloads, filtrados por grupo no backend."""
+async def jobs_list(group: str = "active", page: int = 1, per_page: int | None = None):
+    """Cards enxutos da tela de Jobs, filtrados por grupo e paginados no backend.
+
+    Sem `per_page` devolve tudo numa página (compatível com quem não pagina).
+    """
+    if per_page is not None and per_page < 1:
+        raise HTTPException(400, "per_page deve ser >= 1")
     try:
-        return jobs.list_group(group)
+        return jobs.list_group(group, page, per_page)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

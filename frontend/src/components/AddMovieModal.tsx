@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { MediaVideo, Movie as MovieIcon, Play, Search, SoundHigh, Xmark } from 'iconoir-react'
 import { api, post, type ConvertOptions, type Destination, type Job, type Language, type Movie, type MoviePage } from '../api'
 import AdvancedOptions from './AdvancedOptions'
+import { useScrollLock } from './ui'
 
 interface Props {
   destinations: Destination[]
@@ -27,6 +28,7 @@ export default function AddMovieModal({ destinations, defaultDestId, onClose }: 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const navigate = useNavigate()
+  useScrollLock()
 
   useEffect(() => {
     api<Language[]>('/api/languages').then(setLanguages).catch(() => {})

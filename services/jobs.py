@@ -384,20 +384,51 @@ def _slim_job(job: dict) -> dict:
     }
 
 
-def list_group(group: str = "active") -> list[dict]:
-    """Cards enxutos da tela de Downloads, filtrados por grupo NO BACKEND."""
-    if group == "all":
-        jobs_ = _all_jobs()
-    elif group == "active":
-        # ativos vivem todos em memória
+def list_group(group: str = "active", page: int = 1,
+               per_page: int | None = None) -> dict:
+    """Cards enxutos da tela de Jobs, filtrados por grupo NO BACKEND.
+
+    Devolve {"items": [...], "page", "per_page", "total", "pages"}. Sem
+    `per_page` volta tudo numa página só (o total continua correto).
+
+    Os grupos só de status terminal paginam no SQL; 'active' e 'all' envolvem a
+    memória (os ativos não estão só no banco) e paginam depois de montar a
+    lista — 'active' é curto por natureza, então o custo é irrelevante.
+    """
+    if group == "active":
         jobs_ = [j for j in _jobs.values() if j["status"] in _GROUPS["active"]]
+    elif group == "all":
+        jobs_ = _all_jobs()
     else:
         statuses = _GROUPS.get(group)
         if not statuses:
             raise ValueError(f"grupo inválido: {group!r}")
-        jobs_ = store.load_jobs_by_status(statuses)
+        total = sum(store.count_jobs_by_status().get(s, 0) for s in statuses)
+        if per_page is None:
+            rows = store.load_jobs_by_status(statuses)
+        else:
+            page = max(1, page)
+            rows = store.load_jobs_by_status(statuses, per_page, (page - 1) * per_page)
+        return _page(rows, page, per_page, total)
+
     jobs_.sort(key=lambda j: j["created_at"], reverse=True)
-    return [_slim_job(j) for j in jobs_]
+    return _page(jobs_, page, per_page, len(jobs_), slice_it=True)
+
+
+def _page(jobs_: list[dict], page: int, per_page: int | None, total: int,
+          slice_it: bool = False) -> dict:
+    """Empacota a resposta paginada. `slice_it` recorta em memória (grupos que
+    não puderam paginar no SQL); os que já vieram paginados do banco não."""
+    if per_page is None:
+        return {"items": [_slim_job(j) for j in jobs_], "page": 1,
+                "per_page": total, "total": total, "pages": 1}
+    page = max(1, page)
+    if slice_it:
+        jobs_ = sorted(jobs_, key=lambda j: j["created_at"], reverse=True)
+        jobs_ = jobs_[(page - 1) * per_page:page * per_page]
+    return {"items": [_slim_job(j) for j in jobs_], "page": page,
+            "per_page": per_page, "total": total,
+            "pages": max(1, -(-total // per_page))}
 
 
 def progress(job_id: str) -> dict | None:

@@ -750,6 +750,8 @@ export function ConvertPresetsSection() {
             value={form.options}
             onChange={(options) => setForm({ ...form, options })}
             hidePresets
+            hideButtton
+            hideTitle
           />
           <p className="mt-2 text-xs text-zinc-500">
             Salvar com o nome de um preset existente substitui as opções dele.

@@ -6,6 +6,36 @@ import {
 } from '../api'
 import { BookmarkSolid, Check, MediaVideoList, Download, Search, Timer, WarningTriangle, CheckCircle, XmarkCircle } from 'iconoir-react'
 
+/** Trava o scroll do body enquanto um modal está aberto.
+ *
+ *  Conta quantos modais estão abertos: com um Dialog de confirmação por cima de
+ *  outro modal, só o último a fechar destrava (senão o primeiro a fechar já
+ *  liberaria o scroll com o outro ainda aberto).
+ *
+ *  A barra de rolagem que some tiraria ~15px de largura da página e faria o
+ *  conteúdo "pular"; compensamos com padding equivalente no body.
+ */
+let scrollLocks = 0
+
+export function useScrollLock(active = true) {
+  useEffect(() => {
+    if (!active) return
+    if (scrollLocks === 0) {
+      const gap = window.innerWidth - document.documentElement.clientWidth
+      document.body.style.overflow = 'hidden'
+      if (gap > 0) document.body.style.paddingRight = `${gap}px`
+    }
+    scrollLocks++
+    return () => {
+      scrollLocks--
+      if (scrollLocks === 0) {
+        document.body.style.overflow = ''
+        document.body.style.paddingRight = ''
+      }
+    }
+  }, [active])
+}
+
 const BADGE_STYLES: Record<string, string> = {
   searching: 'bg-blue-950 text-blue-400',
   awaiting: 'bg-purple-950 text-purple-400',

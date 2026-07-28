@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Play, Xmark } from 'iconoir-react'
 import { post, type CatalogFile, type ConvertOptions, type Job, type Movie } from '../api'
 import AdvancedOptions from './AdvancedOptions'
+import { useScrollLock } from './ui'
 
 interface Props {
   folder: string
@@ -21,6 +22,7 @@ export default function RecompressModal({ folder, destinationId, file, tmdb, onC
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const navigate = useNavigate()
+  useScrollLock()
 
   async function submit() {
     if (!advanced || submitting) return

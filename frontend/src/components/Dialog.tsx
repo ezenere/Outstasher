@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { WarningTriangle, Xmark } from 'iconoir-react'
+import { useScrollLock } from './ui'
 
 /** Diálogos modais estilizados no lugar dos window.confirm/alert/prompt.
  *
@@ -93,6 +94,8 @@ export function DialogProvider({ children }: { children: React.ReactNode }) {
         resolve: resolve as (v: unknown) => void,
       })
     }), [])
+
+  useScrollLock(state !== null)
 
   // ao abrir um prompt, foca (e seleciona) o input
   useEffect(() => {

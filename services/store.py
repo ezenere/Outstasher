@@ -445,15 +445,25 @@ def load_jobs() -> list[dict]:
     return [json.loads(r[0]) for r in rows]
 
 
-def load_jobs_by_status(statuses: tuple[str, ...]) -> list[dict]:
+def load_jobs_by_status(statuses: tuple[str, ...], limit: int | None = None,
+                        offset: int = 0) -> list[dict]:
     """Carrega os jobs cujo status está na lista (ex.: só os ativos, ou só os
-    terminais). Usa a coluna `status` indexada em vez de ler tudo."""
+    terminais). Usa a coluna `status` indexada em vez de ler tudo.
+
+    Com `limit`, pagina no SQL (ordenado por created_at desc, o mesmo critério
+    da tela) — assim uma biblioteca com milhares de jobs terminais não vira um
+    JSON gigante a cada abertura da lista.
+    """
     if not statuses:
         return []
     ph = ",".join("?" for _ in statuses)
+    sql = f"SELECT data FROM jobs WHERE status IN ({ph}) ORDER BY created_at DESC"
+    params: list = list(statuses)
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params += [limit, offset]
     with _lock:
-        rows = _conn.execute(
-            f"SELECT data FROM jobs WHERE status IN ({ph})", statuses).fetchall()
+        rows = _conn.execute(sql, params).fetchall()
     return [json.loads(r[0]) for r in rows]
 
 

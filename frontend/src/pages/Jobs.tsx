@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { MediaVideo, Movie, Refresh, Search, SoundHigh, Trash, Xmark } from 'iconoir-react'
-import { api, fmtSize, post, type JobCounts, type JobListItem, type SlimProgress } from '../api'
+import {
+  api, fmtSize, post,
+  type JobCounts, type JobListItem, type JobListPage, type SlimProgress,
+} from '../api'
 import { Badge, ClampText, Empty, KindTags, torrentComplete, torrentSize } from '../components/ui'
 import { useDialog, type DialogApi } from '../components/Dialog'
 
@@ -48,33 +51,49 @@ export async function removeJob(dialog: DialogApi, id: string, reload: () => voi
 
 const EMPTY_COUNTS: JobCounts = { all: 0, active: 0, error: 0, done: 0 }
 
+const PER_PAGE = 20
+
 export default function Jobs() {
   const [jobs, setJobs] = useState<JobListItem[] | null>(null)
   const [counts, setCounts] = useState<JobCounts>(EMPTY_COUNTS)
   // abre em "Em andamento": a tela foca no que está rodando
   const [filter, setFilter] = useState<Filter>('active')
   const [query, setQuery] = useState('')
+  const [page, setPage] = useState(1)
+  const [pages, setPages] = useState(1)
   const navigate = useNavigate()
   const dialog = useDialog()
   // guarda a contagem do grupo aberto no último tick, para detectar mudança
   const lastGroupCount = useRef<number | null>(null)
+  // buscando por texto? o filtro é no cliente, então precisamos do grupo INTEIRO
+  // (senão a busca só acharia o que estivesse na página aberta)
+  const searching = query.trim() !== ''
 
   // busca a lista do grupo atual no backend (filtro feito lá)
-  const reload = useCallback(async (group: Filter) => {
+  const reload = useCallback(async (group: Filter, p: number, all: boolean) => {
     try {
-      const list = await api<JobListItem[]>(`/api/jobs/list?group=${group}`)
-      setJobs(list)
-      lastGroupCount.current = list.length
+      const qs = all ? `group=${group}` : `group=${group}&page=${p}&per_page=${PER_PAGE}`
+      const res = await api<JobListPage>(`/api/jobs/list?${qs}`)
+      setJobs(res.items)
+      setPages(res.pages)
+      // a página pedida pode ter sumido (jobs removidos): volta para a última
+      if (res.page > res.pages) setPage(res.pages)
+      lastGroupCount.current = res.total
     } catch {
       /* servidor reiniciando; próximo tick */
     }
   }, [])
 
-  // ao trocar de filtro, recarrega a lista daquele grupo
+  // trocar de filtro volta para a primeira página
+  useEffect(() => {
+    setPage(1)
+  }, [filter])
+
+  // recarrega ao mudar grupo, página ou ao entrar/sair da busca
   useEffect(() => {
     setJobs(null)
-    void reload(filter)
-  }, [filter, reload])
+    void reload(filter, page, searching)
+  }, [filter, page, searching, reload])
 
   // poll de contagens a cada 15s (badges sempre certos, sem baixar as listas).
   // Recarrega a lista atual quando:
@@ -89,7 +108,7 @@ export default function Jobs() {
         setCounts(c)
         const liveGroup = filter === 'active' || filter === 'all'
         const changed = lastGroupCount.current !== null && c[filter] !== lastGroupCount.current
-        if (liveGroup || changed) void reload(filter)
+        if (liveGroup || changed) void reload(filter, page, searching)
       } catch {
         /* servidor reiniciando; próximo tick */
       }
@@ -97,12 +116,12 @@ export default function Jobs() {
     void tick()
     const t = setInterval(tick, 15000)
     return () => clearInterval(t)
-  }, [filter, reload])
+  }, [filter, page, searching, reload])
 
   async function retry(id: string) {
     try {
       await post(`/api/jobs/${id}/retry`)
-      void reload(filter)
+      void reload(filter, page, searching)
     } catch (e) {
       await dialog.alert({ title: 'Erro', message: (e as Error).message })
     }
@@ -197,7 +216,7 @@ export default function Jobs() {
                 className="rounded-lg border border-zinc-700 p-1.5 text-zinc-400 hover:text-zinc-200">
                 <Search width={15} height={15} />
               </Link>
-              <IconBtn title="Remover job" onClick={() => removeJob(dialog, j.id, () => reload(filter))}>
+              <IconBtn title="Remover job" onClick={() => removeJob(dialog, j.id, () => reload(filter, page, searching))}>
                 <Trash width={15} height={15} />
               </IconBtn>
             </div>
@@ -240,6 +259,29 @@ export default function Jobs() {
           </div>
         )
       })}
+
+      {/* paginação: escondida durante a busca (lá a lista já vem inteira) */}
+      {!searching && pages > 1 && (
+        <div className="flex items-center justify-center gap-2 pt-1">
+          <button
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={page <= 1}
+            className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-40 disabled:hover:bg-transparent"
+          >
+            Anterior
+          </button>
+          <span className="text-sm text-zinc-400">
+            Página {page} de {pages}
+          </span>
+          <button
+            onClick={() => setPage((p) => Math.min(pages, p + 1))}
+            disabled={page >= pages}
+            className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-40 disabled:hover:bg-transparent"
+          >
+            Próxima
+          </button>
+        </div>
+      )}
     </div>
   )
 }

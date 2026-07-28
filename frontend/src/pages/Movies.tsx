@@ -9,7 +9,7 @@ import {
 import { useJobsSummary } from '../jobsSummary'
 import AdvancedOptions from '../components/AdvancedOptions'
 import { useDialog } from '../components/Dialog'
-import { DiskFree, Empty, MovieStateBadge, MovieStateIcon } from '../components/ui'
+import { DiskFree, Empty, MovieStateBadge, MovieStateIcon, useScrollLock } from '../components/ui'
 
 // estados "em progresso": se um filme estava num destes e sumiu do summary,
 // entendemos que terminou -> marca como 'done' (Baixado) localmente.
@@ -37,6 +37,7 @@ export default function Movies() {
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
   const [loadingMore, setLoadingMore] = useState(false)
+  useScrollLock(selected !== null)  // modal aberto trava o scroll do body
 
   // estado de cada filme (tmdb_id -> convertendo/baixando/...). Deriva do
   // summary compartilhado do cabeçalho (fonte única, atualizado a cada 5s).
