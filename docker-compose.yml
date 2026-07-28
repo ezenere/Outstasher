@@ -3,41 +3,52 @@ services:
     build: .
     image: outstasher:latest
     container_name: outstasher
-    restart: unless-stopped
+    environment:
+      - TZ=America/Sao_Paulo
+      # jobs.db + senha ficam no volume de config (montado abaixo)
+      - DB_DIR=/config
+      - TMDB_API_KEY=
+      # Se o qBittorrent/Jackett rodam na SUA maquina (host), use
+      # host.docker.internal no lugar de localhost e descomente o extra_hosts
+      # la embaixo (no Docker Desktop ja funciona sem ele).
+      - JACKETT_URL=
+      - JACKETT_API_KEY=
+      - QBIT_URL=
+      - QBIT_USER=
+      - QBIT_PASS=
+      # Destino "Padrao" criado na primeira execucao. E um caminho DENTRO do
+      # container: precisa existir via algum mount de volumes.
+      - OUTPUT_DIR=/mnt/coldstorage/media/movies
     ports:
       - "8008:8008"
-    env_file:
-      - .env
-    # Se o qBittorrent/Jackett rodam na SUA maquina (host), use
-    # host.docker.internal nas URLs do .env em vez de localhost. Esta linha faz
-    # isso funcionar tambem no Linux (no Docker Desktop ja funciona sem ela).
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
     # --- Aceleracao por HARDWARE Intel (Quick Sync / QSV — GPU Arc) ---
     # Expoe a GPU ao container. So faz sentido em Linux com uma GPU Intel; sem
     # ela, remova este bloco (a deteccao em runtime testa a GPU de verdade e
     # simplesmente nao oferece o QSV se ele nao abrir).
     #   - /dev/dri: o device de render/encode (renderD128) + card0.
-    #   - group_add: o container precisa pertencer ao grupo dono do renderD128
-    #     para ter permissao de acesso. Descubra o GID no host com:
-    #         getent group render        # ex.: render:x:992:  -> use 992
-    #     e ponha o NUMERO abaixo (nomes de grupo nao existem dentro do container).
+    #   - group_add: o container precisa pertencer aos grupos donos do device
+    #     para ter permissao de acesso. Descubra os GIDs no host com:
+    #         getent group render video    # ex.: render:x:992: / video:x:44:
+    #     e ponha os NUMEROS abaixo (nomes de grupo nao existem no container).
     devices:
       - /dev/dri:/dev/dri
     group_add:
+      - "44"    # GID do grupo 'video' no host (ajuste se o seu for diferente)
       - "992"   # GID do grupo 'render' no host (ajuste se o seu for diferente)
+
     volumes:
-      # jobs.db (SQLite) persiste fora do container
-      - downloader-data:/data
-      # Pastas de downloads e destino final: monte aqui os MESMOS caminhos que
-      # voce cadastra na UI (Configuracoes). O caminho DENTRO do container tem
-      # que bater com o "caminho local" do destino de torrents e com o path dos
-      # destinos do arquivo final. Ajuste a origem (esquerda) para a sua maquina.
+      # jobs.db (SQLite) + senha persistem fora do container
+      - ./outstasher-config:/config
+      # Midia: os caminhos DENTRO do container tem que bater com o "caminho
+      # local" do destino de torrents e com o path dos destinos do arquivo
+      # final, cadastrados na UI (Configuracoes).
       #
       #   <caminho no host>:<caminho dentro do container>
-      - ${DOWNLOADS_DIR:-./downloads}:/downloads
-      - ${OUTPUT_DIR_HOST:-./output}:/output
+      - /mnt:/mnt/outer
 
-volumes:
-  downloader-data:
+    restart: unless-stopped
+
+    # Descomente se o qBittorrent/Jackett rodam no host (Linux):
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"

@@ -86,24 +86,28 @@ reiniciar o servidor derruba a sessão. Trocar a senha desconecta as outras.
 Sobe tudo (backend + frontend buildado + ffmpeg) num container só:
 
 ```sh
-cp .env.example .env      # edite com suas chaves/URLs
+# edite as chaves/URLs e os mounts direto no docker-compose.yml
 docker compose up -d --build
 ```
 
 Abra http://localhost:8008. Imagem multi-stage (Node builda o front, runtime só
 Python + ffmpeg).
 
-Pontos de atenção do `.env`/`docker-compose.yml`:
+Pontos de atenção do `docker-compose.yml`:
 
+- **Chaves e URLs**: ficam em `environment:` no compose (o `.env` continua
+  valendo para rodar fora do Docker).
 - **qBittorrent / Jackett na sua máquina**: use `host.docker.internal` nas URLs
-  (`QBIT_URL`, `JACKETT_URL`) — dentro do container `localhost` é o container. O
-  compose já mapeia esse nome no Linux via `extra_hosts`.
-- **Pastas de download e destino**: monte-as no compose e cadastre os destinos na
-  UI com os caminhos *de dentro do container* (`/downloads`, `/output`). Ajuste
-  `DOWNLOADS_DIR`/`OUTPUT_DIR_HOST` no `.env`; o "caminho local" do destino de
-  torrents deve ser `/downloads`.
-- **Persistência**: `jobs.db` fica no volume `downloader-data` (`/data`, via
-  `DB_DIR`).
+  (`QBIT_URL`, `JACKETT_URL`) — dentro do container `localhost` é o container — e
+  descomente o `extra_hosts` (necessário no Linux).
+- **Mídia**: o compose monta `/mnt` do host em `/mnt/outer`. Cadastre os destinos
+  na UI com os caminhos *de dentro do container*, e o mesmo vale para o "caminho
+  local" do destino de torrents. `OUTPUT_DIR` (destino "Padrão" criado na
+  primeira execução) também é um caminho de dentro do container.
+- **Persistência**: `jobs.db` e a senha ficam em `./outstasher-config` no host,
+  montado em `/config` (via `DB_DIR`).
+- **GPU Intel (QSV)**: `devices: /dev/dri` + `group_add` com os GIDs de `render`
+  e `video` do host (`getent group render video`). Sem GPU Intel, remova o bloco.
 
 Parar: `docker compose down`. Logs: `docker compose logs -f`.
 
