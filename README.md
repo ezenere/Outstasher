@@ -331,6 +331,4 @@ retoma o acompanhamento sozinho.
 
 ## Licença
 
-[MIT](LICENSE) — use, modifique e distribua à vontade, inclusive comercialmente;
-basta manter o aviso de copyright. O software é fornecido "como está", sem
-garantias.
+[MIT](LICENSE)
