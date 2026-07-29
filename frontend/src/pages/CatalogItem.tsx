@@ -8,6 +8,7 @@ import { api, del, post, type CatalogDetail, type CatalogFile, type Stream } fro
 import { Empty } from '../components/ui'
 import { useDialog } from '../components/Dialog'
 import RecompressModal from '../components/RecompressModal'
+import TmdbPickerModal from '../components/TmdbPickerModal'
 
 export default function CatalogItem() {
   const dialog = useDialog()
@@ -18,6 +19,7 @@ export default function CatalogItem() {
   const [error, setError] = useState<string | null>(null)
   const [open, setOpen] = useState<Set<string>>(new Set())
   const [recompress, setRecompress] = useState<CatalogFile | null>(null)
+  const [pickingTmdb, setPickingTmdb] = useState(false)
   const navigate = useNavigate()
 
   const qs = `destination_id=${destId}&folder=${encodeURIComponent(folder)}`
@@ -75,25 +77,16 @@ export default function CatalogItem() {
     }
   }
 
-  async function tagTmdbId() {
-    if (!detail?.tmdb || !detail.proposed_folder) return
-    // proposed_folder vem do backend (mesmo safe_name/folder_name da renomeação
-    // real), então o dialog mostra exatamente o nome que será criado
-    if (!(await dialog.confirm({
-      title: 'Marcar com o ID do TMDB',
-      message: `Renomear a pasta para "${detail.proposed_folder}"? O Jellyfin usa esse ID para identificar o filme sem depender do título.`,
-      confirmText: 'Renomear',
-    }))) return
-    try {
-      const r = await post<{ folder: string }>('/api/catalog/item/tmdbid', {
-        folder, destination_id: destId ? Number(destId) : null, tmdb_id: detail.tmdb.id,
-      })
-      // a pasta mudou de nome: a URL atual aponta para um caminho que não existe mais
-      navigate(`/catalog/item?destination_id=${destId}&folder=${encodeURIComponent(r.folder)}`,
-        { replace: true })
-    } catch (e) {
-      await dialog.alert({ title: 'Erro', message: (e as Error).message })
-    }
+  // o match automático erra em remake/título localizado/coletânea, e marcar
+  // renomeia a pasta — o modal deixa confirmar (ou trocar) o filme antes
+  async function tagTmdbId(tmdbId: number) {
+    const r = await post<{ folder: string }>('/api/catalog/item/tmdbid', {
+      folder, destination_id: destId ? Number(destId) : null, tmdb_id: tmdbId,
+    })
+    setPickingTmdb(false)
+    // a pasta mudou de nome: a URL atual aponta para um caminho que não existe mais
+    navigate(`/catalog/item?destination_id=${destId}&folder=${encodeURIComponent(r.folder)}`,
+      { replace: true })
   }
 
   async function removeFolder() {
@@ -126,10 +119,12 @@ export default function CatalogItem() {
           {detail.title}
           {detail.year && <span className="ml-1 font-normal text-zinc-400">({detail.year})</span>}
         </h1>
-        {m && detail.tmdb_id == null && (
+        {/* sem match automático o botão continua valendo: é justamente aí que
+            escolher o filme na mão resolve */}
+        {detail.tmdb_id == null && (
           <button
-            onClick={tagTmdbId}
-            title={`Renomear a pasta para incluir [tmdbid-${m.id}]`}
+            onClick={() => setPickingTmdb(true)}
+            title="Escolher o filme e renomear a pasta para incluir [tmdbid-N]"
             className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:border-blue-700 hover:text-blue-300"
           >
             <Label width={15} height={15} /> Marcar ID do TMDB
@@ -201,6 +196,15 @@ export default function CatalogItem() {
           file={recompress}
           tmdb={detail.tmdb}
           onClose={() => setRecompress(null)}
+        />
+      )}
+      {pickingTmdb && (
+        <TmdbPickerModal
+          title={detail.title}
+          year={detail.year}
+          suggested={detail.tmdb}
+          onConfirm={tagTmdbId}
+          onClose={() => setPickingTmdb(false)}
         />
       )}
     </div>

@@ -404,8 +404,6 @@ export interface CatalogDetail {
   year: string | null
   /** id do TMDB já marcado no nome da pasta ([tmdbid-N]); null = ainda não marcada. */
   tmdb_id: number | null
-  /** nome que a pasta teria com o [tmdbid-N] (backend); null se sem id/match. */
-  proposed_folder: string | null
   size: number
   size_human: string
   files: CatalogFile[]

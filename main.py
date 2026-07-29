@@ -426,17 +426,15 @@ async def catalog_item(folder: str, destination_id: int | None = None):
         detail = catalog.item_detail(destination_id, folder)
     except catalog.CatalogError as e:
         raise HTTPException(404, str(e))
-    # match no TMDB (falha de rede nao quebra a pagina)
+    # dados do TMDB (falha de rede nao quebra a pagina). Com a pasta já marcada
+    # ([tmdbid-N]), busca pelo ID: ele foi escolhido/confirmado por alguém, e
+    # adivinhar de novo pelo título erraria justamente nos casos que o ID
+    # resolve (remake, título localizado, coleção).
     try:
-        detail["tmdb"] = await tmdb.match(detail["title"], detail["year"])
+        detail["tmdb"] = (await tmdb.by_id(detail["tmdb_id"]) if detail["tmdb_id"]
+                          else await tmdb.match(detail["title"], detail["year"]))
     except Exception:  # noqa: BLE001
         detail["tmdb"] = None
-    # nome que a pasta teria com o [tmdbid-N] — computado pelo backend (mesmo
-    # safe_name/folder_name da renomeação real) para o dialog não prometer um
-    # nome diferente do que será criado. None se ainda não há match nem tag.
-    tid = detail.get("tmdb_id") or ((detail["tmdb"] or {}).get("id"))
-    detail["proposed_folder"] = (
-        catalog.folder_name(detail["title"], detail["year"], tid) if tid else None)
     return detail
 
 

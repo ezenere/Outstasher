@@ -60,6 +60,22 @@ async def search(query: str, page: int = 1) -> dict:
     return _page(data)
 
 
+async def by_id(movie_id: int) -> dict | None:
+    """Filme pelo id exato do TMDB. None se o id nao existe (404).
+
+    Quando a pasta ja tem [tmdbid-N], este e o caminho certo: o id foi escolhido
+    (ou confirmado) por alguem, entao adivinhar de novo pelo titulo so poderia
+    errar — e erraria justamente nos casos que o id resolve (remake, titulo
+    localizado, colecao).
+    """
+    try:
+        return _slim(await _get(f"/movie/{movie_id}", {"language": "pt-BR"}))
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return None
+        raise
+
+
 async def match(title: str, year: str | None = None) -> dict | None:
     """Melhor palpite de filme por titulo (+ ano) para o catalogo. None se nada bate."""
     params = {"query": title, "language": "pt-BR"}
