@@ -635,11 +635,10 @@ def plan_video(probe: dict, vstream: dict, opts: ConvertOptions,
     if codec_id == "h264" and ten_bit_out and opts.bit_depth != "10":
         # High10 em H.264 quase nada decodifica — só a pedido explícito
         ten_bit_out = False
-        notes.append("fonte 10-bit sai em 8-bit no H.264 (High10 tem compatibilidade "
-                     "péssima) — force 10-bit nas opções se quiser manter")
+        notes.append("fonte 10-bit sai em 8-bit no H.264 - force 10-bit nas opções para manter")
     if ten_bit_out and is_hw and encoder not in HW_10BIT:
         ten_bit_out = False
-        notes.append(f"{encoder} só encoda 8-bit — saída em 8-bit")
+        notes.append(f"{encoder} só encoda 8-bit")
 
     # ---- decode em hardware ----
     input_args: list[str] = []
@@ -657,8 +656,8 @@ def plan_video(probe: dict, vstream: dict, opts: ConvertOptions,
             if vram:
                 input_args += ["-hwaccel_output_format", accel]
             notes.append("decode na GPU"
-                         + (" — frames direto na VRAM" if vram else "")
-                         + (" (VAAPI; o decoder QSV perde frames)"
+                         + (" [VRAM]" if vram else "")
+                         + (" (VAAPI)"
                             if accel == "qsv" else ""))
     if not vram:
         if is_hw:
@@ -666,7 +665,7 @@ def plan_video(probe: dict, vstream: dict, opts: ConvertOptions,
         else:
             args += ["-pix_fmt", "yuv420p10le" if ten_bit_out else "yuv420p"]
     if ten_bit_out and not src_10bit:
-        notes.append("saída em 10-bit a partir de fonte 8-bit (reduz banding no re-encode)")
+        notes.append("saída em 10-bit a partir de fonte 8-bit")
 
     # sinalização de cor explícita: HDR10/BT.2020 não podem depender da
     # propagação automática no re-encode
