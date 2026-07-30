@@ -53,6 +53,7 @@ export default function Movies() {
   useEffect(() => {
     const cur = new Map<number, MovieState>()
     for (const s of summary) {
+      if (s.recompress) continue  // reusa o tmdb_id de um filme já baixado
       const prev = cur.get(s.tmdb_id)
       // o backend já ordena por prioridade; o 1º de cada tmdb_id vence
       if (prev === undefined) cur.set(s.tmdb_id, s.state)

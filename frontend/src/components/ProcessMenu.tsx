@@ -70,7 +70,7 @@ export default function ProcessMenu({
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-medium text-zinc-200">{j.title}</div>
                       <div className="flex items-center gap-1.5 text-xs text-zinc-400">
-                        {MOVIE_STATE_LABEL[j.state as MovieState]}
+                        {j.recompress ? 'Recomprimindo' : MOVIE_STATE_LABEL[j.state as MovieState]}
                         {j.pct != null && <span className="tabular-nums">· {Math.round(j.pct)}%</span>}
                         {j.state === 'awaiting' && (
                           <span className="font-semibold text-red-400">· precisa de resposta</span>

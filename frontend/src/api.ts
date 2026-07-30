@@ -265,6 +265,9 @@ export interface JobSummary {
   status: string
   state: MovieState
   pct: number | null
+  /** Recompressão: reusa o tmdb_id de um filme já baixado, então não define o
+   *  estado do card na tela de Filmes. */
+  recompress?: boolean
 }
 
 /** Contagem por grupo (/api/jobs/counts) para os badges do filtro. */

@@ -239,12 +239,8 @@ def hw_encoder_works(encoder: str) -> bool:
     return _hw_probe(encoder) != "no"
 
 
-"""Nas GPUs Intel o decode é feito por VAAPI, NUNCA por QSV — ver DECODE_QSV.md.
-
-O decoder QSV/oneVPL das Arc descarta frames em silêncio (saiu um filme com 26%
-dos frames, ffmpeg reportando `0 decode errors` e exit 0). O mesmo arquivo pela
-VAAPI, na MESMA GPU, decodifica 100%. Como o defeito não levanta erro nenhum,
-não há como detectá-lo em runtime — só evitando o caminho."""
+"""Nas GPUs Intel o decode é por VAAPI, NUNCA por QSV: o decoder QSV das Arc
+descarta frames em silêncio (exit 0, `0 decode errors`). Ver DECODE_QSV.md."""
 VAAPI_RENDER_NODE = "/dev/dri/renderD128"
 
 
@@ -256,11 +252,8 @@ def _hw_decode_args(accel: str) -> list[str]:
 
 
 def _decode_output_format(accel: str) -> str:
-    """Formato do -hwaccel_output_format (manter frames na VRAM).
-
-    QSV é a exceção: os frames vêm da VAAPI e o hand-off VAAPI->QSV em VRAM não
-    funciona (o ffmpeg falha com "Impossible to convert between the formats" —
-    testado também com hwmap=derive_device). Os frames descem para a RAM."""
+    """Formato do -hwaccel_output_format (frames na VRAM). No QSV eles vêm da
+    VAAPI, e o hand-off VAAPI->QSV em VRAM não funciona — descem para a RAM."""
     return "vaapi" if accel == "qsv" else accel
 
 
@@ -268,9 +261,8 @@ def _hw_decode_works(path: str, accel: str, v_index: int = 0) -> bool:
     """Decode de 1 frame na GPU. O -hwaccel_output_format impede o fallback
     silencioso para software — sem ele o ffmpeg retornaria 0 mesmo sem GPU.
 
-    ATENÇÃO: isto prova que a GPU ABRE o arquivo, não que ela o decodifica
-    inteiro. Um decoder pode entregar menos frames e ainda sair com código 0
-    (foi exatamente o bug do QSV). Ver DECODE_QSV.md, item 3."""
+    Prova que a GPU ABRE o arquivo, não que decodifica inteiro (ver
+    DECODE_QSV.md, item 3)."""
     cmd = ["ffmpeg", "-hide_banner", "-v", "error",
            *_hw_decode_args(accel),
            "-hwaccel_output_format", _decode_output_format(accel),
@@ -602,15 +594,8 @@ def plan_video(probe: dict, vstream: dict, opts: ConvertOptions,
                      "-tune", "hq", "-multipass", "fullres", "-rc-lookahead", "32",
                      "-spatial-aq", "1", "-temporal-aq", "1"]
         elif encoder.endswith("_qsv"):
-            # QSV: ICQ puro (-global_quality). Nada de extbrc/look_ahead_depth:
-            # foram herdados da era H.264, onde o lookahead do QSV alimentava um
-            # rate control de bitrate-alvo (LA/LA-ICQ). Em ICQ não há orçamento de
-            # bits para redistribuir, então não fazem efeito. Comprovado
-            # empiricamente na Arc A380 (DG2/Alchemist): tanto no av1_qsv quanto
-            # no hevc_qsv, ligar look_ahead_depth (0/40/100) e adaptive_i/b gera
-            # saída byte-idêntica — o AV1 do Alchemist é VDENC-only/low-power e o
-            # oneVPL reseta esses parâmetros em silêncio. Só -global_quality e o
-            # -preset (aplicado acima) importam.
+            # ICQ puro: extbrc/look_ahead_depth/adaptive_i/b são inertes na Arc
+            # (saída byte-idêntica com e sem eles). Só global_quality e o preset.
             args += ["-global_quality", str(crf)]
         elif encoder == "libaom-av1":
             args += ["-crf", str(crf), "-b:v", "0"]

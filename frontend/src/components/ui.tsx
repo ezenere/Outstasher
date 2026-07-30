@@ -8,12 +8,8 @@ import { BookmarkSolid, Check, MediaVideoList, Download, Search, Timer, WarningT
 
 /** Trava o scroll do body enquanto um modal está aberto.
  *
- *  Conta quantos modais estão abertos: com um Dialog de confirmação por cima de
- *  outro modal, só o último a fechar destrava (senão o primeiro a fechar já
- *  liberaria o scroll com o outro ainda aberto).
- *
- *  A barra de rolagem que some tiraria ~15px de largura da página e faria o
- *  conteúdo "pular"; compensamos com padding equivalente no body.
+ *  Conta os modais abertos (um Dialog por cima de outro modal: só o último a
+ *  fechar destrava) e compensa a largura da scrollbar para a página não pular.
  */
 let scrollLocks = 0
 

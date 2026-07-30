@@ -79,12 +79,9 @@ _cancelling: set[str] = set()
 _qbit = QbitClient()
 
 # quando a UI pediu progresso pela última vez (time.monotonic()); None = nunca.
-# O watchdog do qBittorrent só corre rápido enquanto alguém está OLHANDO: sem
-# ninguém lendo, o progresso em memória não serve a ninguém e o poll rápido é só
-# carga no qBittorrent. Endpoints de "informação rápida" (progresso do job e a
-# lista de jobs) chamam touch_progress_demand() e reabrem a janela.
-# None (e não 0.0): monotonic() pode começar perto de zero, e aí "nunca pediram"
-# seria lido como "acabaram de pedir".
+# O watchdog só corre rápido enquanto a UI acompanha; sem ninguém lendo, o poll
+# rápido é só carga no qBittorrent. None (e não 0.0) porque monotonic() pode
+# começar perto de zero, e "nunca pediram" viraria "acabaram de pedir".
 _last_progress_demand: float | None = None
 
 
@@ -351,16 +348,14 @@ def summary() -> list[dict]:
         state = _STATE_OF.get(j["status"])
         if state in (None, "done"):  # dropdown ignora concluídos e cancelados
             continue
-        # recompressão não é um "download do filme": ela reusa o tmdb_id do
-        # item, então incluí-la faria o card do filme na busca aparecer como
-        # "convertendo"/"concluído" por engano (Movies.tsx chaveia por tmdb_id)
-        if _is_recompress(j):
-            continue
         pct = ((j["progress"].get("merge") or {}).get("pct") if state == "converting"
                else _download_pct(j))
+        # recompress: reusa o tmdb_id de um filme já baixado, então quem chaveia
+        # por tmdb_id (tela de Filmes) ignora; o dropdown mostra
         out.append({"id": j["id"], "tmdb_id": j.get("tmdb_id"),
                     "title": _movie_title(j), "status": j["status"],
-                    "state": state, "pct": pct})
+                    "state": state, "pct": pct,
+                    "recompress": _is_recompress(j)})
     out.sort(key=lambda x: _STATE_RANK[x["state"]])
     return out
 
@@ -1809,7 +1804,11 @@ async def _merge(job: dict, video_file: Path, audio_file: Path,
     if result.linked:
         _set(job, "done", f"Áudio no idioma alvo já existia no melhor vídeo — hardlink criado: {result.output}")
     else:
-        _set(job, "done", f"Concluído (offset {result.offset_ms:+.2f} ms): {result.output}")
+        # None quando o merge virou conversão de arquivo único (o melhor vídeo já
+        # tinha o áudio alvo): não houve alinhamento, não há offset
+        sync = (f" (offset {result.offset_ms:+.2f} ms)"
+                if result.offset_ms is not None else "")
+        _set(job, "done", f"Concluído{sync}: {result.output}")
 
     await _cleanup_torrents(job)
 

@@ -134,11 +134,9 @@ def set_extra_search_rules(rules: dict):
 
 
 # -------------------- presets de conversao --------------------
-# Conjuntos de ConvertOptions salvos pelo usuario ("QSV AV1 CRF 20" e afins):
-# escolher da lista evita remontar as ~12 opcoes na mao a cada conversao — e
-# errar uma delas sem perceber. As opcoes ficam como JSON opaco: o servidor nao
-# valida aqui, quem valida e o transcode.validate() na hora de converter (assim
-# um preset salvo antes de uma mudanca de capabilities nao quebra a listagem).
+# ConvertOptions nomeadas ("QSV AV1 CRF 20"). Guardadas como JSON opaco: quem
+# valida e o transcode.validate() na hora de converter, entao um preset salvo
+# antes de uma mudanca de capabilities nao quebra a listagem.
 
 def list_convert_presets() -> list[dict]:
     with _lock:
