@@ -5,17 +5,22 @@ import httpx
 
 import config
 
-# 2000 = categoria Movies do Torznab
+# categorias Torznab: 2000 = Movies, 5000 = TV
 MOVIE_CATEGORIES = ["2000"]
+TV_CATEGORIES = ["5000"]
 
 
-async def search(query: str, indexer: str = "all") -> list[dict]:
-    """Busca no Jackett. indexer='all' varre todos; ou o id de um indexer só."""
+async def search(query: str, indexer: str = "all",
+                 categories: list[str] | None = None) -> list[dict]:
+    """Busca no Jackett. indexer='all' varre todos; ou o id de um indexer só.
+
+    categories: lista Torznab (default filmes). O pipeline de séries passa
+    TV_CATEGORIES."""
     url = f"{config.JACKETT_URL}/api/v2.0/indexers/{indexer}/results"
     params = {
         "apikey": config.JACKETT_API_KEY,
         "Query": query,
-        "Category[]": MOVIE_CATEGORIES,
+        "Category[]": categories or MOVIE_CATEGORIES,
     }
     # Jackett pode levar 5-10 min consultando os indexadores — leitura com teto de 20 min
     timeout = httpx.Timeout(connect=15, read=1200, write=30, pool=30)
@@ -34,6 +39,12 @@ async def search(query: str, indexer: str = "all") -> list[dict]:
             "link": item.get("Link"),  # .torrent (fallback quando nao ha magnet)
             "tracker": item.get("Tracker"),
             "tracker_id": item.get("TrackerId"),  # slug estavel do indexer
+            # campos extras do pipeline de séries (aditivos; filmes ignoram):
+            # nº de arquivos ajuda a suspeitar de pack incompatível (≠ da
+            # contagem de episódios do TMDB); infohash ajuda no dedup
+            "publish_date": item.get("PublishDate"),
+            "files": item.get("Files"),
+            "infohash": item.get("InfoHash"),
         })
     return results
 
