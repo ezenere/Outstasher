@@ -1,9 +1,11 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
-  Check, Download, FastArrowRight, MediaVideo, SoundHigh, WarningTriangle,
+  Check, Download, FastArrowRight, MediaVideo, Refresh, SoundHigh,
+  WarningTriangle,
 } from 'iconoir-react'
 import {
-  EPISODE_STATE_LABEL, fmtSize, prog, resolveGate,
+  EPISODE_STATE_LABEL, fmtSize, post, prog, resolveGate,
   type Candidate, type EpisodeState, type Job, type SeriesCandidate,
 } from '../api'
 import { useDialog } from './Dialog'
@@ -160,6 +162,74 @@ export function SeriesTorrents({ job, onChanged }: { job: Job; onChanged: () => 
           )
         })}
       </div>
+    </section>
+  )
+}
+
+/** Relatório final do job de série + recriação de job só com as falhas. */
+export function SeriesReport({ job }: { job: Job }) {
+  const dialog = useDialog()
+  const navigate = useNavigate()
+  const [busy, setBusy] = useState(false)
+  const report = job.report
+  if (!report || !['done', 'error'].includes(job.status)) return null
+
+  async function retryFailed() {
+    if (busy || !report) return
+    if (!(await dialog.confirm({
+      title: 'Baixar de novo as falhas',
+      message: `Criar um novo job só com os ${report.failed.length} episódio(s) que falharam (mesmo idioma, destino e opções)?`,
+      confirmText: 'Criar job',
+    }))) return
+    // "S01E03" -> {1: [3]}
+    const episodes: Record<number, number[]> = {}
+    for (const key of report.failed) {
+      const [s, e] = key.slice(1).split('E').map(Number)
+      ;(episodes[s] ??= []).push(e)
+    }
+    setBusy(true)
+    try {
+      const nj = await post<Job>('/api/jobs/series', {
+        tmdb_id: job.tmdb_id,
+        language: job.language,
+        seasons: [],
+        episodes,
+        mode: job.mode === 'manual' ? 'manual' : 'auto',
+        destination_id: job.destination_id ?? null,
+        torrent_target_id: job.torrent_target_id ?? null,
+        convert: job.convert ?? null,
+      })
+      navigate(`/jobs/${nj.id}`)
+    } catch (e) {
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const ok = report.attempted > 0 && report.succeeded === report.attempted
+  return (
+    <section className={`mt-6 rounded-xl border p-4 ${
+      ok ? 'border-emerald-900/60 bg-emerald-950/20'
+         : 'border-amber-900/60 bg-amber-950/20'}`}
+    >
+      <h2 className={`mb-1 font-semibold ${ok ? 'text-emerald-300' : 'text-amber-300'}`}>
+        Relatório
+      </h2>
+      <p className="text-sm text-zinc-300">
+        {report.succeeded}/{report.attempted} episódio(s) concluído(s)
+        {report.failed.length > 0 && <> · {report.failed.length} falha(s): <span className="font-mono text-xs">{report.failed.join(', ')}</span></>}
+        {(report.skipped?.length ?? 0) > 0 && <> · {report.skipped!.length} pulado(s): <span className="font-mono text-xs">{report.skipped!.join(', ')}</span></>}
+      </p>
+      {report.failed.length > 0 && (
+        <button
+          onClick={retryFailed}
+          disabled={busy}
+          className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
+        >
+          <Refresh width={15} height={15} /> Baixar de novo os que falharam
+        </button>
+      )}
     </section>
   )
 }

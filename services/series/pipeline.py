@@ -1064,24 +1064,16 @@ def _find_episode_file(root, season: int, episode: int) -> Path:
 
 
 async def _after_download(job: dict):
-    """Fim do download. O merge por episódio chega na próxima etapa do
-    projeto; por ora o job conclui com o relatório do que baixou."""
+    """Fim do download: entra no merge por episódio (caminho rápido)."""
     downloaded = [k for k, v in job["episodes"].items()
                   if v["state"] == "downloaded"]
-    failed = [k for k, v in job["episodes"].items() if v["state"] == "failed"]
-    skipped = [k for k, v in job["episodes"].items()
-               if v["state"] in ("skipped_future", "skipped_missing")]
-    job["report"] = {"attempted": len(downloaded) + len(failed),
-                     "succeeded": len(downloaded), "failed": failed,
-                     "skipped": skipped}
     if not downloaded:
+        # nada baixou: o relatório sai direto (o merge_all trataria igual, mas
+        # sem episódios a mensagem de erro fica mais direta aqui)
         jobs._fail(job, "Nenhum episódio baixado com sucesso")
         return
-    jobs._set(job, "done",
-              f"Download concluído: {len(downloaded)} episódio(s)"
-              + (f", {len(failed)} falha(s)" if failed else "")
-              + (f", {len(skipped)} pulado(s)" if skipped else "")
-              + " — o merge automático de séries chega na próxima etapa")
+    from services.series import merge_runner
+    await merge_runner.merge_all(job)
 
 
 # -------------------- integração com o registro de jobs --------------------
@@ -1095,10 +1087,24 @@ def resume(job: dict):
     elif status == "downloading":
         jobs._spawn(job["id"], _resume_download(job))
     elif status == "merging":
-        # merge de séries chega na próxima etapa; sem como retomar ainda
-        jobs._set(job, "error",
-                  "Servidor reiniciado durante a conversão — use ↻ para repetir")
+        # os estados por episódio tornam a retomada idempotente: `done` fica,
+        # `merging` interrompido volta a `downloaded` (os arquivos de origem
+        # estão no disco) e o merge recomeça só do que falta
+        for ep in job["episodes"].values():
+            if ep["state"] == "merging":
+                ep["state"] = "downloaded"
+        jobs._spawn(job["id"], _resume_merge(job))
     # awaiting: gate persistido; segue esperando a decisão do usuário
+
+
+async def _resume_merge(job: dict):
+    try:
+        from services.series import merge_runner
+        await merge_runner.merge_all(job)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        jobs._fail(job, f"{type(e).__name__}: {e}")
 
 
 async def retry(old: dict) -> dict:
