@@ -584,51 +584,54 @@ async def resolve(job_id: str, reason: str, decision: dict) -> dict | None:
             f"O job não está aguardando '{reason}'"
             + (f" (gate atual: {gate['reason']})" if gate else ""))
 
+    # qualquer decisão inválida (ou falha ao aplicá-la — inclusive erro de rede
+    # no remap) RESTAURA o gate: sem isso o job ficaria preso em awaiting sem
+    # gate ativo, com todo resolve seguinte respondendo 409 para sempre
     job["awaiting"] = None
-    if reason == "gaps_confirm":
-        if not decision.get("accept"):
-            jobs._event(job, "chosen", "Usuário desistiu por causa das lacunas")
-            await jobs.cancel(job_id)
-            cancelled = jobs._lookup(job_id)
-            return jobs._public(cancelled) if cancelled else None
-        _apply_gaps(job)
-        job["_gaps_accepted"] = True
-        jobs._event(job, "chosen", "Usuário aceitou continuar com as lacunas")
-    elif reason == "incompatible_torrents":
-        action = decision.get("action")
-        if action == "accept":
-            job["_signals_accepted"] = True
+    try:
+        if reason == "gaps_confirm":
+            if not decision.get("accept"):
+                jobs._event(job, "chosen",
+                            "Usuário desistiu por causa das lacunas")
+                await jobs.cancel(job_id)
+                cancelled = jobs._lookup(job_id)
+                return jobs._public(cancelled) if cancelled else None
+            _apply_gaps(job)
+            job["_gaps_accepted"] = True
             jobs._event(job, "chosen",
-                        "Usuário aceitou os torrents mesmo com sinais de "
-                        "incompatibilidade")
-        elif action == "replace":
-            _apply_replace(job, decision)
-        elif action == "remap":
-            await _apply_remap(job, decision)
-        else:
-            job["awaiting"] = gate  # decisão inválida: gate continua de pé
-            raise ValueError(f"Ação inválida: {action!r}")
-    elif reason == "manual_pick":
-        _apply_manual(job, decision)
-        job["_manual_done"] = True
-    elif reason == "alignment_review":
-        try:
+                        "Usuário aceitou continuar com as lacunas")
+        elif reason == "incompatible_torrents":
+            action = decision.get("action")
+            if action == "accept":
+                job["_signals_accepted"] = True
+                jobs._event(job, "chosen",
+                            "Usuário aceitou os torrents mesmo com sinais de "
+                            "incompatibilidade")
+            elif action == "replace":
+                _apply_replace(job, decision)
+            elif action == "remap":
+                await _apply_remap(job, decision)
+            else:
+                raise ValueError(f"Ação inválida: {action!r}")
+        elif reason == "manual_pick":
+            _apply_manual(job, decision)
+            job["_manual_done"] = True
+        elif reason == "alignment_review":
             _apply_review(job, decision)
-        except ValueError:
-            job["awaiting"] = gate  # decisão inválida: gate continua de pé
-            raise
-        # episódios ainda sem decisão continuam em revisão: re-abre o gate
-        remaining = {k: v["edl"] for k, v in job["episodes"].items()
-                     if v["state"] == "review"}
-        if remaining:
-            _gate(job, "alignment_review", {"episodes": remaining},
-                  f"⚠️ {len(remaining)} episódio(s) ainda precisam de revisão")
+            # episódios ainda sem decisão continuam em revisão: re-abre o gate
+            remaining = {k: v["edl"] for k, v in job["episodes"].items()
+                         if v["state"] == "review"}
+            if remaining:
+                _gate(job, "alignment_review", {"episodes": remaining},
+                      f"⚠️ {len(remaining)} episódio(s) ainda precisam de revisão")
+                return jobs._public(job)
+            jobs._spawn(job["id"], _resume_merge(job))
             return jobs._public(job)
-        jobs._spawn(job["id"], _resume_merge(job))
-        return jobs._public(job)
-    else:
-        job["awaiting"] = gate
-        raise ValueError(f"Gate desconhecido: {reason!r}")
+        else:
+            raise ValueError(f"Gate desconhecido: {reason!r}")
+    except Exception:
+        job["awaiting"] = gate  # gate continua de pé para uma nova decisão
+        raise
 
     jobs._spawn(job["id"], _continue_after_gate(job))
     return jobs._public(job)

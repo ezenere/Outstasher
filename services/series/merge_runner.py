@@ -31,7 +31,10 @@ async def merge_all(job: dict):
     keys = sorted(k for k, v in job["episodes"].items()
                   if v["state"] == "downloaded")
     if not keys:
+        # ex.: revisão terminou com tudo pulado — ainda assim fecha o
+        # relatório E aplica a política de limpeza dos torrents
         _finish(job)
+        await _cleanup_torrents(job)
         return
     jobs._set(job, "merging",
               f"Convertendo {len(keys)} episódio(s) (um por vez)...")
@@ -59,12 +62,26 @@ async def merge_all(job: dict):
             except asyncio.CancelledError:
                 raise
             except merger.VersionMismatch as e:
-                # cortes divergem: entra o alinhador por CONTEÚDO (dHash + DP)
+                # cortes divergem: entra o alinhador por CONTEÚDO (dHash + DP).
+                # Exceção levantada DENTRO de um handler não cai no `except
+                # Exception` irmão — sem o try próprio, uma falha do alinhador
+                # (ffmpeg, render...) derrubaria o job inteiro em vez de falhar
+                # só este episódio
                 jobs._event(job, "merge",
                             f"{key}: offsets divergentes ({e.tau1_ms:+.0f} → "
                             f"{e.tau2_ms:+.0f} ms) — rodando o alinhador por "
                             f"conteúdo...")
-                await _align_episode(job, key, ep)
+                try:
+                    await _align_episode(job, key, ep)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e2:  # noqa: BLE001 — falha por episódio
+                    if job["id"] in jobs._cancelling:
+                        raise asyncio.CancelledError
+                    ep["state"] = "failed"
+                    ep["error"] = f"{type(e2).__name__}: {e2}"
+                    jobs._event(job, "merge", f"❌ {key} falhou: {ep['error']}")
+                    jobs._delete_output(job)
             except Exception as e:  # noqa: BLE001 — falha por episódio, nunca do laço
                 # cancelamento mata o ffmpeg e o merge levanta MergeError: isso
                 # NÃO é falha do episódio — propaga o cancel (que apaga o parcial)
@@ -111,7 +128,9 @@ async def _align_episode(job: dict, key: str, ep: dict):
         return
 
     segs = edl_mod.segments(edl_dict)
-    dub_a, orig_a, _ch = _audio_indexes(dub, orig, job["language"])
+    # ffprobe é bloqueante (subprocess): fora do event loop, como o resto
+    dub_a, orig_a, _ch = await asyncio.to_thread(
+        _audio_indexes, dub, orig, job["language"])
     log, _ = jobs._ffmpeg_hooks(job)
     segs = await asyncio.to_thread(
         refine.refine_offsets, segs, dub, dub_a, orig, orig_a, log)
@@ -147,10 +166,14 @@ def _audio_indexes(dub_path: str, orig_path: str,
     iso = merger.canonical_lang(target_lang)
     best_dub = merger.choose_best_audio_per_language([probe_dub], {0: iso})
     ds = (best_dub.get(iso) or best_dub.get("und")
-          or next(iter(best_dub.values())))
+          or next(iter(best_dub.values()), None))
+    if ds is None:
+        raise merger.MergeError(f"nenhum áudio no arquivo dublado ({dub_path})")
     best_orig = merger.choose_best_audio_per_language([probe_orig], {})
     os_ = next((v for k, v in best_orig.items() if k != iso),
-               next(iter(best_orig.values())))
+               next(iter(best_orig.values()), None))
+    if os_ is None:
+        raise merger.MergeError(f"nenhum áudio no arquivo original ({orig_path})")
     return (ds[1]["_type_index"], os_[1]["_type_index"],
             int(ds[1].get("channels") or 2))
 
