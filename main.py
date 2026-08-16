@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -683,6 +683,37 @@ async def jobs_list(group: str = "active", page: int = 1,
         return jobs.list_group(group, page, per_page, _check_media(media))
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@app.get("/api/jobs/{job_id}/frame")
+async def job_frame(job_id: str, episode: str, side: str = "a", t: float = 0.0):
+    """Um frame JPEG de um dos arquivos de origem de um episódio, para a
+    revisão de alinhamento comparar as duas versões lado a lado.
+
+    side: "a" = dublado, "b" = original. `t` em segundos NO ARQUIVO pedido.
+    """
+    job = jobs.get_job(job_id)
+    if not job or job.get("media_type") != "tv":
+        raise HTTPException(404, "Job de série não encontrado")
+    ep = (job.get("episodes") or {}).get(episode)
+    if not ep:
+        raise HTTPException(404, f"Episódio {episode} não existe neste job")
+    src = (ep.get("src") or {}).get("dubbed" if side == "a" else "original")
+    if not src or not Path(src).is_file():
+        raise HTTPException(404, "Arquivo de origem não está mais no disco")
+
+    def grab() -> bytes:
+        p = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-ss", f"{max(0.0, t):.3f}", "-i", src, "-frames:v", "1",
+             "-vf", "scale=480:-2", "-f", "image2", "-c:v", "mjpeg", "pipe:1"],
+            capture_output=True, timeout=30)
+        if p.returncode != 0 or not p.stdout:
+            raise HTTPException(500, "ffmpeg não extraiu o frame")
+        return p.stdout
+
+    data = await asyncio.to_thread(grab)
+    return Response(content=data, media_type="image/jpeg")
 
 
 @app.get("/api/jobs/{job_id}")

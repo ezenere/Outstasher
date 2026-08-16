@@ -161,6 +161,55 @@ export function resolveGate(jobId: string, reason: GateReason | 'force_continue'
   return post<Job>(`/api/jobs/${jobId}/resolve`, { reason, decision })
 }
 
+// ---------- EDL (revisão de alinhamento) ----------
+
+export type SegmentKind = 'match' | 'gap_dub' | 'gap_orig' | 'replaced' | 'pal' | 'drift'
+export type ReviewAction = 'fill_original' | 'silence' | 'use_dub' | 'accept'
+
+/** Segmento da EDL (tempos em s; a = dublado, b = original). */
+export interface EdlSegment {
+  kind: SegmentKind
+  a_start: number
+  a_end: number
+  b_start: number | null
+  b_end: number | null
+  offset: number | null
+  slope: number | null
+  residual: number
+  confidence: number
+  note: string
+  /** Decisão de revisão já aplicada (explícita ou por regra). */
+  action?: ReviewAction
+}
+
+export interface Edl {
+  version: number
+  episode: string
+  source_dub: { path: string; duration: number }
+  source_orig: { path: string; duration: number }
+  segments: EdlSegment[]
+  confidence_profile: number[] | null
+  review: { required: boolean; flagged: { a_start: number; a_end: number; reason: string }[] }
+}
+
+/** Regra de revisão reaplicável ("aplicar a todos os episódios"). */
+export interface ReviewRule {
+  when: { kind?: SegmentKind; position?: 'start' | 'end' | 'middle' | 'any'; min_len?: number; max_len?: number }
+  action: ReviewAction
+}
+
+/** Busca um frame de comparação como blob-URL (o <img> puro não manda o
+ *  header de Authorization — buscamos via fetch autenticado). O chamador é
+ *  dono do URL e deve dar URL.revokeObjectURL ao descartar. */
+export async function fetchFrame(jobId: string, episode: string,
+                                 side: 'a' | 'b', t: number): Promise<string> {
+  const r = await fetch(
+    `/api/jobs/${jobId}/frame?episode=${episode}&side=${side}&t=${t.toFixed(2)}`,
+    { headers: { Authorization: `Bearer ${getToken() ?? ''}` } })
+  if (!r.ok) throw new Error(`frame ${r.status}`)
+  return URL.createObjectURL(await r.blob())
+}
+
 export interface Language {
   code: string
   label: string

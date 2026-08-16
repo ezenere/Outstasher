@@ -8,6 +8,7 @@ import {
   EPISODE_STATE_LABEL, fmtSize, post, prog, resolveGate,
   type Candidate, type EpisodeState, type Job, type SeriesCandidate,
 } from '../api'
+import AlignmentReview from './AlignmentReview'
 import { useDialog } from './Dialog'
 import { CandidatesTable, Collapsible, ProgressBar } from './ui'
 
@@ -242,6 +243,10 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
   const [picks, setPicks] = useState<Record<string, Record<string, string>>>({})
   const gate = job.awaiting
   if (job.status !== 'awaiting' || !gate) return null
+
+  if (gate.reason === 'alignment_review') {
+    return <AlignmentReview job={job} onResolved={onResolved} />
+  }
 
   async function send(reason: Parameters<typeof resolveGate>[1], decision: object,
                       confirm?: { message: string; tone?: 'danger' }) {
