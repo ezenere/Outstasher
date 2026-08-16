@@ -11,6 +11,7 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -214,6 +215,53 @@ async def movies(q: str = "", page: int = 1):
     for m in result.get("results", []):
         m["in_catalog"] = catalog.in_library(m, keys)
     return result
+
+
+@app.get("/api/series")
+async def series(q: str = "", page: int = 1):
+    """Busca/populares de séries — espelho de /api/movies (mesmo shape de card).
+
+    O selo de coleção usa o mesmo índice (título, ano) do scan de pastas: uma
+    pasta de série no destino conta como "na coleção" (granularidade por
+    episódio chega com o catálogo de séries)."""
+    if not config.TMDB_API_KEY:
+        raise HTTPException(500, "TMDB_API_KEY não configurada no .env")
+    page = max(1, min(page, 500))
+    result = await (tmdb.search_tv(q.strip(), page) if q.strip()
+                    else tmdb.popular_tv(page))
+    keys = await asyncio.to_thread(catalog.library_keys)
+    for m in result.get("results", []):
+        m["in_catalog"] = catalog.in_library(m, keys)
+    return result
+
+
+@app.get("/api/series/{tv_id}/season/{season}")
+async def series_season(tv_id: int, season: int):
+    """Episódios de uma temporada (nome, data de estreia, duração)."""
+    try:
+        return await tmdb.tv_season(tv_id, season)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(404, "Temporada não encontrada")
+        raise
+
+
+@app.get("/api/series/{tv_id}")
+async def series_detail(tv_id: int):
+    """Detalhe da série + lista de temporadas, para o modal de seleção."""
+    try:
+        d = await tmdb.tv_details(tv_id)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(404, "Série não encontrada")
+        raise
+    # shape de card (title = localizado) + temporadas
+    return {
+        "id": d["id"], "title": d["localized_title"],
+        "original_title": d["original_title"], "year": d["year"],
+        "overview": d["overview"], "poster": d["poster"],
+        "seasons": d["seasons"],
+    }
 
 
 class JobRequest(BaseModel):

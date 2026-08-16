@@ -10,6 +10,8 @@ export interface Movie {
   rating: number | null
   /** Já existe na coleção (pasta em algum destino) — cache de 30 min no backend. */
   in_catalog?: boolean
+  /** 'tv' nos cards vindos de /api/series; ausente = filme. */
+  media_type?: 'movie' | 'tv'
 }
 
 /** Página de resultados de filmes do TMDB (/api/movies). */
@@ -18,6 +20,42 @@ export interface MoviePage {
   page: number
   total_pages: number
   total_results: number
+}
+
+// ---------- séries (TMDB TV) ----------
+
+/** Temporada na lista do detalhe da série (/api/series/{id}). */
+export interface SeasonInfo {
+  season: number
+  name: string | null
+  episode_count: number | null
+  air_date: string | null
+}
+
+/** Detalhe da série + temporadas, para o modal de seleção. */
+export interface SeriesDetail {
+  id: number
+  title: string | null
+  original_title: string | null
+  year: string
+  overview: string | null
+  poster: string | null
+  seasons: SeasonInfo[]
+}
+
+/** Episódio de uma temporada (/api/series/{id}/season/{n}). */
+export interface EpisodeInfo {
+  episode: number
+  name: string | null
+  air_date: string | null
+  runtime: number | null
+  overview: string | null
+}
+
+export interface SeasonDetail {
+  season: number
+  name: string | null
+  episodes: EpisodeInfo[]
 }
 
 export interface Language {
