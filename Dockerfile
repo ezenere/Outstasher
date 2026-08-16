@@ -37,13 +37,26 @@ RUN sed -i 's/^Components: main$/Components: main contrib non-free non-free-firm
 # mas fixamos para nao depender de auto-deteccao)
 ENV LIBVA_DRIVER_NAME=iHD
 
-# deps python primeiro (camada cacheada enquanto requirements nao muda)
+# deps python primeiro (camada cacheada enquanto requirements nao muda).
+# numba/llvmlite (DP do alinhador de series) tem wheels prontos p/ linux-amd64.
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 # codigo do backend
 COPY main.py config.py merge.py ./
 COPY services/ ./services/
+
+# cache JIT do numba persistido na imagem: compila o kernel do alinhador AGORA
+# (uma matriz minuscula) para o 1o job de serie nao pagar os ~20s de JIT.
+# O ffmpeg do Debian ja vem com librubberband (correcao de pitch do PAL);
+# render.py detecta em runtime e cai no fallback asetrate se faltar.
+ENV NUMBA_CACHE_DIR=/app/.numba_cache
+RUN python -c "\
+import numpy as np; \
+from services.series.align import dp; \
+D = np.zeros((4, 4), dtype=np.uint8); \
+dp.align_band(D, np.zeros(4, dtype=np.int64), 4); \
+print('kernel do alinhador compilado e cacheado')"
 
 # frontend ja buildado, vindo do estagio 1 (imagem final nao precisa de node/npm)
 COPY --from=frontend /app/frontend/dist ./frontend/dist

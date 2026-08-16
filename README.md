@@ -225,6 +225,92 @@ foi escolhido, e a timeline de eventos com o log do merge. Durante a conversão,
 uma barra de progresso do ffmpeg mostra posição no filme, velocidade, fps,
 tamanho, bitrate e ETA.
 
+## Séries
+
+O toggle **Filmes/Séries** na busca alterna para a base de TV do TMDB. O card
+de série abre um modal com as temporadas e episódios (datas de estreia;
+episódio ainda não lançado fica desabilitado e é pulado automaticamente —
+`skipped_future`). Dá para marcar temporadas inteiras e/ou episódios avulsos;
+o job baixa **as duas versões (original + dublada) de cada episódio**.
+
+### Busca e seleção
+
+A busca roda na categoria TV do Jackett em duas fases: por temporada
+("Título S01", packs "Complete") e, só para as lacunas, por episódio
+("Título S01E02"). A seleção é por episódio com a mesma escada de qualidade
+dos filmes; **em qualidade equivalente vence o pack** que cobre mais episódios
+pedidos (menos torrents), e um pack baixa **só os arquivos** dos episódios
+selecionados (prioridade 0 no resto, via qBittorrent).
+
+Nada é decidido sozinho em situação suspeita — o job pausa num **gate** e
+espera você:
+
+- **Lacunas** (`gaps_confirm`): episódio pedido sem torrent em um (ou nos
+  dois) idiomas → "continuar com as lacunas?" (os sem cobertura viram
+  `skipped_missing`).
+- **Torrents incompatíveis** (`incompatible_torrents`): numeração absoluta
+  (anime), episódios por data, pack com menos arquivos que episódios, ordem
+  explícita no nome (DVD order) ou ordens alternativas conhecidas no TMDB.
+  Opções: aceitar, trocar por outro candidato ou **remapear os episódios**
+  para uma ordem alternativa (episode_groups) e refazer busca/plano.
+- **Modo manual** (`manual_pick`): tabelas de candidatos por episódio/papel;
+  o mesmo pack escolhido para vários episódios baixa uma vez só.
+
+Durante o download dá para **forçar a próxima etapa** (episódios não baixados
+viram pulados). O detalhe do job mostra todos os torrents em andamento e o
+estado de cada episódio; a lista de Jobs e o dropdown do cabeçalho têm o
+filtro **Filmes / Séries / Todos**, combinável com o filtro de status.
+
+### Alinhamento por conteúdo
+
+O merge tenta primeiro o caminho rápido dos filmes (offset constante,
+GCC-PHAT em duas janelas). Quando as janelas divergem — TV/streaming e
+Blu-ray raramente compartilham a mesma montagem (recaps, aberturas, cenas
+cortadas/substituídas, speedup PAL) — entra o alinhador por conteúdo:
+
+1. crop dominante (cropdetect fora dos créditos) em cada lado;
+2. fingerprint **dHash 64-bit a 4 fps** e matriz de Hamming em banda;
+3. **Needleman-Wunsch semi-global com gap afim** (numba) — abrir gap custa
+   caro, estender custa quase nada: uma cena removida vira UM gap, não 400;
+4. classificação por geometria + resíduo: `match`, `gap_dub` (só no dublado),
+   `gap_orig` (sem dublagem), `replaced` (mesma duração, conteúdo diferente),
+   `pal`, `drift`; refino do offset por áudio dentro de cada match;
+5. o resultado é uma **EDL** versionada gravada no job.
+
+A saída usa a timeline do original: vídeo/legendas/áudios originais em stream
+copy; só a faixa dublada é remontada fatia a fatia. Cena sem dublagem é
+preenchida com o **áudio original** (ou silêncio, se você decidir) e vira um
+**capítulo** `[preenchido]` no MKV. Speedup PAL é corrigido com `rubberband`
+(pitch + duração juntos; fallback `asetrate` sem ele).
+
+**Cena substituída nunca passa sozinha**: o job pausa em
+`alignment_review` com uma timeline de duas faixas e frames lado a lado das
+fronteiras. As decisões podem virar **regras** ("gap no início de 30–60 s →
+descartar") que valem para todos os episódios do job — numa temporada, a
+mesma decisão estrutural se repete 20 vezes.
+
+Triagem sem merge: `python merge.py --align-report <pasta_orig> <pasta_dub>
+<saida>` alinha a temporada inteira e imprime a confiança por episódio (com a
+matriz de distância em PNG por par — o debug visual do alinhador).
+
+### Falhas parciais
+
+Episódio que falha na conversão **não para os outros**: o relatório final
+lista as falhas e o botão "Baixar de novo os que falharam" cria um job novo só
+com eles. Menos de **75%** de sucesso entre os tentados aborta o job inteiro
+com erro.
+
+### Séries no catálogo
+
+Pasta com subpastas `Season NN` aparece como série (layout Jellyfin:
+`Série (Ano) [tmdbid-N]/Season 01/Série (Ano) S01E02 [pt+orig].mkv`), com os
+arquivos agrupados por temporada. Dali dá para **Adicionar episódios** (o
+modal marca o que já está na coleção) e **recomprimir** um episódio, uma
+temporada ou a série inteira — a recompressão em lote falha por arquivo,
+segue a regra dos 75% e **valida a contagem de pacotes de vídeo** (≥ 99,5% da
+origem) antes de substituir o original, contra encoder de hardware
+descartando frames em silêncio (ver `DECODE_QSV.md`).
+
 ## Configurações
 
 A aba **Configurações** reúne dois cadastros, ambos guardados no `jobs.db` e
@@ -328,7 +414,9 @@ retoma o acompanhamento sozinho.
 | `services/merger.py` | merge + alinhamento GCC-PHAT (usado pelos jobs) |
 | `services/transcode.py` | opções avançadas: capacidades do ffmpeg, validação, planos de vídeo/áudio |
 | `services/merger_segments.py` | alinhamento por segmentos (`merge.py --segments`) |
-| `merge.py` | CLI avulso em cima do `services/merger.py` (`--series`, `--segments`) |
+| `services/series/` | pipeline de séries: busca/plano/gates (`pipeline.py`), seleção por episódio (`selector_tv.py`, `parse.py`), merge por episódio (`merge_runner.py`), recompressão em lote (`recompress.py`), nomes Jellyfin (`naming.py`) |
+| `services/series/align/` | alinhador por conteúdo: dHash (`fingerprint.py`), DP com gap afim (`dp.py`), classificação (`classify.py`), refino por áudio (`refine.py`), EDL (`edl.py`), render (`render.py`), regras de revisão (`rules.py`) |
+| `merge.py` | CLI avulso em cima do `services/merger.py` (`--series`, `--segments`, `--align-report`) |
 | `frontend/` | frontend React (TS + Tailwind + Iconoir + Router) |
 | `Dockerfile` | build multi-stage (Node builda o front, runtime Python + ffmpeg) |
 | `docker-compose.yml` | sobe o serviço local com volume p/ o `jobs.db` e mounts |
