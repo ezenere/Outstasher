@@ -1,0 +1,219 @@
+"""Estágio 7: renderização da EDL — merge por segmentos de verdade.
+
+A timeline de saída é a do ORIGINAL (o vídeo que fica): vídeo, legendas e os
+áudios originais passam em STREAM COPY; só a faixa dublada é remontada fatia
+a fatia (atrim/asetpts/concat) seguindo a EDL:
+
+- match/drift: fatia do dublado deslocada pelo offset refinado;
+- pal: fatia do dublado com rubberband (tempo+pitch juntos; fallback
+  asetrate+aresample+atempo quando o build do ffmpeg não tem rubberband);
+- gap_orig: preenchido com o ÁUDIO ORIGINAL por padrão (silêncio é pior
+  experiência que uma frase em inglês — e o usuário percebe que não é bug),
+  ou silêncio se a revisão mandou;
+- replaced: a ação vem da revisão (fill_original / use_dub / silence);
+- gap_dub: descartado — o material não existe no vídeo final.
+
+Cada preenchimento vira um CAPÍTULO no MKV ("[preenchido] 12:34-12:52") —
+auditável depois, sem caçar de ouvido.
+"""
+import subprocess
+import tempfile
+from functools import lru_cache
+from pathlib import Path
+
+from services import merger
+from services.series.align.classify import Segment
+
+# tolerância para "fatia colada na anterior" (evita micro-gaps de arredondamento)
+_EPS = 0.02
+
+
+@lru_cache(maxsize=1)
+def has_rubberband() -> bool:
+    """O build do ffmpeg tem o filtro rubberband? (probe único, cacheado)"""
+    try:
+        p = subprocess.run(["ffmpeg", "-hide_banner", "-filters"],
+                           capture_output=True, text=True, timeout=30)
+        return " rubberband " in p.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _layout(channels: int) -> str:
+    return {1: "mono", 2: "stereo", 6: "5.1", 8: "7.1"}.get(channels, "stereo")
+
+
+def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
+           target_lang: str, log=print, on_progress=None, on_start=None):
+    """Renderiza a EDL num MKV final. Bloqueante (roda ffmpeg)."""
+    probe_orig = merger.ffprobe_json(orig_path)
+    probe_dub = merger.ffprobe_json(dub_path)
+    merger.annotate_type_indexes(probe_orig)
+    merger.annotate_type_indexes(probe_dub)
+    duration_b = float(probe_orig["format"]["duration"])
+
+    # faixa dublada: melhor áudio do idioma alvo no arquivo dublado
+    iso = merger.canonical_lang(target_lang)
+    best = merger.choose_best_audio_per_language([probe_dub], {0: iso})
+    dub_stream = (best.get(iso) or best.get("und") or
+                  next(iter(best.values()), None))
+    if dub_stream is None:
+        raise merger.MergeError(f"nenhum áudio no arquivo dublado ({dub_path})")
+    dub_a = dub_stream[1]["_type_index"]
+    channels = int(dub_stream[1].get("channels") or 2)
+    layout = _layout(channels)
+    # áudio original para os preenchimentos: o melhor de qualquer língua ≠ alvo
+    orig_best = merger.choose_best_audio_per_language([probe_orig], {})
+    orig_pick = next((v for k, v in orig_best.items() if k != iso),
+                     next(iter(orig_best.values()), None))
+    if orig_pick is None:
+        raise merger.MergeError(f"nenhum áudio no arquivo original ({orig_path})")
+    orig_a = orig_pick[1]["_type_index"]
+
+    slices, fills = _plan_slices(segs, duration_b)
+    if not slices:
+        raise merger.MergeError("EDL sem nenhum trecho renderizável")
+
+    chains, labels = [], []
+    norm = f"aresample=48000,aformat=sample_rates=48000:channel_layouts={layout}"
+    for i, sl in enumerate(slices):
+        lbl = f"c{i}"
+        dur = sl["b_end"] - sl["b_start"]
+        if sl["src"] == "silence":
+            chains.append(
+                f"anullsrc=r=48000:cl={layout},atrim=end={dur:.3f},"
+                f"asetpts=PTS-STARTPTS[{lbl}]")
+        else:
+            inp = f"[1:a:{dub_a}]" if sl["src"] == "dub" else f"[0:a:{orig_a}]"
+            start, end = sl["src_start"], sl["src_end"]
+            steps = [f"atrim=start={max(0.0, start):.3f}:end={max(0.0, end):.3f}",
+                     "asetpts=PTS-STARTPTS", norm]
+            if sl.get("tempo") and abs(sl["tempo"] - 1.0) > 0.001:
+                # tempo = duração_saída/duração_entrada (PAL: ~1.0427 — o
+                # dublado acelerado precisa ESTICAR). rubberband usa fator de
+                # VELOCIDADE (inverso) e corrige o pitch junto.
+                t = sl["tempo"]
+                if has_rubberband():
+                    steps.append(f"rubberband=tempo={1 / t:.5f}:pitch={1 / t:.5f}")
+                else:
+                    # asetrate desacelera duração E pitch juntos (o speedup
+                    # PAL alterou os dois juntos) — qualidade um pouco pior
+                    steps.append(f"asetrate={int(48000 / t)},aresample=48000")
+            # apad+atrim: cada fatia sai EXATAMENTE do tamanho do buraco que
+            # preenche — o concat não pode escorregar
+            steps += ["apad", f"atrim=end={dur:.3f}", "asetpts=PTS-STARTPTS"]
+            chains.append(f"{inp}{','.join(steps)}[{lbl}]")
+        labels.append(f"[{lbl}]")
+    chains.append(f"{''.join(labels)}concat=n={len(labels)}:v=0:a=1[dub_out]")
+    filter_complex = ";".join(chains)
+
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+           "-fflags", "+genpts", "-progress", "pipe:1",
+           "-i", orig_path, "-i", dub_path]
+    chapters_file = None
+    if fills:
+        chapters_file = _chapters_metadata(fills)
+        cmd += ["-f", "ffmetadata", "-i", chapters_file]
+    cmd += ["-filter_complex", filter_complex,
+            "-map", "0:v:0", "-c:v", "copy"]
+    # áudios do original em stream copy (todas as línguas), depois o dublado
+    n_orig_a = len(merger.get_streams(probe_orig, "audio"))
+    for k in range(n_orig_a):
+        cmd += ["-map", f"0:a:{k}"]
+    cmd += ["-map", "[dub_out]"]
+    cmd += ["-c:a", "copy"]
+    codec, bitrate = merger.filtered_codec_and_bitrate(channels)
+    cmd += [f"-c:a:{n_orig_a}", codec, f"-b:a:{n_orig_a}", bitrate,
+            f"-metadata:s:a:{n_orig_a}", f"language={iso}",
+            f"-disposition:a:{n_orig_a}", "default"]
+    # legendas do original intactas
+    if merger.get_streams(probe_orig, "subtitle"):
+        cmd += ["-map", "0:s?", "-c:s", "copy"]
+    # capítulos: com preenchimentos, os capítulos AUDITÁVEIS dos fills entram
+    # no lugar dos originais (misturar os dois exigiria reescrever ambos no
+    # mesmo ffmetadata — fica para quando alguém sentir falta)
+    cmd += ["-map_chapters", "2" if fills else "0"]
+    cmd += ["-avoid_negative_ts", "make_zero", "-max_interleave_delta", "0",
+            output]
+
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    log(f"Renderizando EDL: {len(slices)} fatia(s), {len(fills)} preenchimento(s)"
+        + ("" if has_rubberband() else " (sem rubberband: fallback asetrate)"))
+    try:
+        merger._run_ffmpeg_progress(cmd, duration_b, on_progress, on_start)
+    finally:
+        if chapters_file:
+            Path(chapters_file).unlink(missing_ok=True)
+
+
+def _plan_slices(segs: list[Segment],
+                 duration_b: float) -> tuple[list[dict], list[dict]]:
+    """EDL -> fatias contíguas na timeline do ORIGINAL (b), sem buracos.
+
+    Retorna (fatias, preenchimentos). Regiões do original fora de qualquer
+    segmento (pontas, arredondamento) também são preenchidas com o áudio
+    original — o concat precisa cobrir 0..duração sem escorregar."""
+    slices: list[dict] = []
+    fills: list[dict] = []
+    cursor = 0.0
+
+    def fill(b0: float, b1: float, src: str, why: str):
+        if b1 - b0 <= _EPS:
+            return
+        slices.append({"src": "silence" if src == "silence" else "orig",
+                       "src_start": b0, "src_end": b1,
+                       "b_start": b0, "b_end": b1})
+        fills.append({"b_start": b0, "b_end": b1, "why": why})
+
+    ordered = sorted((s for s in segs if s.b_start is not None
+                      and (s.b_end or 0) > (s.b_start or 0)),
+                     key=lambda s: s.b_start)
+    for seg in ordered:
+        b0, b1 = max(0.0, seg.b_start), min(duration_b, seg.b_end)
+        if b1 <= cursor + _EPS:
+            continue
+        b0 = max(b0, cursor)
+        if b0 > cursor + _EPS:
+            # buraco não descrito pela EDL: preenche com o original
+            fill(cursor, b0, "orig", "trecho sem correspondência mapeada")
+        action = seg.extra.get("action")
+        if seg.kind in ("match", "drift"):
+            slices.append({"src": "dub",
+                           "src_start": b0 - seg.offset,
+                           "src_end": b1 - seg.offset,
+                           "b_start": b0, "b_end": b1})
+        elif seg.kind == "pal":
+            a_dur = seg.a_end - seg.a_start
+            b_dur = (seg.b_end - seg.b_start) or a_dur
+            slices.append({"src": "dub", "src_start": seg.a_start,
+                           "src_end": seg.a_end, "b_start": b0, "b_end": b1,
+                           "tempo": b_dur / a_dur if a_dur else 1.0})
+        elif seg.kind == "gap_orig":
+            fill(b0, b1, "silence" if action == "silence" else "orig",
+                 "cena sem dublagem")
+        elif seg.kind == "replaced":
+            if action == "use_dub":
+                slices.append({"src": "dub", "src_start": seg.a_start,
+                               "src_end": seg.a_end, "b_start": b0, "b_end": b1})
+            else:
+                fill(b0, b1, "silence" if action == "silence" else "orig",
+                     "cena substituída")
+        cursor = b1
+    if cursor < duration_b - _EPS:
+        fill(cursor, duration_b, "orig", "final sem correspondência mapeada")
+    return slices, fills
+
+
+def _chapters_metadata(fills: list[dict]) -> str:
+    """Arquivo ffmetadata com um capítulo por preenchimento (auditoria)."""
+    lines = [";FFMETADATA1"]
+    for f in fills:
+        lines += ["[CHAPTER]", "TIMEBASE=1/1000",
+                  f"START={int(f['b_start'] * 1000)}",
+                  f"END={int(f['b_end'] * 1000)}",
+                  f"title=[preenchido] {f['why']}"]
+    fd = tempfile.NamedTemporaryFile("w", suffix=".ffmeta", delete=False,
+                                     encoding="utf-8")
+    fd.write("\n".join(lines) + "\n")
+    fd.close()
+    return fd.name

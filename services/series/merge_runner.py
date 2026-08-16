@@ -48,21 +48,23 @@ async def merge_all(job: dict):
             ep["state"] = "merging"
             job["detail"] = f"{key}: fazendo merge ({i}/{len(keys)})..."
             try:
-                await _merge_episode(job, key, ep, convert_opts)
+                if ep.get("edl"):
+                    # EDL pronta (revisada ou limpa): renderiza por segmentos
+                    await _render_from_edl(job, key, ep)
+                else:
+                    await _merge_episode(job, key, ep, convert_opts)
                 ep["state"] = "done"
                 ep["error"] = None
                 jobs._event(job, "merge", f"✅ {key} concluído: {ep['output']}")
             except asyncio.CancelledError:
                 raise
             except merger.VersionMismatch as e:
-                # cortes divergem: o alinhamento por conteúdo (EDL) resolve
-                # isso na próxima etapa do projeto — por ora o episódio falha
-                # com o diagnóstico e o job segue para os demais
-                ep["state"] = "failed"
-                ep["error"] = (f"offsets divergentes ({e.tau1_ms:+.0f} → "
-                               f"{e.tau2_ms:+.0f} ms) — provável corte/versão "
-                               f"diferente; requer alinhamento por conteúdo")
-                jobs._event(job, "merge", f"⚠️ {key}: {ep['error']}")
+                # cortes divergem: entra o alinhador por CONTEÚDO (dHash + DP)
+                jobs._event(job, "merge",
+                            f"{key}: offsets divergentes ({e.tau1_ms:+.0f} → "
+                            f"{e.tau2_ms:+.0f} ms) — rodando o alinhador por "
+                            f"conteúdo...")
+                await _align_episode(job, key, ep)
             except Exception as e:  # noqa: BLE001 — falha por episódio, nunca do laço
                 # cancelamento mata o ffmpeg e o merge levanta MergeError: isso
                 # NÃO é falha do episódio — propaga o cancel (que apaga o parcial)
@@ -76,8 +78,110 @@ async def merge_all(job: dict):
                 job["progress"]["merge"] = None
                 job["output"] = None
         store.upsert_job(job)
+
+    # episódios que pararam em revisão: o job pausa UMA vez, com todos eles
+    reviews = {k: v["edl"] for k, v in job["episodes"].items()
+               if v["state"] == "review"}
+    if reviews:
+        from services.series import pipeline
+        pipeline._gate(job, "alignment_review", {"episodes": reviews},
+                       f"⚠️ {len(reviews)} episódio(s) precisam de revisão de "
+                       f"alinhamento")
+        return
     _finish(job)
     await _cleanup_torrents(job)
+
+
+async def _align_episode(job: dict, key: str, ep: dict):
+    """Caminho pesado: estágios 0-4 + regras. Renderiza direto quando a EDL
+    sai limpa (ou as regras resolveram tudo); senão o episódio para em
+    `review` e o job pausa no gate depois do laço."""
+    from services.series.align import edl as edl_mod, engine, refine, rules
+
+    dub, orig = ep["src"]["dubbed"], ep["src"]["original"]
+    try:
+        edl_dict = await asyncio.to_thread(
+            engine.align_pair, dub, orig, key)
+    except engine.AlignConflict as e:
+        # o PAR está errado (ordem trocada, episódios fundidos): não há o que
+        # alinhar — falha deste episódio com o diagnóstico, o job segue
+        ep["state"] = "failed"
+        ep["error"] = f"conflito de alinhamento: {e}"
+        jobs._event(job, "merge", f"⚠️ {key}: {ep['error']}")
+        return
+
+    segs = edl_mod.segments(edl_dict)
+    dub_a, orig_a, _ch = _audio_indexes(dub, orig, job["language"])
+    log, _ = jobs._ffmpeg_hooks(job)
+    segs = await asyncio.to_thread(
+        refine.refine_offsets, segs, dub, dub_a, orig, orig_a, log)
+    dur_a = edl_dict["source_dub"]["duration"]
+    segs, needs = rules.apply_rules(segs, job.get("review_rules") or [], dur_a)
+    edl_dict = edl_mod.build(segs, key, dub, dur_a, orig,
+                             edl_dict["source_orig"]["duration"],
+                             profile=edl_dict.get("confidence_profile"))
+    # review.required do build considera todo `replaced`; com ação (explícita
+    # ou por regra) a revisão está RESOLVIDA
+    edl_dict["review"]["required"] = needs
+    ep["edl"] = edl_dict
+    if needs:
+        ep["state"] = "review"
+        jobs._event(job, "merge",
+                    f"🔍 {key}: cena(s) substituída(s) sem decisão — revisão "
+                    f"humana necessária")
+        return
+    await _render_from_edl(job, key, ep)
+    ep["state"] = "done"
+    ep["error"] = None
+    jobs._event(job, "merge", f"✅ {key} concluído (EDL): {ep['output']}")
+
+
+def _audio_indexes(dub_path: str, orig_path: str,
+                   target_lang: str) -> tuple[int, int, int]:
+    """(índice a:N do dublado, do original, canais do dublado) — a mesma
+    seleção do renderer, exposta para o refino usar."""
+    probe_dub = merger.ffprobe_json(dub_path)
+    probe_orig = merger.ffprobe_json(orig_path)
+    merger.annotate_type_indexes(probe_dub)
+    merger.annotate_type_indexes(probe_orig)
+    iso = merger.canonical_lang(target_lang)
+    best_dub = merger.choose_best_audio_per_language([probe_dub], {0: iso})
+    ds = (best_dub.get(iso) or best_dub.get("und")
+          or next(iter(best_dub.values())))
+    best_orig = merger.choose_best_audio_per_language([probe_orig], {})
+    os_ = next((v for k, v in best_orig.items() if k != iso),
+               next(iter(best_orig.values())))
+    return (ds[1]["_type_index"], os_[1]["_type_index"],
+            int(ds[1].get("channels") or 2))
+
+
+async def _render_from_edl(job: dict, key: str, ep: dict):
+    """Renderiza a EDL do episódio no destino (timeline do original)."""
+    from services.series.align import edl as edl_mod, render as render_mod
+
+    if job.get("convert"):
+        jobs._event(job, "merge",
+                    f"{key}: opções avançadas de conversão ainda não se "
+                    f"aplicam ao caminho de EDL — saída em stream copy")
+    m = job["movie"]
+    folder = naming.series_folder_name(m["original_title"], m["year"],
+                                       job.get("tmdb_id"))
+    stem = naming.episode_file_name(m["original_title"], m["year"],
+                                    ep["season"], ep["episode"],
+                                    job["language"])
+    dest_dir = Path(job.get("destination_path") or config.OUTPUT_DIR)
+    output = dest_dir / folder / naming.season_dir_name(ep["season"]) / f"{stem}.mkv"
+    job["output"] = str(output)
+    segs = edl_mod.segments(ep["edl"])
+    log, on_progress = jobs._ffmpeg_hooks(job)
+    try:
+        await asyncio.to_thread(
+            render_mod.render, segs, ep["src"]["dubbed"],
+            ep["src"]["original"], str(output), job["language"],
+            log, on_progress, jobs._register_proc(job["id"]))
+    finally:
+        jobs._ffmpeg_procs.pop(job["id"], None)
+    ep["output"] = str(output)
 
 
 async def _merge_episode(job: dict, key: str, ep: dict, convert_opts):

@@ -611,12 +611,78 @@ async def resolve(job_id: str, reason: str, decision: dict) -> dict | None:
     elif reason == "manual_pick":
         _apply_manual(job, decision)
         job["_manual_done"] = True
+    elif reason == "alignment_review":
+        try:
+            _apply_review(job, decision)
+        except ValueError:
+            job["awaiting"] = gate  # decisão inválida: gate continua de pé
+            raise
+        # episódios ainda sem decisão continuam em revisão: re-abre o gate
+        remaining = {k: v["edl"] for k, v in job["episodes"].items()
+                     if v["state"] == "review"}
+        if remaining:
+            _gate(job, "alignment_review", {"episodes": remaining},
+                  f"⚠️ {len(remaining)} episódio(s) ainda precisam de revisão")
+            return jobs._public(job)
+        jobs._spawn(job["id"], _resume_merge(job))
+        return jobs._public(job)
     else:
         job["awaiting"] = gate
         raise ValueError(f"Gate desconhecido: {reason!r}")
 
     jobs._spawn(job["id"], _continue_after_gate(job))
     return jobs._public(job)
+
+
+def _apply_review(job: dict, decision: dict):
+    """Aplica as decisões da revisão de alinhamento.
+
+    decision:
+    - actions: {ep_key: {índice_do_segmento: ação}} — decisões explícitas
+    - rules:   regras reaplicáveis (valem para TODOS os episódios do job e
+               ficam salvas em job["review_rules"] para os próximos)
+    - skip:    episódios cuja revisão o usuário desistiu (viram failed)
+    """
+    from services.series.align import edl as edl_mod, rules as rules_mod
+
+    new_rules = rules_mod.validate_rules(decision.get("rules") or [])
+    if new_rules:
+        job["review_rules"] = (job.get("review_rules") or []) + new_rules
+        jobs._event(job, "chosen",
+                    f"{len(new_rules)} regra(s) de revisão salva(s) — valem "
+                    f"para todos os episódios")
+    skip = set(decision.get("skip") or [])
+    actions = decision.get("actions") or {}
+
+    for key, ep in job["episodes"].items():
+        if ep["state"] != "review":
+            continue
+        if key in skip:
+            ep["state"] = "failed"
+            ep["error"] = "revisão de alinhamento pulada pelo usuário"
+            continue
+        edl_dict = ep.get("edl") or {}
+        segs_raw = edl_dict.get("segments") or []
+        for idx_str, action in (actions.get(key) or {}).items():
+            idx = int(idx_str)
+            if not 0 <= idx < len(segs_raw):
+                raise ValueError(f"{key}: segmento {idx} não existe")
+            if action not in rules_mod.VALID_ACTIONS:
+                raise ValueError(f"{key}: ação inválida {action!r}")
+            segs_raw[idx]["action"] = action
+        # reavalia: ações explícitas + regras acumuladas resolvem tudo?
+        segs = edl_mod.segments(edl_dict)
+        dur_a = edl_dict.get("source_dub", {}).get("duration", 0.0)
+        segs, needs = rules_mod.apply_rules(
+            segs, job.get("review_rules") or [], dur_a)
+        # persiste as ações que as regras acabaram de definir
+        for raw, seg in zip(segs_raw, segs):
+            if seg.extra.get("action"):
+                raw["action"] = seg.extra["action"]
+        edl_dict["review"]["required"] = needs
+        if not needs:
+            ep["state"] = "downloaded"  # volta para a fila: o merge renderiza
+            jobs._event(job, "chosen", f"{key}: revisão resolvida")
 
 
 async def _continue_after_gate(job: dict):

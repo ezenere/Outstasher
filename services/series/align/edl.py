@@ -35,7 +35,13 @@ def build(segs: list[Segment], episode: str,
 
 def _seg_dict(s: Segment) -> dict:
     d = asdict(s)
-    d.pop("extra", None)
+    extra = d.pop("extra", None) or {}
+    # decisão de revisão (fill_original/silence/use_dub/accept) persiste com a
+    # EDL — o render lê daqui depois que o gate resolve
+    if extra.get("action"):
+        d["action"] = extra["action"]
+    if extra.get("refine"):
+        d["refine"] = extra["refine"]
     for key in ("a_start", "a_end", "b_start", "b_end", "offset"):
         if d.get(key) is not None:
             d[key] = round(d[key], 3)
@@ -49,12 +55,15 @@ def segments(edl: dict) -> list[Segment]:
     """EDL persistida -> Segments (para o renderer/refino)."""
     out = []
     for d in edl.get("segments", []):
-        out.append(Segment(
+        s = Segment(
             kind=d["kind"], a_start=d["a_start"], a_end=d["a_end"],
             b_start=d.get("b_start"), b_end=d.get("b_end"),
             slope=d.get("slope"), residual=d.get("residual", 0.0),
             confidence=d.get("confidence", 1.0), offset=d.get("offset"),
-            note=d.get("note", "")))
+            note=d.get("note", ""))
+        if d.get("action"):
+            s.extra["action"] = d["action"]
+        out.append(s)
     return out
 
 

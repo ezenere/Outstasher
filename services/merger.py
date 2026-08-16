@@ -287,9 +287,16 @@ def _read_wav(path: str) -> np.ndarray:
     return np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
 
 
-def gcc_phat_delay_seconds(sig: np.ndarray, ref: np.ndarray, fs: int,
-                           max_tau: float | None = MAX_OFFSET_SECONDS) -> float:
-    """tau > 0 => sig ATRASADO vs ref; tau < 0 => sig ADIANTADO."""
+def gcc_phat_delay_with_confidence(
+        sig: np.ndarray, ref: np.ndarray, fs: int,
+        max_tau: float | None = MAX_OFFSET_SECONDS) -> tuple[float, float]:
+    """(tau, qualidade do pico). tau > 0 => sig ATRASADO vs ref.
+
+    A qualidade é a razão pico/média do |cc| na janela de busca: um pico
+    nítido (>3) indica correlação real; perto de 1 é ruído — o refino por
+    segmento do alinhador de séries usa isso para NÃO confiar num offset
+    medido em cima de música/silêncio.
+    """
     sig = sig - np.mean(sig)
     ref = ref - np.mean(ref)
     sig /= (np.std(sig) + 1e-12)
@@ -305,8 +312,17 @@ def gcc_phat_delay_seconds(sig: np.ndarray, ref: np.ndarray, fs: int,
     if max_tau is not None:
         max_shift = min(max_shift, int(fs * max_tau))
     cc = np.concatenate((cc[-max_shift:], cc[:max_shift + 1]))
-    shift = int(np.argmax(np.abs(cc)) - max_shift)
-    return shift / float(fs)
+    mag = np.abs(cc)
+    shift = int(np.argmax(mag) - max_shift)
+    peak_quality = float(mag.max() / (np.mean(mag) + 1e-12))
+    return shift / float(fs), peak_quality
+
+
+def gcc_phat_delay_seconds(sig: np.ndarray, ref: np.ndarray, fs: int,
+                           max_tau: float | None = MAX_OFFSET_SECONDS) -> float:
+    """tau > 0 => sig ATRASADO vs ref; tau < 0 => sig ADIANTADO."""
+    tau, _quality = gcc_phat_delay_with_confidence(sig, ref, fs, max_tau)
+    return tau
 
 
 # -------------------- selecao de streams --------------------
