@@ -29,6 +29,20 @@ const FILTERS: { key: Filter; label: string }[] = [
   { key: 'all', label: 'Todos' },
 ]
 
+// dimensão de mídia, ortogonal ao grupo de status (as duas combinam na query)
+export type MediaFilter = 'all' | 'movie' | 'tv'
+
+export const MEDIA_FILTERS: { key: MediaFilter; label: string }[] = [
+  { key: 'movie', label: 'Filmes' },
+  { key: 'tv', label: 'Séries' },
+  { key: 'all', label: 'Todos' },
+]
+
+/** Query string do filtro de mídia ('' quando "Todos" — o backend não filtra). */
+export function mediaQs(m: MediaFilter): string {
+  return m === 'all' ? '' : `&media=${m}`
+}
+
 export async function removeJob(dialog: DialogApi, id: string, reload: () => void) {
   if (!(await dialog.confirm({
     title: 'Remover job',
@@ -58,6 +72,7 @@ export default function Jobs() {
   const [counts, setCounts] = useState<JobCounts>(EMPTY_COUNTS)
   // abre em "Em andamento": a tela foca no que está rodando
   const [filter, setFilter] = useState<Filter>('active')
+  const [media, setMedia] = useState<MediaFilter>('all')
   const [query, setQuery] = useState('')
   const [page, setPage] = useState(1)
   const [pages, setPages] = useState(1)
@@ -70,10 +85,10 @@ export default function Jobs() {
   const searching = query.trim() !== ''
 
   // busca a lista do grupo atual no backend (filtro feito lá)
-  const reload = useCallback(async (group: Filter, p: number, all: boolean) => {
+  const reload = useCallback(async (group: Filter, p: number, all: boolean, m: MediaFilter) => {
     try {
-      const qs = all ? `group=${group}` : `group=${group}&page=${p}&per_page=${PER_PAGE}`
-      const res = await api<JobListPage>(`/api/jobs/list?${qs}`)
+      const base = all ? `group=${group}` : `group=${group}&page=${p}&per_page=${PER_PAGE}`
+      const res = await api<JobListPage>(`/api/jobs/list?${base}${mediaQs(m)}`)
       setJobs(res.items)
       setPages(res.pages)
       // a página pedida pode ter sumido (jobs removidos): volta para a última
@@ -84,16 +99,16 @@ export default function Jobs() {
     }
   }, [])
 
-  // trocar de filtro volta para a primeira página
+  // trocar qualquer filtro volta para a primeira página
   useEffect(() => {
     setPage(1)
-  }, [filter])
+  }, [filter, media])
 
-  // recarrega ao mudar grupo, página ou ao entrar/sair da busca
+  // recarrega ao mudar grupo, mídia, página ou ao entrar/sair da busca
   useEffect(() => {
     setJobs(null)
-    void reload(filter, page, searching)
-  }, [filter, page, searching, reload])
+    void reload(filter, page, searching, media)
+  }, [filter, media, page, searching, reload])
 
   // poll de contagens a cada 15s (badges sempre certos, sem baixar as listas).
   // Recarrega a lista atual quando:
@@ -104,11 +119,13 @@ export default function Jobs() {
   useEffect(() => {
     async function tick() {
       try {
-        const c = await api<JobCounts>('/api/jobs/counts')
+        // badges seguem o filtro de mídia ativo (contagens do que está visível)
+        const mq = mediaQs(media)
+        const c = await api<JobCounts>(`/api/jobs/counts${mq ? `?${mq.slice(1)}` : ''}`)
         setCounts(c)
         const liveGroup = filter === 'active' || filter === 'all'
         const changed = lastGroupCount.current !== null && c[filter] !== lastGroupCount.current
-        if (liveGroup || changed) void reload(filter, page, searching)
+        if (liveGroup || changed) void reload(filter, page, searching, media)
       } catch {
         /* servidor reiniciando; próximo tick */
       }
@@ -116,12 +133,12 @@ export default function Jobs() {
     void tick()
     const t = setInterval(tick, 15000)
     return () => clearInterval(t)
-  }, [filter, page, searching, reload])
+  }, [filter, media, page, searching, reload])
 
   async function retry(id: string) {
     try {
       await post(`/api/jobs/${id}/retry`)
-      void reload(filter, page, searching)
+      void reload(filter, page, searching, media)
     } catch (e) {
       await dialog.alert({ title: 'Erro', message: (e as Error).message })
     }
@@ -136,7 +153,22 @@ export default function Jobs() {
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-        <div className="flex flex-wrap gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {/* dimensão de mídia (filmes/séries) — combina com o grupo de status */}
+          {MEDIA_FILTERS.map((m) => (
+            <button
+              key={m.key}
+              onClick={() => setMedia(m.key)}
+              className={`rounded-lg px-3 py-1.5 text-sm transition-colors ${
+                media === m.key
+                  ? 'bg-blue-600 font-semibold text-white'
+                  : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
+              }`}
+            >
+              {m.label}
+            </button>
+          ))}
+          <span className="mx-1 h-5 w-px bg-zinc-700" />
           {FILTERS.map((f) => (
             <button
               key={f.key}
@@ -216,7 +248,7 @@ export default function Jobs() {
                 className="rounded-lg border border-zinc-700 p-1.5 text-zinc-400 hover:text-zinc-200">
                 <Search width={15} height={15} />
               </Link>
-              <IconBtn title="Remover job" onClick={() => removeJob(dialog, j.id, () => reload(filter, page, searching))}>
+              <IconBtn title="Remover job" onClick={() => removeJob(dialog, j.id, () => reload(filter, page, searching, media))}>
                 <Trash width={15} height={15} />
               </IconBtn>
             </div>

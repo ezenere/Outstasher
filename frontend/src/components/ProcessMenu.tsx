@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { NavArrowDown } from 'iconoir-react'
 import { MOVIE_STATE_LABEL, type JobSummary, type MovieState } from '../api'
+import { MEDIA_FILTERS, type MediaFilter } from '../pages/Jobs'
 import { MovieStateIcon } from './ui'
 
 /** Dropdown de processos em andamento no cabeçalho + bolinha de pendência.
@@ -16,6 +17,7 @@ export default function ProcessMenu({
   onPending?: (has: boolean) => void
 }) {
   const [open, setOpen] = useState(false)
+  const [media, setMedia] = useState<MediaFilter>('all')
   const ref = useRef<HTMLDivElement>(null)
 
   // fecha ao clicar fora
@@ -28,9 +30,12 @@ export default function ProcessMenu({
     return () => document.removeEventListener('mousedown', onClick)
   }, [open])
 
-  // o backend já devolve só o que interessa (em andamento + erro), ordenado
-  const active = items
-  const pending = active.some((x) => x.state === 'awaiting')
+  // o backend já devolve só o que interessa (em andamento + erro), ordenado.
+  // O filtro de mídia é local ao dropdown (o summary vem inteiro do App); a
+  // bolinha de pendência ignora o filtro — resposta pendente é pendente sempre.
+  const active = items.filter(
+    (x) => media === 'all' || (x.media_type ?? 'movie') === media)
+  const pending = items.some((x) => x.state === 'awaiting')
 
   useEffect(() => {
     onPending?.(pending)
@@ -55,6 +60,21 @@ export default function ProcessMenu({
 
       {open && (
         <div className="absolute right-0 z-30 mt-2 w-80 overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900 shadow-xl">
+          <div className="flex gap-1 border-b border-zinc-800/60 px-2 py-1.5">
+            {MEDIA_FILTERS.map((m) => (
+              <button
+                key={m.key}
+                onClick={() => setMedia(m.key)}
+                className={`rounded-md px-2 py-1 text-xs transition-colors ${
+                  media === m.key
+                    ? 'bg-blue-600 font-semibold text-white'
+                    : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                }`}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
           {active.length === 0 ? (
             <div className="px-4 py-3 text-sm text-zinc-500">Nenhum processo em andamento.</div>
           ) : (

@@ -257,6 +257,10 @@ export interface Job {
 
 // ---- shapes enxutos das rotas de polling granular ----
 
+/** Dimensão de mídia de um job. Jobs anteriores à feature de séries não têm o
+ *  campo — o backend preenche 'movie' por padrão. */
+export type JobMedia = 'movie' | 'tv'
+
 /** Item do dropdown de processos (/api/jobs/summary). Só o mínimo. */
 export interface JobSummary {
   id: string
@@ -265,6 +269,7 @@ export interface JobSummary {
   status: string
   state: MovieState
   pct: number | null
+  media_type?: JobMedia
   /** Recompressão: reusa o tmdb_id de um filme já baixado, então não define o
    *  estado do card na tela de Filmes. */
   recompress?: boolean
@@ -292,6 +297,7 @@ export interface JobListItem {
   id: string
   tmdb_id: number
   language: string
+  media_type?: JobMedia
   mode: string
   kind: string
   download_only?: boolean

@@ -44,6 +44,12 @@ def init():
             data TEXT
         )""")
     _conn.execute("CREATE INDEX IF NOT EXISTS idx_events_job ON events(job_id)")
+    _conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
+    # jobs antigos não têm media_type no JSON: IFNULL trata como filme. O índice
+    # usa a MESMA expressão das queries para o SQLite conseguir aproveitá-lo.
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_media "
+        "ON jobs(IFNULL(json_extract(data, '$.media_type'), 'movie'))")
     _conn.execute("""
         CREATE TABLE IF NOT EXISTS destinations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -443,20 +449,29 @@ def load_jobs() -> list[dict]:
     return [json.loads(r[0]) for r in rows]
 
 
+# mesma expressão do índice idx_jobs_media (jobs antigos, sem a chave, = filme)
+_MEDIA_EXPR = "IFNULL(json_extract(data, '$.media_type'), 'movie')"
+
+
 def load_jobs_by_status(statuses: tuple[str, ...], limit: int | None = None,
-                        offset: int = 0) -> list[dict]:
+                        offset: int = 0, media: str | None = None) -> list[dict]:
     """Carrega os jobs cujo status está na lista (ex.: só os ativos, ou só os
     terminais). Usa a coluna `status` indexada em vez de ler tudo.
 
     Com `limit`, pagina no SQL (ordenado por created_at desc, o mesmo critério
     da tela) — assim uma biblioteca com milhares de jobs terminais não vira um
-    JSON gigante a cada abertura da lista.
+    JSON gigante a cada abertura da lista. `media` ("movie"/"tv") filtra pela
+    dimensão de mídia direto no SQL.
     """
     if not statuses:
         return []
     ph = ",".join("?" for _ in statuses)
-    sql = f"SELECT data FROM jobs WHERE status IN ({ph}) ORDER BY created_at DESC"
+    sql = f"SELECT data FROM jobs WHERE status IN ({ph})"
     params: list = list(statuses)
+    if media is not None:
+        sql += f" AND {_MEDIA_EXPR} = ?"
+        params.append(media)
+    sql += " ORDER BY created_at DESC"
     if limit is not None:
         sql += " LIMIT ? OFFSET ?"
         params += [limit, offset]
@@ -474,11 +489,18 @@ def get_job(job_id: str) -> dict | None:
     return json.loads(row[0]) if row else None
 
 
-def count_jobs_by_status() -> dict[str, int]:
-    """{status: quantidade} — para os badges de contagem sem baixar as listas."""
+def count_jobs_by_status(media: str | None = None) -> dict[str, int]:
+    """{status: quantidade} — para os badges de contagem sem baixar as listas.
+
+    `media` ("movie"/"tv") restringe a contagem à dimensão de mídia."""
+    sql = "SELECT status, COUNT(*) FROM jobs"
+    params: list = []
+    if media is not None:
+        sql += f" WHERE {_MEDIA_EXPR} = ?"
+        params.append(media)
+    sql += " GROUP BY status"
     with _lock:
-        rows = _conn.execute(
-            "SELECT status, COUNT(*) FROM jobs GROUP BY status").fetchall()
+        rows = _conn.execute(sql, params).fetchall()
     return {status: n for status, n in rows}
 
 

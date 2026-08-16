@@ -312,9 +312,17 @@ _STATE_RANK = {"converting": 0, "downloading": 1, "searching": 2,
                "awaiting": 3, "done": 4, "error": 5}
 
 
-def _all_jobs() -> list[dict]:
-    """Ativos (memória) + terminais (banco), sem duplicar."""
-    return list(_jobs.values()) + store.load_jobs_by_status(_TERMINAL_STATUSES)
+def _media_type(job: dict) -> str:
+    """Dimensão de mídia do job. Jobs anteriores à feature de séries não têm a
+    chave no JSON — são todos filmes."""
+    return job.get("media_type", "movie")
+
+
+def _all_jobs(media: str | None = None) -> list[dict]:
+    """Ativos (memória) + terminais (banco), sem duplicar. `media` filtra pela
+    dimensão de mídia (movie/tv)."""
+    mem = [j for j in _jobs.values() if media is None or _media_type(j) == media]
+    return mem + store.load_jobs_by_status(_TERMINAL_STATUSES, media=media)
 
 
 def _movie_title(job: dict) -> str:
@@ -355,6 +363,7 @@ def summary() -> list[dict]:
         out.append({"id": j["id"], "tmdb_id": j.get("tmdb_id"),
                     "title": _movie_title(j), "status": j["status"],
                     "state": state, "pct": pct,
+                    "media_type": _media_type(j),
                     "recompress": _is_recompress(j)})
     out.sort(key=lambda x: _STATE_RANK[x["state"]])
     return out
@@ -368,14 +377,15 @@ _GROUPS = {
 }
 
 
-def counts() -> dict[str, int]:
+def counts(media: str | None = None) -> dict[str, int]:
     """Contagem por grupo (active/error/done/all) para os badges do filtro.
 
     O banco é a fonte: todo job (ativo ou terminal) tem uma linha lá e as
     transições de status persistem na hora (via _event), então o `status` no
     banco está sempre atualizado — não precisa somar a memória por cima.
+    `media` ("movie"/"tv") restringe à dimensão de mídia.
     """
-    by_status = store.count_jobs_by_status()
+    by_status = store.count_jobs_by_status(media)
     c = {"all": sum(by_status.values()), "active": 0, "error": 0, "done": 0}
     for group, statuses in _GROUPS.items():
         c[group] = sum(by_status.get(s, 0) for s in statuses)
@@ -388,6 +398,7 @@ def _slim_job(job: dict) -> dict:
     ficam no detalhe do job."""
     return {
         "id": job["id"], "tmdb_id": job.get("tmdb_id"), "language": job["language"],
+        "media_type": _media_type(job),
         "mode": job.get("mode"), "kind": job.get("kind", "both"),
         "download_only": job.get("download_only", False),
         "convert": bool(job.get("convert")),
@@ -410,7 +421,7 @@ def _slim_job(job: dict) -> dict:
 
 
 def list_group(group: str = "active", page: int = 1,
-               per_page: int | None = None) -> dict:
+               per_page: int | None = None, media: str | None = None) -> dict:
     """Cards enxutos da tela de Jobs, filtrados por grupo NO BACKEND.
 
     Devolve {"items": [...], "page", "per_page", "total", "pages"}. Sem
@@ -419,21 +430,24 @@ def list_group(group: str = "active", page: int = 1,
     Os grupos só de status terminal paginam no SQL; 'active' e 'all' envolvem a
     memória (os ativos não estão só no banco) e paginam depois de montar a
     lista — 'active' é curto por natureza, então o custo é irrelevante.
+    `media` ("movie"/"tv") filtra pela dimensão de mídia, combinável com o grupo.
     """
     if group == "active":
-        jobs_ = [j for j in _jobs.values() if j["status"] in _GROUPS["active"]]
+        jobs_ = [j for j in _jobs.values() if j["status"] in _GROUPS["active"]
+                 and (media is None or _media_type(j) == media)]
     elif group == "all":
-        jobs_ = _all_jobs()
+        jobs_ = _all_jobs(media)
     else:
         statuses = _GROUPS.get(group)
         if not statuses:
             raise ValueError(f"grupo inválido: {group!r}")
-        total = sum(store.count_jobs_by_status().get(s, 0) for s in statuses)
+        total = sum(store.count_jobs_by_status(media).get(s, 0) for s in statuses)
         if per_page is None:
-            rows = store.load_jobs_by_status(statuses)
+            rows = store.load_jobs_by_status(statuses, media=media)
         else:
             page = max(1, page)
-            rows = store.load_jobs_by_status(statuses, per_page, (page - 1) * per_page)
+            rows = store.load_jobs_by_status(statuses, per_page,
+                                             (page - 1) * per_page, media=media)
         return _page(rows, page, per_page, total)
 
     jobs_.sort(key=lambda j: j["created_at"], reverse=True)

@@ -565,23 +565,34 @@ async def jobs_summary():
     return jobs.summary()
 
 
+def _check_media(media: str | None) -> str | None:
+    """Valida o filtro de mídia dos endpoints de jobs (None = todos)."""
+    if media is not None and media not in ("movie", "tv"):
+        raise HTTPException(400, "media deve ser 'movie' ou 'tv'")
+    return media
+
+
 @app.get("/api/jobs/counts")
-async def jobs_counts():
-    """Contagem por grupo (active/error/done/all) para os badges do filtro."""
-    return jobs.counts()
+async def jobs_counts(media: str | None = None):
+    """Contagem por grupo (active/error/done/all) para os badges do filtro.
+
+    `media=movie|tv` restringe à dimensão de mídia (filmes/séries)."""
+    return jobs.counts(_check_media(media))
 
 
 @app.get("/api/jobs/list")
-async def jobs_list(group: str = "active", page: int = 1, per_page: int | None = None):
+async def jobs_list(group: str = "active", page: int = 1,
+                    per_page: int | None = None, media: str | None = None):
     """Cards enxutos da tela de Jobs, filtrados por grupo e paginados no backend.
 
     Sem `per_page` devolve tudo numa página (compatível com quem não pagina).
+    `media=movie|tv` filtra pela dimensão de mídia, combinável com o grupo.
     """
     if per_page is not None and per_page < 1:
         raise HTTPException(400, "per_page deve ser >= 1")
     jobs.touch_progress_demand()  # os cards mostram as barras: watchdog acelera
     try:
-        return jobs.list_group(group, page, per_page)
+        return jobs.list_group(group, page, per_page, _check_media(media))
     except ValueError as e:
         raise HTTPException(400, str(e))
 
