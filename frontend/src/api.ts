@@ -58,6 +58,109 @@ export interface SeasonDetail {
   episodes: EpisodeInfo[]
 }
 
+/** Subestado de um episódio dentro de um job de série. */
+export type EpisodeState =
+  | 'pending' | 'downloading' | 'downloaded' | 'aligning' | 'review'
+  | 'merging' | 'done' | 'failed' | 'skipped_future' | 'skipped_missing'
+
+export const EPISODE_STATE_LABEL: Record<EpisodeState, string> = {
+  pending: 'Aguardando',
+  downloading: 'Baixando',
+  downloaded: 'Baixado',
+  aligning: 'Alinhando',
+  review: 'Revisão',
+  merging: 'Convertendo',
+  done: 'Concluído',
+  failed: 'Falhou',
+  skipped_future: 'Não lançado',
+  skipped_missing: 'Pulado (sem torrent)',
+}
+
+/** Episódio dentro de job["episodes"] (chave "S01E02"). */
+export interface JobEpisode {
+  season: number
+  episode: number
+  name: string | null
+  air_date: string | null
+  runtime: number | null
+  state: EpisodeState
+  src: Partial<Record<'original' | 'dubbed', string>>
+  output: string | null
+  error: string | null
+}
+
+/** Torrent do plano de um job de série (as duas línguas na mesma lista). */
+export interface SeriesTorrent {
+  n: number
+  role: 'original' | 'dubbed'
+  tag: string
+  title: string
+  tracker: string | null
+  seeders: number | null
+  size: number | null
+  quality: string | null
+  coverage_label: string | null
+  coverage: string[]
+  state: 'pending' | 'downloading' | 'done' | 'abandoned'
+  hash: string | null
+  progress: Progress | null
+  selected_files: string[] | null
+  content_path: string | null
+}
+
+/** Candidato de série (mesmo shape do Candidate + cobertura). */
+export interface SeriesCandidate {
+  id: string
+  title: string
+  tracker: string | null
+  seeders: number
+  size: number
+  quality: string | null
+  coverage: string | null
+  score: number | null
+  tier?: number
+}
+
+export type GateReason =
+  | 'manual_pick' | 'gaps_confirm' | 'incompatible_torrents'
+  | 'alignment_review' | 'drift'
+
+/** Gate ativo de um job de série (job.awaiting). */
+export interface JobGate {
+  reason: GateReason
+  payload: {
+    /** gaps_confirm */
+    missing?: { episode: string; name: string | null; missing: string[] }[]
+    /** incompatible_torrents */
+    torrents?: {
+      n: number
+      role: 'original' | 'dubbed'
+      title: string
+      coverage: string[]
+      signals: string[]
+      alternatives: SeriesCandidate[]
+    }[]
+    episode_groups?: { id: string; name: string; type: number; episode_count: number }[]
+    /** manual_pick */
+    candidates?: Record<'original' | 'dubbed', Record<string, SeriesCandidate[]>>
+    preselected?: { n: number; role: string; title: string; quality: string | null; coverage: string[] }[]
+  }
+}
+
+/** Resumo de série no card da lista (/api/jobs/list). */
+export interface SeriesSummary {
+  episodes_total: number
+  by_state: Partial<Record<EpisodeState, number>>
+  download_pct: number | null
+  awaiting_reason: GateReason | null
+}
+
+/** Resolve o gate ativo de um job de série. */
+export function resolveGate(jobId: string, reason: GateReason | 'force_continue',
+                            decision: object = {}) {
+  return post<Job>(`/api/jobs/${jobId}/resolve`, { reason, decision })
+}
+
 export interface Language {
   code: string
   label: string
@@ -291,6 +394,13 @@ export interface Job {
   drift_confirm?: { video_file: string; audio_file: string; tau1_ms: number; tau2_ms: number } | null
   /** Conversão manual (mode 'files'): os dois arquivos locais de origem. */
   manual_files?: { video: string; audio: string } | null
+  // ---- campos de job de SÉRIE (media_type 'tv') ----
+  media_type?: JobMedia
+  request?: { seasons: number[]; episodes: Record<string, number[]> }
+  episodes?: Record<string, JobEpisode>
+  torrents?: SeriesTorrent[]
+  awaiting?: JobGate | null
+  report?: { attempted: number; succeeded: number; failed: string[]; skipped?: string[] } | null
 }
 
 // ---- shapes enxutos das rotas de polling granular ----
@@ -336,6 +446,8 @@ export interface JobListItem {
   tmdb_id: number
   language: string
   media_type?: JobMedia
+  /** Resumo de série (contagens por estado + % agregado), só em media_type tv. */
+  series?: SeriesSummary
   mode: string
   kind: string
   download_only?: boolean

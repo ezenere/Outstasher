@@ -5,7 +5,7 @@ import {
   api, fmtSize, post,
   type JobCounts, type JobListItem, type JobListPage, type SlimProgress,
 } from '../api'
-import { Badge, ClampText, Empty, KindTags, torrentComplete, torrentSize } from '../components/ui'
+import { Badge, ClampText, Empty, KindTags, Tag, torrentComplete, torrentSize } from '../components/ui'
 import { useDialog, type DialogApi } from '../components/Dialog'
 
 // jobTitle aceita tanto o job completo quanto o item enxuto da lista
@@ -253,8 +253,16 @@ export default function Jobs() {
               </IconBtn>
             </div>
             <div className="mt-1.5 flex flex-wrap items-center gap-1">
-              <KindTags kind={j.kind} language={j.language} downloadOnly={j.download_only}
-                convert={j.convert} mode={j.mode} />
+              {j.media_type === 'tv' && <Tag tone="info" title="Job de série">Série</Tag>}
+              <KindTags kind={j.media_type === 'tv' ? undefined : j.kind} language={j.language}
+                downloadOnly={j.download_only} convert={j.convert} mode={j.mode} />
+              {j.media_type === 'tv' && j.series && (
+                <span className="text-xs text-zinc-500">
+                  · {j.series.episodes_total} ep.
+                  {j.series.by_state.done ? ` · ${j.series.by_state.done} ok` : ''}
+                  {j.series.by_state.failed ? ` · ${j.series.by_state.failed} falha(s)` : ''}
+                </span>
+              )}
               {j.destination_label && (
                 <span className="text-xs text-zinc-500">· {j.destination_label}</span>
               )}
@@ -279,10 +287,14 @@ export default function Jobs() {
               </div>
             )}
             {j.status === 'downloading' && (
-              <>
-                <TorrentBar label="Vídeo" p={j.progress.video} />
-                <TorrentBar label="Áudio" p={j.progress.audio} />
-              </>
+              j.media_type === 'tv' ? (
+                <MiniBar label="Download" pct={j.series?.download_pct ?? null} color="blue" />
+              ) : (
+                <>
+                  <TorrentBar label="Vídeo" p={j.progress.video} />
+                  <TorrentBar label="Áudio" p={j.progress.audio} />
+                </>
+              )
             )}
             {j.status === 'merging' && (
               <MiniBar label="Conversão" pct={j.progress.merge} readPct={j.progress.merge_read} color="purple" />

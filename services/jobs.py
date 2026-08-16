@@ -200,7 +200,11 @@ def resume_pending():
     """Retoma jobs interrompidos por um restart do servidor."""
     # cópia: _set(..., "error") remove o job de _jobs no meio da iteração
     for job in list(_jobs.values()):
-        if _is_recompress(job):
+        if job.get("media_type") == "tv":
+            # pipeline de séries é desacoplado; import tardio evita ciclo
+            from services.series import pipeline as series_pipeline
+            series_pipeline.resume(job)
+        elif _is_recompress(job):
             _resume_recompress(job)
         elif _is_local_files(job):
             _resume_manual(job)
@@ -242,7 +246,11 @@ def _resume_manual(job: dict):
 
 
 def _public(job: dict) -> dict:
-    return {k: v for k, v in job.items() if k not in ("events", "search")}
+    # search/search_tv ficam de fora do detalhe: são grandes e a UI recebe os
+    # candidatos pelo canal certo (job["search"] no manual de filmes entra via
+    # get_job; nos gates de série eles vêm no payload de job["awaiting"])
+    return {k: v for k, v in job.items() if k not in ("events", "search",
+                                                      "search_tv")}
 
 
 def _lookup(job_id: str) -> dict | None:
@@ -340,7 +348,19 @@ def _download_pct(job: dict) -> float | None:
     sem leitura do qBittorrent conta como 0% — o denominador é o que o job
     PRECISA baixar, não o que já reportou (senão o vídeo sozinho em 40% viraria
     "40% do job", e a barra andaria para trás quando o áudio aparecesse).
+
+    Série: média dos torrents do plano PONDERADA pela cobertura (um pack de 10
+    episódios pesa 10x um avulso — a barra reflete episódios, não torrents).
     """
+    if job.get("media_type") == "tv":
+        torrents = job.get("torrents") or []
+        weights = [max(1, len(t.get("coverage") or [])) for t in torrents]
+        pcts = [100.0 if t.get("state") == "done"
+                else _pct(t.get("progress")) for t in torrents]
+        if not torrents or not any(p is not None for p in pcts):
+            return None
+        total = sum(weights)
+        return sum((p or 0.0) * w for p, w in zip(pcts, weights)) / total
     needed = _needed_torrents(job)
     read = [_pct(job["progress"].get(k)) for k in needed]
     if not any(p is not None for p in read):
@@ -417,7 +437,25 @@ def _slim_job(job: dict) -> dict:
             "merge_read": (job["progress"].get("merge") or {}).get("read_pct")
             if job["progress"].get("merge") else None,
         },
+        **_slim_series(job),
     }
+
+
+def _slim_series(job: dict) -> dict:
+    """Resumo de série para o card da lista (nada por episódio — isso é do
+    detalhe): contagens por estado + % agregado + gate ativo."""
+    if job.get("media_type") != "tv":
+        return {}
+    eps = job.get("episodes") or {}
+    by_state: dict[str, int] = {}
+    for v in eps.values():
+        by_state[v["state"]] = by_state.get(v["state"], 0) + 1
+    return {"series": {
+        "episodes_total": len(eps),
+        "by_state": by_state,
+        "download_pct": _download_pct(job),
+        "awaiting_reason": (job.get("awaiting") or {}).get("reason"),
+    }}
 
 
 def list_group(group: str = "active", page: int = 1,
@@ -954,18 +992,24 @@ async def cancel(job_id: str, delete_torrents: bool = False) -> dict | None:
     _cancelling.discard(job_id)
     if delete_torrents and is_active and _has_torrents(job):
         # limpeza no qBittorrent com teto de tempo: se ele estiver fora do ar,
-        # a remoção do job NÃO pode ficar travada esperando o timeout de rede
-        for kind in ("video", "audio"):
+        # a remoção do job NÃO pode ficar travada esperando o timeout de rede.
+        # Série: todos os torrents do job carregam a tag compartilhada dl-{id};
+        # filme: uma tag por papel (video/audio).
+        tags = ([f"dl-{job['id']}"] if job.get("media_type") == "tv"
+                else [_tag(job, k) for k in ("video", "audio")])
+        for tag in tags:
             try:
                 await asyncio.wait_for(
-                    _qbit.delete_by_tag(_tag(job, kind), delete_files=True),
-                    timeout=10)
+                    _qbit.delete_by_tag(tag, delete_files=True), timeout=10)
             except (Exception, asyncio.TimeoutError) as e:  # noqa: BLE001
                 reason = "sem resposta (qBittorrent fora do ar?)" if isinstance(
                     e, asyncio.TimeoutError) else str(e)
                 _event(job, "qbit",
-                       f"⚠️ Não removi o torrent de {kind}: {reason} — "
+                       f"⚠️ Não removi torrent(s) da tag {tag}: {reason} — "
                        f"apague manualmente no qBittorrent se precisar")
+    if job.get("media_type") == "tv":
+        from services.series import pipeline as series_pipeline
+        series_pipeline.forget(job_id)
     if job["status"] not in _TERMINAL_STATUSES:
         _set(job, "cancelled",
              "Cancelado pelo usuário" + (" (torrents removidos)" if delete_torrents else ""))
@@ -985,6 +1029,9 @@ async def retry(job_id: str) -> dict | None:
     old = _lookup(job_id)  # jobs em erro/cancelados vivem só no banco agora
     if not old or old["status"] not in ("error", "cancelled"):
         return None
+    if old.get("media_type") == "tv":
+        from services.series import pipeline as series_pipeline
+        return await series_pipeline.retry(old)
     if _is_recompress(old):
         r = old["recompress"]
         return await create_recompress(old.get("destination_id"), r["folder"], r["rel"],

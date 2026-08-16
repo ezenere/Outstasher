@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 import config
 from services import auth, catalog, jackett, jobs, store, tmdb, transcode
+from services.series import pipeline as series_pipeline
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
 DIST_DIR = FRONTEND_DIR / "dist"
@@ -598,6 +599,45 @@ async def create_manual_job(req: ManualJobRequest):
                                         req.audio_path, req.destination_id, req.convert)
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+class SeriesJobRequest(BaseModel):
+    tmdb_id: int
+    language: str
+    seasons: list[int] = []            # temporadas inteiras
+    episodes: dict[int, list[int]] = {}  # avulsos: {3: [1, 5]}
+    mode: str = "auto"                 # auto | manual
+    destination_id: int | None = None
+    torrent_target_id: int | None = None
+    convert: dict | None = None
+
+
+@app.post("/api/jobs/series")
+async def create_series_job(req: SeriesJobRequest):
+    """Job de série: baixa original + dublado de cada episódio pedido."""
+    try:
+        return await series_pipeline.create_series(
+            req.tmdb_id, req.language, req.seasons, req.episodes, req.mode,
+            req.destination_id, req.torrent_target_id, req.convert)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class ResolveRequest(BaseModel):
+    reason: str      # manual_pick | gaps_confirm | incompatible_torrents | force_continue
+    decision: dict = {}
+
+
+@app.post("/api/jobs/{job_id}/resolve")
+async def resolve_job_gate(job_id: str, req: ResolveRequest):
+    """Resolve o gate ativo de um job de série (decisões sempre do usuário)."""
+    try:
+        job = await series_pipeline.resolve(job_id, req.reason, req.decision)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    if not job:
+        raise HTTPException(404, "Job não encontrado (ou não é de série)")
+    return job
 
 
 @app.get("/api/jobs")
