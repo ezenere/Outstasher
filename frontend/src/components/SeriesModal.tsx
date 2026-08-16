@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Calendar, Download, NavArrowDown, NavArrowRight, Xmark } from 'iconoir-react'
+import { Calendar, Check, Download, NavArrowDown, NavArrowRight, Xmark } from 'iconoir-react'
 import {
   api, post,
   type ConvertOptions, type Destination, type EpisodeInfo, type Job,
@@ -61,11 +61,19 @@ export default function SeriesModal({
   const [manual, setManual] = useState(false)
   const [advanced, setAdvanced] = useState<ConvertOptions | null>(null)
   const [starting, setStarting] = useState(false)
+  // episódios já na coleção ({temporada: [eps]}) — badge informativo; baixar
+  // de novo continua permitido (o usuário pode querer trocar a versão)
+  const [owned, setOwned] = useState<Record<number, number[]>>({})
 
   useEffect(() => {
     api<SeriesDetail>(`/api/series/${series.id}`)
       .then(setDetail)
       .catch((e) => setError((e as Error).message))
+    api<{ seasons: Record<number, number[]> }>(
+      `/api/series/${series.id}/owned?title=${encodeURIComponent(series.title ?? '')}`
+      + `&year=${encodeURIComponent(series.year ?? '')}`)
+      .then((r) => setOwned(r.seasons))
+      .catch(() => {})
     api<Language[]>('/api/languages').then(setLanguages).catch(() => {})
     api<Destination[]>('/api/destinations')
       .then((ds) => {
@@ -243,6 +251,14 @@ export default function SeriesModal({
                         <span className="shrink-0 text-xs text-zinc-500">
                           · {s.episode_count ?? '?'} ep. {s.air_date ? `· ${s.air_date.slice(0, 4)}` : ''}
                         </span>
+                        {(owned[s.season]?.length ?? 0) > 0 && (
+                          <span
+                            className="shrink-0 rounded bg-emerald-950 px-1.5 py-0.5 text-xs font-medium text-emerald-300"
+                            title="Episódios desta temporada já na coleção"
+                          >
+                            {owned[s.season]!.length}/{s.episode_count ?? '?'} na coleção
+                          </span>
+                        )}
                       </button>
                       {partial && (
                         <span className="shrink-0 rounded bg-blue-950 px-1.5 py-0.5 text-xs font-medium text-blue-300">
@@ -277,6 +293,14 @@ export default function SeriesModal({
                                     </span>
                                     <span className="min-w-0 flex-1 truncate text-zinc-300">
                                       {e.name ?? '—'}
+                                      {owned[s.season]?.includes(e.episode) && (
+                                        <span
+                                          className="ml-1.5 inline-flex items-center gap-0.5 rounded bg-emerald-950 px-1 py-px text-[10px] font-medium text-emerald-300"
+                                          title="Já existe na coleção"
+                                        >
+                                          <Check width={9} height={9} /> na coleção
+                                        </span>
+                                      )}
                                     </span>
                                     <span className="flex shrink-0 items-center gap-1 text-xs text-zinc-500">
                                       {future && <Calendar width={11} height={11} />}

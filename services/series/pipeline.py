@@ -1147,6 +1147,15 @@ async def _after_download(job: dict):
 def resume(job: dict):
     """Chamado pelo jobs.resume_pending para jobs media_type=tv."""
     status = job["status"]
+    if job.get("recompress"):
+        # recompressão em lote: os originais estão no disco — item que estava
+        # convertendo volta para a fila e o laço recomeça só do que falta
+        from services.series import recompress
+        for ep in job["episodes"].values():
+            if ep["state"] == "merging":
+                ep["state"] = "downloaded"
+        jobs._spawn(job["id"], recompress._run(job))
+        return
     if status == "searching":
         jobs._set(job, "error",
                   "Servidor reiniciado durante a busca — use ↻ para repetir")
@@ -1175,6 +1184,12 @@ async def _resume_merge(job: dict):
 
 async def retry(old: dict) -> dict:
     """Recria o job de série com os mesmos parâmetros (chamado por jobs.retry)."""
+    if old.get("recompress"):
+        from services.series import recompress
+        r = old["recompress"]
+        return await recompress.create_recompress_batch(
+            old.get("destination_id"), r["folder"], r["rels"],
+            old["convert"], r.get("replace", True), old.get("tmdb_id"))
     req = old.get("request") or {}
     return await create_series(
         old["tmdb_id"], old["language"],

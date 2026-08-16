@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Folder, MediaVideoList, NavArrowRight, Plus, Search, WarningTriangle, Xmark } from 'iconoir-react'
+import { Folder, MediaVideoList, NavArrowRight, Plus, Search, Tv, WarningTriangle, Xmark } from 'iconoir-react'
 import { api, type CatalogItem, type CatalogList, type Destination } from '../api'
 import AddMovieModal from '../components/AddMovieModal'
 import { DiskBar, Empty } from '../components/ui'
@@ -167,7 +167,9 @@ export default function Catalog() {
             to={`/catalog/item?destination_id=${destId}&folder=${encodeURIComponent(it.folder)}`}
             className="flex items-center gap-3 rounded-xl bg-zinc-900 px-4 py-3 hover:bg-zinc-800/70"
           >
-            {it.has_video ? (
+            {it.type === 'series' ? (
+              <Tv width={20} height={20} className="shrink-0 text-sky-400" />
+            ) : it.has_video ? (
               <MediaVideoList width={20} height={20} className="shrink-0 text-blue-400" />
             ) : (
               <Folder width={20} height={20} className="shrink-0 text-zinc-500" />

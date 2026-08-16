@@ -2,12 +2,13 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   ClosedCaptionsTag, Compress, EditPencil, Label, MediaVideo, MusicNote, NavArrowDown,
-  NavArrowLeft, NavArrowRight, Page, Trash, WarningTriangle,
+  NavArrowLeft, NavArrowRight, Page, Plus, Trash, WarningTriangle,
 } from 'iconoir-react'
-import { api, del, post, type CatalogDetail, type CatalogFile, type Stream } from '../api'
+import { api, del, post, type CatalogDetail, type CatalogFile, type Movie, type Stream } from '../api'
 import { Empty } from '../components/ui'
 import { useDialog } from '../components/Dialog'
 import RecompressModal from '../components/RecompressModal'
+import SeriesModal from '../components/SeriesModal'
 import TmdbPickerModal from '../components/TmdbPickerModal'
 
 export default function CatalogItem() {
@@ -19,6 +20,9 @@ export default function CatalogItem() {
   const [error, setError] = useState<string | null>(null)
   const [open, setOpen] = useState<Set<string>>(new Set())
   const [recompress, setRecompress] = useState<CatalogFile | null>(null)
+  // lote (temporada/série): lista de arquivos + rótulo do escopo
+  const [batch, setBatch] = useState<{ files: CatalogFile[]; label: string } | null>(null)
+  const [addingEpisodes, setAddingEpisodes] = useState(false)
   const [pickingTmdb, setPickingTmdb] = useState(false)
   const navigate = useNavigate()
 
@@ -108,6 +112,14 @@ export default function CatalogItem() {
   if (!detail) return <Empty>Carregando...</Empty>
 
   const m = detail.tmdb
+  const isSeries = detail.type === 'series'
+  const videoFiles = detail.files.filter((f) => f.category === 'video')
+  // Movie-shape para o SeriesModal (o tmdb pode ter falhado; o id da pasta basta)
+  const seriesRef: Movie | null = m ?? (detail.tmdb_id != null ? {
+    id: detail.tmdb_id, title: detail.title, original_title: detail.title,
+    year: detail.year ?? '', overview: null, poster: null, rating: null,
+    media_type: 'tv',
+  } : null)
 
   return (
     <div>
@@ -119,6 +131,24 @@ export default function CatalogItem() {
           {detail.title}
           {detail.year && <span className="ml-1 font-normal text-zinc-400">({detail.year})</span>}
         </h1>
+        {isSeries && seriesRef && (
+          <button
+            onClick={() => setAddingEpisodes(true)}
+            title="Buscar e baixar episódios/temporadas que faltam"
+            className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:border-blue-700 hover:text-blue-300"
+          >
+            <Plus width={15} height={15} /> Adicionar episódios
+          </button>
+        )}
+        {isSeries && videoFiles.length > 0 && (
+          <button
+            onClick={() => setBatch({ files: videoFiles, label: 'série inteira' })}
+            title="Recomprimir todos os episódios da série"
+            className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:border-purple-700 hover:text-purple-300"
+          >
+            <Compress width={15} height={15} /> Recomprimir série
+          </button>
+        )}
         {/* sem match automático o botão continua valendo: é justamente aí que
             escolher o filme na mão resolve */}
         {detail.tmdb_id == null && (
@@ -173,21 +203,61 @@ export default function CatalogItem() {
         </div>
       </div>
 
-      {/* arquivos com dropdown */}
-      <h2 className="mt-6 mb-2 text-sm font-semibold text-zinc-400">Arquivos</h2>
-      <div className="flex flex-col gap-2">
-        {detail.files.map((f) => (
-          <FileRow
-            key={f.rel}
-            file={f}
-            open={open.has(f.rel)}
-            onToggle={() => toggle(f.rel)}
-            onRename={() => renameFile(f)}
-            onRemove={() => removeFile(f)}
-            onRecompress={f.category === 'video' ? () => setRecompress(f) : undefined}
-          />
-        ))}
-      </div>
+      {/* arquivos: série agrupa por temporada (accordion); filme, lista plana */}
+      {isSeries && detail.seasons ? (
+        detail.seasons.map((sg) => {
+          const label = sg.season != null
+            ? `Temporada ${String(sg.season).padStart(2, '0')}` : 'Outros arquivos'
+          const vids = sg.files.filter((f) => f.category === 'video')
+          return (
+            <div key={label}>
+              <div className="mt-6 mb-2 flex items-center gap-3">
+                <h2 className="text-sm font-semibold text-zinc-400">
+                  {label} <span className="font-normal text-zinc-500">· {sg.files.length} arquivo(s)</span>
+                </h2>
+                {sg.season != null && vids.length > 0 && (
+                  <button
+                    onClick={() => setBatch({ files: vids, label: label.toLowerCase() })}
+                    className="rounded-lg border border-zinc-700 px-2 py-0.5 text-xs text-zinc-400 hover:border-purple-700 hover:text-purple-300"
+                  >
+                    Recomprimir temporada
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-col gap-2">
+                {sg.files.map((f) => (
+                  <FileRow
+                    key={f.rel}
+                    file={f}
+                    open={open.has(f.rel)}
+                    onToggle={() => toggle(f.rel)}
+                    onRename={() => renameFile(f)}
+                    onRemove={() => removeFile(f)}
+                    onRecompress={f.category === 'video' ? () => setRecompress(f) : undefined}
+                  />
+                ))}
+              </div>
+            </div>
+          )
+        })
+      ) : (
+        <>
+          <h2 className="mt-6 mb-2 text-sm font-semibold text-zinc-400">Arquivos</h2>
+          <div className="flex flex-col gap-2">
+            {detail.files.map((f) => (
+              <FileRow
+                key={f.rel}
+                file={f}
+                open={open.has(f.rel)}
+                onToggle={() => toggle(f.rel)}
+                onRename={() => renameFile(f)}
+                onRemove={() => removeFile(f)}
+                onRecompress={f.category === 'video' ? () => setRecompress(f) : undefined}
+              />
+            ))}
+          </div>
+        </>
+      )}
 
       {recompress && (
         <RecompressModal
@@ -197,6 +267,19 @@ export default function CatalogItem() {
           tmdb={detail.tmdb}
           onClose={() => setRecompress(null)}
         />
+      )}
+      {batch && (
+        <RecompressModal
+          folder={folder}
+          destinationId={destId ? Number(destId) : null}
+          files={batch.files}
+          batchLabel={batch.label}
+          tmdb={detail.tmdb}
+          onClose={() => setBatch(null)}
+        />
+      )}
+      {addingEpisodes && seriesRef && (
+        <SeriesModal series={seriesRef} onClose={() => setAddingEpisodes(false)} />
       )}
       {pickingTmdb && (
         <TmdbPickerModal

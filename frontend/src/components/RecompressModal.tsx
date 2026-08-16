@@ -8,35 +8,50 @@ import { useScrollLock } from './ui'
 interface Props {
   folder: string
   destinationId: number | null
-  file: CatalogFile
+  /** Um arquivo (fluxo clássico) OU vários (lote: temporada/série inteira). */
+  file?: CatalogFile
+  files?: CatalogFile[]
+  /** Rótulo do escopo do lote ("Temporada 01" / "série inteira") para o título. */
+  batchLabel?: string
   tmdb: Movie | null
   onClose: () => void
 }
 
-/** Recompressão de um filme que já está na coleção: mesmas opções avançadas dos
- *  downloads, aplicadas no arquivo do disco. O original só é trocado quando o
- *  ffmpeg termina — cancelar ou falhar deixa o filme intacto. */
-export default function RecompressModal({ folder, destinationId, file, tmdb, onClose }: Props) {
+/** Recompressão de itens que já estão na coleção: mesmas opções avançadas dos
+ *  downloads, aplicadas no(s) arquivo(s) do disco. O original só é trocado
+ *  quando o ffmpeg termina — cancelar ou falhar deixa tudo intacto. Com vários
+ *  arquivos vira um job em lote (falha por arquivo, regra dos 75%). */
+export default function RecompressModal({ folder, destinationId, file, files, batchLabel, tmdb, onClose }: Props) {
   const [advanced, setAdvanced] = useState<ConvertOptions | null>(null)
   const [replace, setReplace] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const navigate = useNavigate()
   useScrollLock()
+  const batch = files && files.length > 0
 
   async function submit() {
     if (!advanced || submitting) return
     setSubmitting(true)
     setError(null)
     try {
-      const job = await post<Job>('/api/jobs/recompress', {
-        folder,
-        rel: file.rel,
-        destination_id: destinationId,
-        tmdb_id: tmdb?.id ?? null,
-        convert: advanced,
-        replace,
-      })
+      const job = batch
+        ? await post<Job>('/api/jobs/recompress-batch', {
+            folder,
+            rels: files!.map((f) => f.rel),
+            destination_id: destinationId,
+            tmdb_id: tmdb?.id ?? null,
+            convert: advanced,
+            replace,
+          })
+        : await post<Job>('/api/jobs/recompress', {
+            folder,
+            rel: file!.rel,
+            destination_id: destinationId,
+            tmdb_id: tmdb?.id ?? null,
+            convert: advanced,
+            replace,
+          })
       navigate(`/jobs/${job.id}`)
     } catch (e) {
       setError((e as Error).message)
@@ -56,20 +71,34 @@ export default function RecompressModal({ folder, destinationId, file, tmdb, onC
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2">
-          <h2 className="flex-1 text-lg font-semibold">Recomprimir filme</h2>
+          <h2 className="flex-1 text-lg font-semibold">
+            {batch ? `Recomprimir ${batchLabel ?? `${files!.length} arquivo(s)`}` : 'Recomprimir filme'}
+          </h2>
           <button onClick={onClose} className="rounded-lg border border-zinc-700 p-1.5 text-zinc-400 hover:text-zinc-200" title="Fechar">
             <Xmark width={16} height={16} />
           </button>
         </div>
 
-        <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2">
-          <div className="truncate font-mono text-sm">{file.name}</div>
-          <div className="mt-0.5 text-xs text-zinc-500">
-            {file.size_human}
-            {file.duration ? ` · ${file.duration}` : ''}
-            {file.overall_bitrate ? ` · ${file.overall_bitrate}` : ''}
+        {batch ? (
+          <div className="mt-3 max-h-40 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2">
+            <div className="mb-1 text-xs text-zinc-400">
+              {files!.length} arquivo(s) — cada um falha/conclui sozinho; menos
+              de 75% de sucesso aborta o job
+            </div>
+            {files!.map((f) => (
+              <div key={f.rel} className="truncate font-mono text-xs text-zinc-300">{f.rel}</div>
+            ))}
           </div>
-        </div>
+        ) : (
+          <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2">
+            <div className="truncate font-mono text-sm">{file!.name}</div>
+            <div className="mt-0.5 text-xs text-zinc-500">
+              {file!.size_human}
+              {file!.duration ? ` · ${file!.duration}` : ''}
+              {file!.overall_bitrate ? ` · ${file!.overall_bitrate}` : ''}
+            </div>
+          </div>
+        )}
 
         {/* o que fazer com o original */}
         <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">

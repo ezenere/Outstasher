@@ -543,6 +543,8 @@ export interface CatalogItem {
   folder: string
   title: string
   year: string | null
+  /** 'series' = pasta com subpastas "Season NN" (layout Jellyfin). */
+  type?: 'movie' | 'series'
   size: number
   size_human: string
   file_count: number
@@ -610,11 +612,14 @@ export interface CatalogDetail {
   folder: string
   title: string
   year: string | null
+  type?: 'movie' | 'series'
   /** id do TMDB já marcado no nome da pasta ([tmdbid-N]); null = ainda não marcada. */
   tmdb_id: number | null
   size: number
   size_human: string
   files: CatalogFile[]
+  /** Série: arquivos agrupados por temporada (null = soltos na raiz). */
+  seasons?: { season: number | null; files: CatalogFile[] }[]
   tmdb: Movie | null
 }
 

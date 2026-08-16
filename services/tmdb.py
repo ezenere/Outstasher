@@ -86,6 +86,29 @@ async def search(query: str, page: int = 1) -> dict:
     return _page(data)
 
 
+async def tv_by_id(tv_id: int) -> dict | None:
+    """Série pelo id exato do TMDB (card slim). None se o id não existe."""
+    try:
+        return _slim_tv(await _get(f"/tv/{tv_id}", {"language": "pt-BR"}))
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return None
+        raise
+
+
+async def tv_match(title: str, year: str | None = None) -> dict | None:
+    """Melhor palpite de série por título (+ ano de estreia) para o catálogo."""
+    params = {"query": title, "language": "pt-BR"}
+    if year:
+        params["first_air_date_year"] = year
+    data = await _get("/search/tv", params)
+    results = data.get("results") or []
+    if not results and year:  # tenta de novo sem o ano
+        data = await _get("/search/tv", {"query": title, "language": "pt-BR"})
+        results = data.get("results") or []
+    return _slim_tv(results[0]) if results else None
+
+
 async def popular_tv(page: int = 1) -> dict:
     data = await _get("/tv/popular", {"page": page, "language": "pt-BR"})
     return _page_tv(data)

@@ -236,6 +236,17 @@ async def series(q: str = "", page: int = 1):
     return result
 
 
+@app.get("/api/series/{tv_id}/owned")
+async def series_owned(tv_id: int, title: str = "", year: str = ""):
+    """Episódios da série já presentes na coleção: {temporada: [episódios]}.
+
+    Casa por [tmdbid-N] na pasta; fallback por título/ano (a UI manda os dois
+    do card para evitar outra ida ao TMDB)."""
+    owned = await asyncio.to_thread(
+        catalog.owned_episodes, tv_id, title or None, year or None)
+    return {"seasons": owned}
+
+
 @app.get("/api/series/{tv_id}/season/{season}")
 async def series_season(tv_id: int, season: int):
     """Episódios de uma temporada (nome, data de estreia, duração)."""
@@ -478,10 +489,17 @@ async def catalog_item(folder: str, destination_id: int | None = None):
     # dados do TMDB (falha de rede nao quebra a pagina). Com a pasta já marcada
     # ([tmdbid-N]), busca pelo ID: ele foi escolhido/confirmado por alguém, e
     # adivinhar de novo pelo título erraria justamente nos casos que o ID
-    # resolve (remake, título localizado, coleção).
+    # resolve (remake, título localizado, coleção). Pasta de SÉRIE consulta a
+    # base de TV (filmes e séries têm espaços de id separados no TMDB).
+    is_series = detail.get("type") == "series"
     try:
-        detail["tmdb"] = (await tmdb.by_id(detail["tmdb_id"]) if detail["tmdb_id"]
-                          else await tmdb.match(detail["title"], detail["year"]))
+        if detail["tmdb_id"]:
+            detail["tmdb"] = await (tmdb.tv_by_id(detail["tmdb_id"]) if is_series
+                                    else tmdb.by_id(detail["tmdb_id"]))
+        else:
+            detail["tmdb"] = await (tmdb.tv_match(detail["title"], detail["year"])
+                                    if is_series
+                                    else tmdb.match(detail["title"], detail["year"]))
     except Exception:  # noqa: BLE001
         detail["tmdb"] = None
     return detail
@@ -553,6 +571,28 @@ async def create_recompress_job(req: RecompressRequest):
     try:
         return await jobs.create_recompress(req.destination_id, req.folder, req.rel,
                                             req.convert, req.replace, req.tmdb_id)
+    except (ValueError, catalog.CatalogError) as e:
+        raise HTTPException(400, str(e))
+
+
+class RecompressBatchRequest(BaseModel):
+    folder: str
+    rels: list[str]  # arquivos da série/temporada/episódios escolhidos
+    convert: dict
+    replace: bool = True
+    destination_id: int | None = None
+    tmdb_id: int | None = None
+
+
+@app.post("/api/jobs/recompress-batch")
+async def create_recompress_batch_job(req: RecompressBatchRequest):
+    """Recompressão em lote (série/temporada/episódios): um job media_type=tv
+    com progresso e falha POR ARQUIVO e a regra dos 75%."""
+    from services.series import recompress as series_recompress
+    try:
+        return await series_recompress.create_recompress_batch(
+            req.destination_id, req.folder, req.rels, req.convert,
+            req.replace, req.tmdb_id)
     except (ValueError, catalog.CatalogError) as e:
         raise HTTPException(400, str(e))
 
