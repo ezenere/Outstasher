@@ -125,6 +125,12 @@ export type GateReason =
   | 'manual_pick' | 'gaps_confirm' | 'incompatible_torrents'
   | 'alignment_review' | 'drift'
 
+/** Candidato na visão invertida do manual: torrent + episódios que o TÍTULO
+ *  dele cobre (o match fino pelo arquivo acontece após o download). */
+export interface TorrentChoice extends SeriesCandidate {
+  matches: string[]
+}
+
 /** Gate ativo de um job de série (job.awaiting). */
 export interface JobGate {
   reason: GateReason
@@ -143,8 +149,23 @@ export interface JobGate {
     episode_groups?: { id: string; name: string; type: number; episode_count: number }[]
     /** manual_pick */
     candidates?: Record<'original' | 'dubbed', Record<string, SeriesCandidate[]>>
+    by_torrent?: Record<'original' | 'dubbed', TorrentChoice[]>
+    requested?: string[]
     preselected?: { n: number; role: string; title: string; quality: string | null; coverage: string[] }[]
   }
+}
+
+/** Troca manual de um torrent de série ("tentar próximo(s)" com candidateId nulo). */
+export function switchSeriesTorrent(jobId: string, torrentN: number,
+                                    candidateId: string | null = null) {
+  return post<Job>(`/api/jobs/${jobId}/switch-torrent`,
+    { torrent_n: torrentN, candidate_id: candidateId })
+}
+
+/** Candidatos compatíveis (mesma cobertura) para trocar um torrent do plano. */
+export function seriesTorrentCandidates(jobId: string, n: number) {
+  return api<{ candidates: SeriesCandidate[] }>(
+    `/api/jobs/${jobId}/torrent-candidates?n=${n}`)
 }
 
 /** Resumo de série no card da lista (/api/jobs/list). */

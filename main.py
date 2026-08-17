@@ -668,6 +668,31 @@ class ResolveRequest(BaseModel):
     decision: dict = {}
 
 
+class SwitchTorrentRequest(BaseModel):
+    torrent_n: int
+    candidate_id: str | None = None  # None = próxima reserva compatível
+
+
+@app.post("/api/jobs/{job_id}/switch-torrent")
+async def switch_series_torrent(job_id: str, req: SwitchTorrentRequest):
+    """Troca manual de um torrent de série durante o download ("tentar
+    próximo(s)" quando candidate_id é nulo)."""
+    try:
+        return await series_pipeline.switch_torrent(job_id, req.torrent_n,
+                                                    req.candidate_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/jobs/{job_id}/torrent-candidates")
+async def series_torrent_candidates(job_id: str, n: int):
+    """Candidatos compatíveis (mesma cobertura) para trocar o torrent `n`."""
+    try:
+        return {"candidates": series_pipeline.torrent_alternatives(job_id, n)}
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
 @app.post("/api/jobs/{job_id}/resolve")
 async def resolve_job_gate(job_id: str, req: ResolveRequest):
     """Resolve o gate ativo de um job de série (decisões sempre do usuário)."""

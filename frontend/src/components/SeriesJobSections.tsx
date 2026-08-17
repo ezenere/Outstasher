@@ -1,12 +1,14 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  Check, Download, FastArrowRight, MediaVideo, Refresh, SoundHigh,
-  WarningTriangle,
+  Check, Download, EditPencil, FastArrowRight, MediaVideo, Refresh,
+  SkipNext, SoundHigh, WarningTriangle,
 } from 'iconoir-react'
 import {
   EPISODE_STATE_LABEL, fmtSize, post, prog, resolveGate,
+  seriesTorrentCandidates, switchSeriesTorrent,
   type Candidate, type EpisodeState, type Job, type SeriesCandidate,
+  type TorrentChoice,
 } from '../api'
 import AlignmentReview from './AlignmentReview'
 import { useDialog } from './Dialog'
@@ -86,13 +88,57 @@ export function SeriesEpisodes({ job }: { job: Job }) {
   )
 }
 
-/** Torrents do plano (as duas línguas), com barra de progresso e o botão de
- *  forçar a próxima etapa durante o download. */
+/** Torrents do plano (as duas línguas), com barra de progresso, troca manual
+ *  ("tentar próximo(s)" / escolher outro) e o botão de forçar a próxima etapa
+ *  durante o download. */
 export function SeriesTorrents({ job, onChanged }: { job: Job; onChanged: () => void }) {
   const dialog = useDialog()
   const [forcing, setForcing] = useState(false)
+  const [switching, setSwitching] = useState(false)
+  // lista "Escolher outro…" aberta para qual torrent (+ candidatos buscados)
+  const [pickN, setPickN] = useState<number | null>(null)
+  const [pickList, setPickList] = useState<SeriesCandidate[] | null>(null)
   const torrents = job.torrents ?? []
   if (!torrents.length) return null
+
+  async function trySwitch(n: number, candidateId: string | null) {
+    if (switching) return
+    const t = torrents.find((x) => x.n === n)
+    if (!(await dialog.confirm({
+      title: 'Trocar torrent',
+      message: `Trocar ${candidateId ? 'para o candidato selecionado' : 'pelo próximo candidato compatível'}? `
+        + `O download atual será descartado e os episódios ${t?.coverage.join(', ')} passam para o novo torrent.`,
+      confirmText: 'Trocar', tone: 'danger',
+    }))) return
+    setSwitching(true)
+    try {
+      await switchSeriesTorrent(job.id, n, candidateId)
+      setPickN(null)
+      setPickList(null)
+      onChanged()
+    } catch (e) {
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
+    } finally {
+      setSwitching(false)
+    }
+  }
+
+  async function togglePick(n: number) {
+    if (pickN === n) {
+      setPickN(null)
+      setPickList(null)
+      return
+    }
+    setPickN(n)
+    setPickList(null)
+    try {
+      const r = await seriesTorrentCandidates(job.id, n)
+      setPickList(r.candidates)
+    } catch (e) {
+      setPickN(null)
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
+    }
+  }
 
   async function forceNext() {
     if (forcing) return
@@ -159,6 +205,44 @@ export function SeriesTorrents({ job, onChanged }: { job: Job; onChanged: () => 
                 )}
               </div>
               {t.state !== 'done' && p && <ProgressBar label="Download" p={p} />}
+              {/* troca manual: como nos filmes, por torrent do plano */}
+              {job.status === 'downloading' && t.state === 'downloading' && (
+                <div className="mt-1.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={() => trySwitch(t.n, null)}
+                      disabled={switching}
+                      title="Troca pelo próximo candidato que cobre os mesmos episódios"
+                      className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+                    >
+                      <SkipNext width={13} height={13} /> Tentar próximo(s)
+                    </button>
+                    <button
+                      onClick={() => togglePick(t.n)}
+                      className="rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                    >
+                      {pickN === t.n ? 'Fechar lista' : 'Escolher outro…'}
+                    </button>
+                  </div>
+                  {pickN === t.n && (
+                    <div className="mt-2">
+                      <div className="mb-1 text-xs text-zinc-500">
+                        Candidatos que cobrem {t.coverage.join(', ')} (a coluna
+                        Corte mostra a cobertura). Clique para trocar.
+                      </div>
+                      {pickList === null ? (
+                        <div className="text-xs text-zinc-500">Carregando…</div>
+                      ) : (
+                        <CandidatesTable
+                          candidates={asTableRows(pickList)}
+                          selectable
+                          onSelect={(cid) => trySwitch(t.n, cid)}
+                        />
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )
         })}
@@ -239,8 +323,11 @@ export function SeriesReport({ job }: { job: Job }) {
 export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => void }) {
   const dialog = useDialog()
   const [busy, setBusy] = useState(false)
-  // escolhas do manual_pick: ep_key -> role -> candidate_id
-  const [picks, setPicks] = useState<Record<string, Record<string, string>>>({})
+  // manual invertido: role -> candidate_id -> episódios ('auto' = pelo título)
+  const [sel, setSel] = useState<Record<string, Record<string, string[] | 'auto'>>>(
+    { original: {}, dubbed: {} })
+  // editor de episódios aberto para qual (role, candidato)
+  const [editing, setEditing] = useState<{ role: string; cid: string } | null>(null)
   const gate = job.awaiting
   if (job.status !== 'awaiting' || !gate) return null
 
@@ -294,6 +381,14 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
             className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-zinc-950 hover:bg-amber-500 disabled:opacity-50"
           >
             Continuar com as lacunas
+          </button>
+          <button
+            onClick={() => send('gaps_confirm', { edit: true })}
+            disabled={busy}
+            title="Abre a escolha manual para cobrir os episódios que faltam com outros torrents"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+          >
+            <EditPencil width={14} height={14} /> Editar seleção manual
           </button>
           <button
             onClick={() => send('gaps_confirm', { accept: false },
@@ -378,52 +473,169 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
   }
 
   if (gate.reason === 'manual_pick') {
-    const cands = gate.payload.candidates ?? { original: {}, dubbed: {} }
-    const keys = Object.keys(job.episodes ?? {}).filter(
-      (k) => !['skipped_future', 'skipped_missing'].includes(job.episodes![k].state))
+    const byTorrent = gate.payload.by_torrent ?? { original: [], dubbed: [] }
+    const requested = gate.payload.requested ?? []
+
+    // episódios cobertos por papel com a seleção atual (auto = matches)
+    function coveredBy(role: string): Set<string> {
+      const out = new Set<string>()
+      for (const [cid, eps] of Object.entries(sel[role] ?? {})) {
+        if (eps === 'auto') {
+          const c = byTorrent[role as 'original' | 'dubbed']?.find((x) => x.id === cid)
+          c?.matches.forEach((k) => out.add(k))
+        } else {
+          eps.forEach((k) => out.add(k))
+        }
+      }
+      return out
+    }
+
+    function toggleTorrent(role: string, cid: string) {
+      setSel((cur) => {
+        const next = { ...cur, [role]: { ...(cur[role] ?? {}) } }
+        if (cid in next[role]) delete next[role][cid]
+        else next[role][cid] = 'auto'
+        return next
+      })
+      setEditing(null)
+    }
+
+    function toggleEp(role: string, cid: string, key: string, matches: string[]) {
+      setSel((cur) => {
+        const cboth = cur[role]?.[cid]
+        // 'auto' vira lista explícita (partindo dos matches) na 1ª edição
+        const base = new Set(cboth === 'auto' || cboth === undefined ? matches : cboth)
+        if (base.has(key)) base.delete(key)
+        else base.add(key)
+        return { ...cur, [role]: { ...(cur[role] ?? {}), [cid]: [...base].sort() } }
+      })
+    }
+
+    const anySelected = Object.values(sel).some((m) => Object.keys(m).length > 0)
+
+    function submit() {
+      const torrents: { candidate_id: string; role: string; episodes: string[] | 'auto' }[] = []
+      for (const role of ['original', 'dubbed'] as const) {
+        for (const [cid, eps] of Object.entries(sel[role] ?? {})) {
+          torrents.push({ candidate_id: cid, role, episodes: eps })
+        }
+      }
+      void send('manual_pick', { torrents })
+    }
+
     return (
       <section className="mt-6 rounded-xl border border-purple-900/60 bg-purple-950/20 p-4">
-        <h2 className="mb-2 font-semibold text-purple-300">Escolha os torrents por episódio</h2>
+        <h2 className="mb-2 font-semibold text-purple-300">Escolha os torrents</h2>
         <p className="mb-3 text-sm text-zinc-300">
-          Episódio sem escolha explícita usa o melhor candidato automático.
-          Escolher o mesmo pack para vários episódios baixa o pack uma vez só.
+          Marque os torrents que quer baixar; cada um assume automaticamente os
+          episódios que o TÍTULO indica (dá para editar). Papel sem nenhuma
+          marca mantém o plano automático. O que ficar sem cobertura passa pelo
+          aviso de lacunas antes de baixar; o match fino com os ARQUIVOS
+          acontece depois do download.
         </p>
-        <div className="space-y-2">
-          {keys.map((key) => (
-            <Collapsible
-              key={key}
-              title={`${key} — ${job.episodes![key].name ?? ''}`}
-              right={picks[key] ? <span className="text-xs text-purple-300">escolhido</span> : undefined}
-            >
-              {(['original', 'dubbed'] as const).map((role) => (
-                <div key={role} className="mb-2">
-                  <h4 className="mb-1 flex items-center gap-1.5 text-xs text-zinc-400">
-                    {role === 'original'
-                      ? <><MediaVideo width={12} height={12} /> Original (vídeo)</>
-                      : <><SoundHigh width={12} height={12} /> Dublado ({job.language})</>}
-                  </h4>
-                  <CandidatesTable
-                    candidates={asTableRows(cands[role]?.[key] ?? [])}
-                    selectable
-                    selectedId={picks[key]?.[role]}
-                    onSelect={(cid) => setPicks((cur) => ({
-                      ...cur, [key]: { ...(cur[key] ?? {}), [role]: cid },
-                    }))}
-                  />
-                </div>
-              ))}
-            </Collapsible>
-          ))}
-        </div>
+        {(['original', 'dubbed'] as const).map((role) => {
+          const covered = coveredBy(role)
+          const touched = Object.keys(sel[role] ?? {}).length > 0
+          const missing = requested.filter((k) => !covered.has(k))
+          return (
+            <div key={role} className="mb-4">
+              <h3 className="mb-1.5 flex items-center gap-1.5 text-sm text-zinc-400">
+                {role === 'original'
+                  ? <><MediaVideo width={14} height={14} /> Original (vídeo)</>
+                  : <><SoundHigh width={14} height={14} /> Dublado ({job.language})</>}
+                {touched && (
+                  <span className={`text-xs ${missing.length ? 'text-amber-300' : 'text-emerald-400'}`}>
+                    {missing.length
+                      ? `faltando: ${missing.join(', ')}`
+                      : 'todos os episódios cobertos'}
+                  </span>
+                )}
+                {!touched && <span className="text-xs text-zinc-500">(plano automático)</span>}
+              </h3>
+              <div className="max-h-80 space-y-1 overflow-y-auto pr-1">
+                {(byTorrent[role] ?? []).map((c) => {
+                  const checked = c.id in (sel[role] ?? {})
+                  const eps = sel[role]?.[c.id]
+                  const isEditing = editing?.role === role && editing.cid === c.id
+                  return (
+                    <div key={c.id} className={`rounded-lg border px-2.5 py-1.5 ${
+                      checked ? 'border-purple-700 bg-purple-950/30' : 'border-zinc-800'}`}
+                    >
+                      <label className="flex cursor-pointer items-center gap-2 text-sm">
+                        <input type="checkbox" checked={checked}
+                          onChange={() => toggleTorrent(role, c.id)} />
+                        <span className="min-w-0 flex-1 truncate" title={c.title}>{c.title}</span>
+                        <span className="shrink-0 text-xs text-zinc-500">
+                          {c.quality ?? '—'} · {fmtSize(c.size)} · {c.seeders} seeds
+                        </span>
+                        <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-300"
+                          title="O que o título do torrent indica">
+                          {c.coverage ?? '?'}
+                        </span>
+                      </label>
+                      {checked && (
+                        <div className="mt-1 flex flex-wrap items-center gap-1.5 pl-6 text-xs">
+                          <span className="text-zinc-400">
+                            {eps === 'auto'
+                              ? `auto: ${c.matches.length ? c.matches.join(', ') : 'nenhum match pelo título!'}`
+                              : `episódios: ${(eps as string[]).join(', ') || 'nenhum'}`}
+                          </span>
+                          {eps === 'auto' && c.matches.length === 0 && (
+                            <span className="text-amber-300">— atribua manualmente</span>
+                          )}
+                          <button
+                            onClick={() => setEditing(isEditing ? null : { role, cid: c.id })}
+                            className="rounded border border-zinc-700 px-1.5 py-0.5 text-zinc-300 hover:bg-zinc-800"
+                          >
+                            {isEditing ? 'fechar' : 'editar episódios'}
+                          </button>
+                          {isEditing && (
+                            <div className="mt-1 flex w-full flex-wrap gap-1 pl-1">
+                              {requested.map((k) => {
+                                const active = eps === 'auto'
+                                  ? c.matches.includes(k)
+                                  : (eps as string[]).includes(k)
+                                const offTitle = !c.matches.includes(k)
+                                return (
+                                  <button
+                                    key={k}
+                                    onClick={() => toggleEp(role, c.id, k, c.matches)}
+                                    title={offTitle
+                                      ? 'O título do torrent não indica este episódio — atribuir mesmo assim é decisão sua'
+                                      : undefined}
+                                    className={`rounded px-1.5 py-0.5 font-mono text-[11px] ${
+                                      active
+                                        ? offTitle
+                                          ? 'bg-amber-600 font-semibold text-zinc-950'
+                                          : 'bg-purple-600 font-semibold text-white'
+                                        : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+                                    }`}
+                                  >
+                                    {k}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+                {(byTorrent[role] ?? []).length === 0 && (
+                  <div className="text-xs text-zinc-500">Nenhum candidato encontrado para este papel.</div>
+                )}
+              </div>
+            </div>
+          )
+        })}
         <button
-          onClick={() => send('manual_pick', { picks })}
+          onClick={submit}
           disabled={busy}
-          className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
+          className="mt-1 inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
         >
           <Download width={15} height={15} />
-          {Object.keys(picks).length
-            ? `Confirmar (${Object.keys(picks).length} escolha(s) manual(is))`
-            : 'Confirmar plano automático'}
+          {anySelected ? 'Confirmar seleção' : 'Confirmar plano automático'}
         </button>
       </section>
     )

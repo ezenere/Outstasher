@@ -392,8 +392,12 @@ async def _plan_and_gate(job: dict):
     if job["mode"] == "manual" and not job.get("_manual_done"):
         _gate(job, "manual_pick", {
             "candidates": job["search_tv"],
+            # visão INVERTIDA (torrent -> episódios): candidatos únicos por
+            # papel com os episódios pedidos que o TÍTULO de cada um cobre
+            "by_torrent": _torrent_candidates(job),
+            "requested": [ep_key(s, e) for s, e in _active_refs(job)],
             "preselected": _plan_summary(job),
-        }, "Escolha os torrents por episódio (modo manual)")
+        }, "Escolha os torrents (modo manual)")
         return
 
     gaps = _collect_gaps(job)
@@ -538,6 +542,36 @@ def _episode_counts_by_season(job: dict) -> dict[int, int]:
     return counts
 
 
+def _torrent_candidates(job: dict) -> dict[str, list[dict]]:
+    """Candidatos ÚNICOS por papel (dedup por identidade), cada um com os
+    episódios pedidos que o TÍTULO cobre — a visão invertida da escolha
+    manual: marca-se o torrent e atribuem-se episódios a ele."""
+    known = set(job.get("known_seasons") or [])
+    refs = _active_refs(job)
+    out: dict[str, list[dict]] = {}
+    for role in ROLES:
+        seen: dict[str, dict] = {}
+        for cands in (job.get("search_tv") or {}).get(role, {}).values():
+            for c in cands:
+                ident = parse.torrent_identity(c)
+                if ident in seen:
+                    continue
+                cov = parse.parse_coverage(c["title"])
+                matches = [ep_key(s, e) for s, e in refs
+                           if cov.covers(*_search_ref(job, ep_key(s, e)), known)]
+                seen[ident] = {
+                    "id": c["id"], "title": c["title"],
+                    "tracker": c.get("tracker"), "seeders": c.get("seeders"),
+                    "size": c.get("size"), "quality": c.get("quality"),
+                    "coverage": c.get("coverage"), "score": c.get("score"),
+                    "tier": c.get("tier"), "matches": matches,
+                }
+        out[role] = sorted(seen.values(),
+                           key=lambda c: (-(c.get("tier") or 0),
+                                          -len(c["matches"])))
+    return out
+
+
 def _alternatives_for(job: dict, torrent: dict) -> list[dict]:
     """Candidatos alternativos que cobrem TODOS os episódios deste torrent."""
     search = (job.get("search_tv") or {}).get(torrent["role"]) or {}
@@ -553,7 +587,7 @@ def _alternatives_for(job: dict, torrent: dict) -> list[dict]:
         if all(cov.covers(*_search_ref(job, k), known)
                for k in torrent["coverage"]):
             out.append(c)
-    return out[:10]
+    return out[:30]
 
 
 # -------------------- gates --------------------
@@ -569,8 +603,10 @@ async def resolve(job_id: str, reason: str, decision: dict) -> dict | None:
     """Resolve o gate ativo (ou o force_continue durante o download).
 
     Decisões por gate:
-    - manual_pick:           {picks: {ep_key: {original: id, dubbed: id}}}
-    - gaps_confirm:          {accept: bool}
+    - manual_pick:           {torrents: [{candidate_id, role,
+                              episodes: [ep_key,...] | "auto"}]}  (invertido)
+                             ou {picks: {ep_key: {role: id}}}     (legado)
+    - gaps_confirm:          {accept: bool} | {edit: true} (voltar ao manual)
     - incompatible_torrents: {action: "accept"}
                              {action: "replace", torrent_n, candidate_id}
                              {action: "remap", group_id}
@@ -601,16 +637,26 @@ async def resolve(job_id: str, reason: str, decision: dict) -> dict | None:
     job["awaiting"] = None
     try:
         if reason == "gaps_confirm":
-            if not decision.get("accept"):
+            if decision.get("edit"):
+                # voltar para a escolha manual e cobrir as lacunas na mão.
+                # O job vira manual (verdadeiro daqui em diante) e o gate de
+                # escolha reabre no próximo _plan_and_gate.
+                job["mode"] = "manual"
+                job.pop("_manual_done", None)
+                jobs._event(job, "chosen",
+                            "Usuário voltou para a escolha manual por causa "
+                            "das lacunas")
+            elif not decision.get("accept"):
                 jobs._event(job, "chosen",
                             "Usuário desistiu por causa das lacunas")
                 await jobs.cancel(job_id)
                 cancelled = jobs._lookup(job_id)
                 return jobs._public(cancelled) if cancelled else None
-            _apply_gaps(job)
-            job["_gaps_accepted"] = True
-            jobs._event(job, "chosen",
-                        "Usuário aceitou continuar com as lacunas")
+            else:
+                _apply_gaps(job)
+                job["_gaps_accepted"] = True
+                jobs._event(job, "chosen",
+                            "Usuário aceitou continuar com as lacunas")
         elif reason == "incompatible_torrents":
             action = decision.get("action")
             if action == "accept":
@@ -784,8 +830,20 @@ async def _apply_remap(job: dict, decision: dict):
 
 
 def _apply_manual(job: dict, decision: dict):
-    """Aplica as escolhas manuais por episódio/papel por cima do plano
-    automático (episódio sem escolha explícita mantém o candidato do plano)."""
+    """Aplica a escolha manual. Dois formatos:
+
+    - INVERTIDO (a UI atual): {torrents: [{candidate_id, role,
+      episodes: [ep_key,...] | "auto"}]} — marca-se o torrent e diz-se quais
+      episódios ele atende; "auto" usa o match pelo TÍTULO (e o match fino
+      pelo ARQUIVO acontece de graça depois do download, no
+      _resolve_episode_files). Papel com algum torrent marcado tem o plano
+      SUBSTITUÍDO pela seleção; papel sem marca mantém o plano automático.
+      Episódio atribuído que o título não indica é aceito (decisão explícita
+      do usuário — a UI avisa antes).
+    - por episódio (legado): {picks: {ep_key: {role: candidate_id}}}.
+    """
+    if decision.get("torrents") is not None:
+        return _apply_manual_torrents(job, decision)
     picks = decision.get("picks") or {}
     if not picks:
         jobs._event(job, "chosen", "Modo manual: usuário manteve o plano automático")
@@ -835,6 +893,96 @@ def _apply_manual(job: dict, decision: dict):
     job["torrents"] = [t for t in job["torrents"] if t["coverage"]]
     jobs._event(job, "chosen",
                 f"Modo manual: {len(picks)} episódio(s) com escolha explícita")
+    store.upsert_job(job)
+
+
+def _find_candidate(job: dict, role: str, candidate_id: str) -> dict:
+    """Candidato de um papel pelo id, procurando em todas as listas por
+    episódio (o mesmo torrent aparece em várias, com ids diferentes — o
+    primeiro id encontrado na busca vale como referência)."""
+    for cands in (job.get("search_tv") or {}).get(role, {}).values():
+        cand = next((c for c in cands if c["id"] == candidate_id), None)
+        if cand:
+            return cand
+    raise ValueError(
+        f"Candidato {candidate_id!r} não encontrado (a busca pode ter sido refeita)")
+
+
+def _apply_manual_torrents(job: dict, decision: dict):
+    """Formato invertido: torrents marcados -> episódios atribuídos."""
+    sels = decision.get("torrents") or []
+    if not sels:
+        jobs._event(job, "chosen",
+                    "Modo manual: usuário manteve o plano automático")
+        return
+    known = set(job.get("known_seasons") or [])
+    valid_keys = {ep_key(s, e) for s, e in _active_refs(job)}
+    # (role, identidade) -> {cand, eps explícitos, auto?}
+    chosen: dict[tuple[str, str], dict] = {}
+    roles_touched: set[str] = set()
+    for sel in sels:
+        role = sel.get("role")
+        if role not in ROLES:
+            raise ValueError(f"Papel inválido: {role!r}")
+        cand = _find_candidate(job, role, sel.get("candidate_id"))
+        eps = sel.get("episodes", "auto")
+        if eps == "auto":
+            cov = parse.parse_coverage(cand["title"])
+            eps = [ep_key(s, e) for s, e in _active_refs(job)
+                   if cov.covers(*_search_ref(job, ep_key(s, e)), known)]
+            explicit = False
+        else:
+            bad = [k for k in eps if k not in valid_keys]
+            if bad:
+                raise ValueError("Episódio(s) fora do pedido: " + ", ".join(bad))
+            explicit = True
+        roles_touched.add(role)
+        key = (role, parse.torrent_identity(cand))
+        entry = chosen.setdefault(key, {"cand": cand, "eps": set(),
+                                        "explicit": set()})
+        entry["eps"].update(eps)
+        if explicit:
+            entry["explicit"].update(eps)
+
+    # atribuição explícita vence a automática quando dois torrents do mesmo
+    # papel disputam o mesmo episódio
+    for role in roles_touched:
+        taken: dict[str, tuple[str, str]] = {}
+        for key, entry in chosen.items():
+            if key[0] != role:
+                continue
+            for k in sorted(entry["explicit"]):
+                taken[k] = key
+        for key, entry in chosen.items():
+            if key[0] != role:
+                continue
+            entry["eps"] = {k for k in entry["eps"]
+                            if taken.get(k, key) == key}
+
+    # papel com seleção: o plano daquele papel É a seleção
+    job["torrents"] = [t for t in job["torrents"]
+                       if t["role"] not in roles_touched]
+    for (role, _ident), entry in chosen.items():
+        if not entry["eps"]:
+            continue
+        cand = entry["cand"]
+        n = max((t["n"] for t in job["torrents"]), default=-1) + 1
+        job["torrents"].append({
+            "n": n, "role": role, "tag": f"dl-{job['id']}-t{n}",
+            "title": cand["title"], "tracker": cand.get("tracker"),
+            "seeders": cand.get("seeders"), "size": cand.get("size"),
+            "quality": cand.get("quality"),
+            "coverage_label": cand.get("coverage"),
+            "magnet": cand.get("magnet"), "link": cand.get("link"),
+            "infohash": cand.get("infohash"), "files_count": cand.get("files"),
+            "coverage": sorted(entry["eps"]), "state": "pending",
+            "hash": None, "progress": None, "selected_files": None,
+            "content_path": None,
+        })
+    jobs._event(job, "chosen",
+                f"Modo manual: {len(sels)} torrent(s) escolhido(s) "
+                f"({', '.join(sorted(roles_touched))}) — lacunas passam pelo "
+                f"gate normal")
     store.upsert_job(job)
 
 
@@ -1040,25 +1188,28 @@ async def _readd(job: dict, t: dict):
     jobs._event(job, "qbit", f"🔁 t{t['n']} reinserido: {t['title']}")
 
 
-async def _switch_stalled(job: dict, t: dict, limit_min: int) -> bool:
-    """Watchdog: troca um torrent travado por um candidato que cubra os MESMOS
-    episódios. Sem reserva compatível, avisa e segue esperando."""
+def _find_replacement(job: dict, t: dict) -> dict | None:
+    """Próximo candidato do MESMO papel que cubra os MESMOS episódios do
+    torrent `t` e ainda não esteja em uso no plano. None = sem reserva."""
     search = (job.get("search_tv") or {}).get(t["role"]) or {}
     first = search.get(t["coverage"][0]) if t["coverage"] else None
     if not first:
-        return False
+        return None
     known = set(job.get("known_seasons") or [])
     used = {parse.torrent_identity(x) for x in job["torrents"]}
-    nxt = None
     for c in first:
         if parse.torrent_identity(c) in used:
             continue
         cov = parse.parse_coverage(c["title"])
         if all(cov.covers(*_search_ref(job, k), known) for k in t["coverage"]):
-            nxt = c
-            break
-    if nxt is None:
-        return False
+            return c
+    return None
+
+
+async def _replace_entry(job: dict, t: dict, nxt: dict, reason: str):
+    """Substitui o torrent do plano por `nxt`: remove o antigo do qBittorrent
+    (com os dados), atualiza a entrada in place (mesma tag — o watchdog zera o
+    relógio quando o hash muda) e adiciona o novo."""
     if t.get("hash"):
         try:
             await jobs._qbit.delete(t["hash"], delete_files=True)
@@ -1073,10 +1224,74 @@ async def _switch_stalled(job: dict, t: dict, limit_min: int) -> bool:
     save_path = job.get("torrent_save_path") or config.QBIT_SAVE_PATH or None
     await jobs._qbit.add(nxt.get("magnet") or nxt["link"],
                          f"{shared_tag(job)},{t['tag']}", save_path)
-    jobs._event(job, "qbit",
-                f"⏳ t{t['n']} travado há {limit_min} min — trocado por: "
-                f"{nxt['title']}")
+    jobs._event(job, "qbit", f"{reason}: {nxt['title']}")
+    store.upsert_job(job)
+
+
+async def _switch_stalled(job: dict, t: dict, limit_min: int) -> bool:
+    """Watchdog: troca um torrent travado por um candidato que cubra os MESMOS
+    episódios. Sem reserva compatível, avisa e segue esperando."""
+    nxt = _find_replacement(job, t)
+    if nxt is None:
+        return False
+    await _replace_entry(job, t, nxt,
+                         f"⏳ t{t['n']} travado há {limit_min} min — trocado por")
     return True
+
+
+async def switch_torrent(job_id: str, torrent_n: int,
+                         candidate_id: str | None = None) -> dict:
+    """Troca manual de um torrent do plano durante o download (como nos
+    filmes): sem candidate_id, "tentar próximo(s)" — a próxima reserva que
+    cobre os MESMOS episódios; com candidate_id, o candidato escolhido.
+
+    Candidato cujo TÍTULO não cobre todos os episódios do torrent é recusado
+    com a lista do que falta — para atribuição diferente, use a edição manual
+    (gate de lacunas → editar seleção)."""
+    job = jobs._jobs.get(job_id)
+    if not job or job.get("media_type") != "tv":
+        raise ValueError("Job de série não encontrado")
+    if job["status"] != "downloading":
+        raise ValueError("Só dá para trocar torrent durante o download")
+    t = next((x for x in job["torrents"] if x["n"] == torrent_n), None)
+    if t is None:
+        raise ValueError(f"Torrent t{torrent_n} não existe neste job")
+    if t["state"] not in ("downloading", "pending"):
+        raise ValueError(f"t{torrent_n} não está baixando ({t['state']})")
+
+    if candidate_id is None:
+        nxt = _find_replacement(job, t)
+        if nxt is None:
+            raise ValueError(
+                "Sem candidato reserva que cubra os mesmos episódios "
+                f"({', '.join(t['coverage'])})")
+    else:
+        nxt = _find_candidate(job, t["role"], candidate_id)
+        if parse.torrent_identity(nxt) in {
+                parse.torrent_identity(x) for x in job["torrents"]}:
+            raise ValueError("Este torrent já está no plano")
+        known = set(job.get("known_seasons") or [])
+        cov = parse.parse_coverage(nxt["title"])
+        missing = [k for k in t["coverage"]
+                   if not cov.covers(*_search_ref(job, k), known)]
+        if missing:
+            raise ValueError(
+                "O título do candidato não cobre: " + ", ".join(missing)
+                + " — use a edição manual para atribuir episódios diferentes")
+    await _replace_entry(job, t, nxt, f"🔁 Troca manual em t{t['n']}")
+    return jobs._public(job)
+
+
+def torrent_alternatives(job_id: str, torrent_n: int) -> list[dict]:
+    """Candidatos que cobrem os mesmos episódios de um torrent do plano — a
+    lista do "Escolher outro…" da UI."""
+    job = jobs._jobs.get(job_id)
+    if not job or job.get("media_type") != "tv":
+        raise ValueError("Job de série não encontrado")
+    t = next((x for x in job["torrents"] if x["n"] == torrent_n), None)
+    if t is None:
+        raise ValueError(f"Torrent t{torrent_n} não existe neste job")
+    return _alternatives_for(job, t)
 
 
 async def _resolve_episode_files(job: dict):

@@ -203,6 +203,147 @@ def test_apply_manual_candidato_invalido(temp_db):
         pipeline._apply_manual(job, {"picks": {"S01E01": {"dubbed": "nope"}}})
 
 
+# -------------------- escolha manual invertida (torrent -> episódios) ------
+
+def _pack_cand(cid, title, **kw):
+    base = {"id": cid, "title": title, "tracker": "x", "seeders": 5,
+            "size": 900, "quality": "1080p WEB-DL", "coverage": None,
+            "score": 1.0, "tier": 28,
+            "magnet": "magnet:?xt=urn:btih:" + ("%040x" % abs(hash(title))),
+            "link": None, "infohash": None, "files": None}
+    base.update(kw)
+    return base
+
+
+def test_manual_torrents_auto_atribui_pelo_titulo(temp_db):
+    job = _job()
+    job["torrents"] = [
+        _torrent(0, "original", ["S01E01", "S01E02"]),
+        _torrent(1, "dubbed", ["S01E01", "S01E02"], "BB S01 Dublado"),
+    ]
+    pack = _pack_cand("S01E01:d0", "Breaking Bad S01 BluRay Dublado")
+    job["search_tv"]["dubbed"] = {"S01E01": [pack]}
+    pipeline._apply_manual(job, {"torrents": [
+        {"candidate_id": "S01E01:d0", "role": "dubbed", "episodes": "auto"},
+    ]})
+    dubbed = [t for t in job["torrents"] if t["role"] == "dubbed"]
+    # o papel marcado foi SUBSTITUÍDO pela seleção; "auto" cobriu S01E01+02
+    # (o título "S01" cobre a temporada); o original ficou intocado
+    assert len(dubbed) == 1
+    assert dubbed[0]["title"] == "Breaking Bad S01 BluRay Dublado"
+    assert dubbed[0]["coverage"] == ["S01E01", "S01E02"]
+    orig = [t for t in job["torrents"] if t["role"] == "original"]
+    assert orig[0]["coverage"] == ["S01E01", "S01E02"]
+
+
+def test_manual_torrents_explicito_vence_auto(temp_db):
+    job = _job()
+    job["torrents"] = [_torrent(0, "dubbed", ["S01E01", "S01E02"], "auto plano")]
+    pack = _pack_cand("a", "Breaking Bad S01 WEB-DL Dublado")
+    avulso = _pack_cand("b", "Breaking Bad S01E02 BluRay Dublado")
+    job["search_tv"]["dubbed"] = {"S01E01": [pack, avulso]}
+    pipeline._apply_manual(job, {"torrents": [
+        {"candidate_id": "a", "role": "dubbed", "episodes": "auto"},
+        # E02 explícito no avulso: sai do auto do pack
+        {"candidate_id": "b", "role": "dubbed", "episodes": ["S01E02"]},
+    ]})
+    by_title = {t["title"]: t["coverage"] for t in job["torrents"]
+                if t["role"] == "dubbed"}
+    assert by_title["Breaking Bad S01 WEB-DL Dublado"] == ["S01E01"]
+    assert by_title["Breaking Bad S01E02 BluRay Dublado"] == ["S01E02"]
+
+
+def test_manual_torrents_titulo_sem_match_e_aceito(temp_db):
+    # atribuição que o TÍTULO não indica é decisão explícita do usuário
+    job = _job()
+    job["torrents"] = []
+    cand = _pack_cand("a", "Breaking Bad 1080p Coletânea Dublado")
+    job["search_tv"]["dubbed"] = {"S01E01": [cand]}
+    pipeline._apply_manual(job, {"torrents": [
+        {"candidate_id": "a", "role": "dubbed", "episodes": ["S01E01", "S01E02"]},
+    ]})
+    dubbed = [t for t in job["torrents"] if t["role"] == "dubbed"]
+    assert dubbed[0]["coverage"] == ["S01E01", "S01E02"]
+
+
+def test_manual_torrents_episodio_fora_do_pedido(temp_db):
+    job = _job()
+    cand = _pack_cand("a", "Breaking Bad S01 Dublado")
+    job["search_tv"]["dubbed"] = {"S01E01": [cand]}
+    with pytest.raises(ValueError, match="fora do pedido"):
+        pipeline._apply_manual(job, {"torrents": [
+            {"candidate_id": "a", "role": "dubbed", "episodes": ["S09E09"]},
+        ]})
+
+
+# -------------------- troca manual de torrent --------------------
+
+def test_find_replacement_mesma_cobertura(temp_db):
+    job = _job()
+    stalled = _torrent(0, "original", ["S01E01", "S01E02"])
+    job["torrents"] = [stalled]
+    reserva_boa = _pack_cand("r1", "Breaking Bad S01 720p WEB-DL")
+    reserva_parcial = _pack_cand("r2", "Breaking Bad S01E01 1080p")
+    # a parcial vem primeiro no rank, mas não cobre S01E02 -> pula
+    job["search_tv"]["original"] = {"S01E01": [reserva_parcial, reserva_boa]}
+    nxt = pipeline._find_replacement(job, stalled)
+    assert nxt["id"] == "r1"
+
+
+def test_switch_torrent_valida_estado_e_cobertura(temp_db):
+    import asyncio
+    job = _job()
+    job["status"] = "downloading"
+    t = _torrent(0, "original", ["S01E01", "S01E02"])
+    t["state"] = "downloading"
+    job["torrents"] = [t]
+    parcial = _pack_cand("p", "Breaking Bad S01E01 1080p")
+    job["search_tv"]["original"] = {"S01E01": [parcial]}
+    import services.jobs as jobs_mod
+    jobs_mod._jobs[job["id"]] = job
+    try:
+        # candidato que não cobre tudo é recusado com a lista do que falta
+        with pytest.raises(ValueError, match="S01E02"):
+            asyncio.run(pipeline.switch_torrent(job["id"], 0, "p"))
+        # sem reserva compatível, "tentar próximo" explica
+        with pytest.raises(ValueError, match="reserva"):
+            asyncio.run(pipeline.switch_torrent(job["id"], 0, None))
+        # torrent inexistente
+        with pytest.raises(ValueError, match="t9"):
+            asyncio.run(pipeline.switch_torrent(job["id"], 9, None))
+    finally:
+        jobs_mod._jobs.pop(job["id"], None)
+
+
+# -------------------- gate de lacunas -> editar seleção --------------------
+
+def test_gaps_edit_volta_para_o_manual(temp_db):
+    import asyncio
+    import services.jobs as jobs_mod
+    job = _job()
+    job["mode"] = "auto"
+    job["status"] = "awaiting"
+    job["awaiting"] = {"reason": "gaps_confirm", "payload": {"missing": []}}
+    job["torrents"] = [_torrent(0, "original", ["S01E01"])]
+    jobs_mod._jobs[job["id"]] = job
+
+    async def go():
+        await pipeline.resolve(job["id"], "gaps_confirm", {"edit": True})
+        task = jobs_mod._tasks.get(job["id"])
+        if task:
+            await task
+
+    try:
+        asyncio.run(go())
+        assert job["mode"] == "manual"
+        assert job["status"] == "awaiting"
+        assert job["awaiting"]["reason"] == "manual_pick"
+        # a visão invertida vai no payload do gate reaberto
+        assert "by_torrent" in job["awaiting"]["payload"]
+    finally:
+        jobs_mod._jobs.pop(job["id"], None)
+
+
 # -------------------- validação de temporadas pedidas --------------------
 
 def test_temporada_0_especiais_e_aceita():
