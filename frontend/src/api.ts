@@ -137,6 +137,9 @@ export interface JobGate {
   payload: {
     /** gaps_confirm */
     missing?: { episode: string; name: string | null; missing: string[] }[]
+    /** gaps_confirm no MEIO do download: os arquivos reais de um pack
+     *  revelaram que ele não tinha episódios atribuídos pelo título. */
+    mid_download?: boolean
     /** incompatible_torrents */
     torrents?: {
       n: number

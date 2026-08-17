@@ -371,3 +371,60 @@ def test_search_ref_com_order_map(temp_db):
     assert pipeline._search_ref(job, "S01E01") == (1, 1)
     assert pipeline._aired_ref(job, (1, 5)) == (1, 2)
     assert pipeline._aired_ref(job, (1, 1)) == (1, 1)
+
+
+# -------------------- match fino pelos arquivos do pack --------------------
+
+def test_match_pack_files_revela_o_que_o_pack_tem(temp_db):
+    # regressão real: "1ª Temporada Completa" com o ª corrompido pelo Jackett
+    # foi lido como série completa e recebeu S01-S04; os ARQUIVOS só tinham S01
+    job = _job()
+    job["episodes"]["S02E01"] = dict(job["episodes"]["S01E01"], season=2, episode=1)
+    t = _torrent(0, "dubbed", ["S01E01", "S01E02", "S02E01"],
+                 "Mr Robot 2016   1�� Temporada Completa [WEB DL] BLUDV")
+    files = [
+        {"index": 0, "name": "Pack/EP01/Mr.Robot.S01E01.720p.DUAL.mkv"},
+        {"index": 1, "name": "Pack/EP01/Mr.Robot.S01E01.720p.DUAL.srt"},
+        {"index": 2, "name": "Pack/EP02/Mr.Robot.S01E02.720p.DUAL.mkv"},
+        {"index": 3, "name": "Pack/extras/making-of.mkv"},
+    ]
+    keep, drop, found = pipeline._match_pack_files(job, t, files)
+    assert found == {"S01E01", "S01E02"}          # S02E01 NÃO está no pack
+    assert [f["index"] for f in keep] == [0, 1, 2]  # vídeo + legenda dos pedidos
+    assert [f["index"] for f in drop] == [3]
+
+
+def test_parse_ordinal_corrompido_e_temporada_nao_serie_completa():
+    from services.series import parse
+    c = parse.parse_coverage("Mr Robot 2016   1���� Temporada Completa [WEB DL] BLUDV")
+    assert c.kind == "season_pack" and c.seasons == {1}
+    c = parse.parse_coverage("Mr Robot 2016 1ª Temporada Completa [WEB-DL] BLUDV")
+    assert c.kind == "season_pack" and c.seasons == {1}
+
+
+def test_apply_gaps_mantem_torrent_ja_baixado(temp_db):
+    job = _job()
+    done = _torrent(0, "dubbed", ["S01E02"], "pack que só tinha o E02")
+    done["state"] = "done"
+    pend = _torrent(1, "original", ["S01E02"])  # pendente e só por esse ep
+    job["torrents"] = [done, pend]
+    # E01 sem ninguém -> vira skipped; E02 continua coberto
+    pipeline._apply_gaps(job)
+    assert job["episodes"]["S01E01"]["state"] == "skipped_missing"
+    assert [t["n"] for t in job["torrents"]] == [0, 1]
+
+
+def test_manual_torrents_mid_download_preserva_o_que_ja_baixou(temp_db):
+    job = _job()
+    done = _torrent(0, "dubbed", ["S01E01"], "BB S01E01 Dublado")
+    done["state"] = "done"
+    job["torrents"] = [done]
+    cand = _pack_cand("x", "Breaking Bad S01E02 WEB-DL Dublado")
+    job["search_tv"]["dubbed"] = {"S01E02": [cand]}
+    pipeline._apply_manual(job, {"torrents": [
+        {"candidate_id": "x", "role": "dubbed", "episodes": ["S01E02"]},
+    ]})
+    by_n = {t["n"]: t for t in job["torrents"]}
+    assert by_n[0]["state"] == "done" and by_n[0]["coverage"] == ["S01E01"]
+    assert any(t["coverage"] == ["S01E02"] and t["state"] == "pending"
+               for t in job["torrents"])

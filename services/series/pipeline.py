@@ -768,12 +768,15 @@ def _apply_gaps(job: dict):
         key = ep_key(s, e)
         if any(key not in covered[r] for r in ROLES):
             job["episodes"][key]["state"] = "skipped_missing"
-    # torrents que só existiam por esses episódios saem do plano
+    # torrents que só existiam por esses episódios saem do plano — só os que
+    # ainda NÃO foram enviados (pending); um que já baixa/baixou fica no plano
+    # para o watchdog/limpeza continuarem enxergando-o
     for t in job["torrents"]:
         t["coverage"] = [k for k in t["coverage"]
                          if job["episodes"][k]["state"] not in
                          ("skipped_future", "skipped_missing")]
-    job["torrents"] = [t for t in job["torrents"] if t["coverage"]]
+    job["torrents"] = [t for t in job["torrents"]
+                       if t["coverage"] or t["state"] != "pending"]
 
 
 def _apply_replace(job: dict, decision: dict):
@@ -964,13 +967,33 @@ def _apply_manual_torrents(job: dict, decision: dict):
             entry["eps"] = {k for k in entry["eps"]
                             if taken.get(k, key) == key}
 
-    # papel com seleção: o plano daquele papel É a seleção
-    job["torrents"] = [t for t in job["torrents"]
-                       if t["role"] not in roles_touched]
+    # papel com seleção: o plano daquele papel É a seleção — entre os torrents
+    # ainda PENDENTES. Torrent que já baixa/baixou (edição no meio do download,
+    # depois de o pack revelar que não tinha tudo) fica, mas perde os episódios
+    # que a nova seleção assume; se um candidato escolhido JÁ está no plano,
+    # só a cobertura dele é atualizada
+    newly: dict[str, set[str]] = {}
     for (role, _ident), entry in chosen.items():
+        newly.setdefault(role, set()).update(entry["eps"])
+    kept = []
+    for t in job["torrents"]:
+        if t["role"] not in roles_touched:
+            kept.append(t)
+            continue
+        if t["state"] == "pending":
+            continue  # substituído pela seleção
+        t["coverage"] = [k for k in t["coverage"] if k not in newly[t["role"]]]
+        kept.append(t)
+    job["torrents"] = kept
+    for (role, ident), entry in chosen.items():
         if not entry["eps"]:
             continue
         cand = entry["cand"]
+        existing = next((t for t in job["torrents"] if t["role"] == role
+                         and parse.torrent_identity(t) == ident), None)
+        if existing:
+            existing["coverage"] = sorted(set(existing["coverage"]) | entry["eps"])
+            continue
         n = max((t["n"] for t in job["torrents"]), default=-1) + 1
         job["torrents"].append({
             "n": n, "role": role, "tag": f"dl-{job['id']}-t{n}",
@@ -1112,6 +1135,15 @@ async def _wait_downloads(job: dict):
                                     f"min e sem reserva — seguindo esperando")
                         st["warned"] = True
             job["detail"] = _download_detail(job)
+            # cobertura encolheu pelos arquivos reais e sobrou episódio sem
+            # ninguém? pausa no gate de lacunas (os torrents seguem baixando
+            # no qBittorrent — só o watchdog para até a decisão)
+            if not job.get("_gaps_accepted") and _collect_gaps(job):
+                gaps = _collect_gaps(job)
+                _gate(job, "gaps_confirm", {"missing": gaps, "mid_download": True},
+                      f"⚠️ {len(gaps)} episódio(s) ficaram sem torrent (o pack "
+                      f"não os contém) — decidir antes de continuar")
+                return
             if time.monotonic() - last_persist >= config.PROGRESS_PERSIST_SECONDS:
                 store.upsert_job(job)
                 last_persist = time.monotonic()
@@ -1145,6 +1177,26 @@ def _apply_force_continue(job: dict):
                 "(continuam no qBittorrent)")
 
 
+def _match_pack_files(job: dict, t: dict, files: list[dict]
+                      ) -> tuple[list[dict], list[dict], set[str]]:
+    """Cruza os arquivos REAIS do pack com a cobertura atribuída ao torrent.
+
+    Retorna (manter, desmarcar, episódios com vídeo de fato presente). Um
+    arquivo é mantido se o nome traz SxxEyy de algum episódio atribuído
+    (vídeo + legendas dele); só arquivo de VÍDEO conta como "presente"."""
+    wanted = {_search_ref(job, k): k for k in t["coverage"]}
+    keep, drop = [], []
+    found: set[str] = set()
+    for f in files:
+        name = (f.get("name") or "").rsplit("/", 1)[-1]
+        refs = parse.parse_episode_refs(name)
+        hit = [wanted[r] for r in refs if r in wanted]
+        if hit and Path(name).suffix.lower() in jobs.VIDEO_EXTENSIONS:
+            found.update(hit)
+        (keep if hit else drop).append(f)
+    return keep, drop, found
+
+
 async def _ensure_file_selection(job: dict, t: dict):
     """Pack: baixa só os arquivos dos episódios atendidos por este torrent.
 
@@ -1161,12 +1213,7 @@ async def _ensure_file_selection(job: dict, t: dict):
     files = await jobs._qbit.files(t["hash"])
     if not files:
         return  # metadados ainda não chegaram; tenta no próximo tick
-    wanted = {_search_ref(job, k) for k in t["coverage"]}
-    keep, drop = [], []
-    for f in files:
-        name = (f.get("name") or "").rsplit("/", 1)[-1]
-        refs = parse.parse_episode_refs(name)
-        (keep if any(r in wanted for r in refs) else drop).append(f)
+    keep, drop, found = _match_pack_files(job, t, files)
     if not keep:
         t["selected_files"] = []
         jobs._event(job, "qbit",
@@ -1178,6 +1225,23 @@ async def _ensure_file_selection(job: dict, t: dict):
     jobs._event(job, "qbit",
                 f"t{t['n']}: pack com {len(files)} arquivo(s) — baixando "
                 f"{len(keep)} ({len(drop)} desmarcados)")
+    # MATCH FINO PELOS ARQUIVOS: o título prometeu a cobertura, os arquivos
+    # dizem a verdade. Episódio atribuído que não tem vídeo no pack SAI da
+    # cobertura agora — vira lacuna (gate) em vez de "arquivo não encontrado"
+    # no fim do download. Ex.: "1ª Temporada Completa" com o ª corrompido lido
+    # como série completa: só a S01 está lá.
+    missing = [k for k in t["coverage"] if k not in found]
+    if missing:
+        t["coverage"] = [k for k in t["coverage"] if k in found]
+        t["coverage_shrunk"] = sorted(set(t.get("coverage_shrunk") or []) | set(missing))
+        jobs._event(job, "qbit",
+                    f"⚠️ t{t['n']}: o pack NÃO contém {len(missing)} episódio(s) "
+                    f"atribuído(s) pelo título ({', '.join(missing[:8])}"
+                    f"{'…' if len(missing) > 8 else ''}) — removidos da cobertura")
+        # lacunas novas passam pelo gate de novo, mesmo que o usuário já
+        # tenha aceitado lacunas antes (são OUTRAS lacunas)
+        job.pop("_gaps_accepted", None)
+        store.upsert_job(job)
 
 
 async def _readd(job: dict, t: dict):

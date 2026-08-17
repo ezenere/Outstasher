@@ -56,9 +56,14 @@ def parse_episode_refs(title: str) -> list[tuple[int, int]]:
 # "S01" solto (sem Exx logo depois — senão é referência de episódio)
 _SEASON_SOLO_RE = re.compile(r"(?<![\w])[sS](\d{1,2})(?![\d]|[ ._-]?[eE]\d)")
 # "Season 1" / "Temporada 1" / "1ª temporada" / "3a temporada"
+# "1ª temporada": entre o número e a palavra pode vir o ordinal (ª/a/°) OU o
+# LIXO que o Jackett gera ao corromper o "ª" (U+FFFD repetido, "Âª"...) — por
+# isso [^\d\s]{0,6}: um bloco curto de qualquer coisa que não seja dígito nem
+# espaço (o "ª" é \w em regex Unicode, então [^\w\s] não serviria). Sem isso
+# "1���� Temporada Completa" caía em "Completa" = série inteira.
 _SEASON_WORD_RE = re.compile(
     r"\bseason[ ._-]?(\d{1,2})\b|\btemporada[ ._-]?(\d{1,2})\b"
-    r"|\b(\d{1,2})[ªa°]?[ ._-]?temporada\b", re.I)
+    r"|\b(\d{1,2})[^\d\s]{0,6}[ ._-]?temporada\b", re.I)
 # ranges: "S01-S05", "S01 a S03", "Seasons 1-5", "Temporadas 1 a 5"
 _SEASON_RANGE_RE = re.compile(
     r"(?<![\w])[sS](\d{1,2})[ ._-]?(?:-|a|~|ate|até|to)[ ._-]?[sS]?(\d{1,2})(?![\w])"

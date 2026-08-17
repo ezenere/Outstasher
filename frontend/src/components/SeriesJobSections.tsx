@@ -361,9 +361,11 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
           <WarningTriangle width={16} height={16} /> Episódios sem torrent
         </h2>
         <p className="text-sm text-zinc-300">
-          Não encontrei torrent para todos os episódios pedidos. Se continuar,
-          os episódios abaixo ficam de fora (dá para buscá-los de novo depois
-          num novo job).
+          {gate.payload.mid_download
+            ? 'Os ARQUIVOS reais de um pack mostraram que ele não contém episódios que o título prometia — esses episódios ficaram sem torrent. Os downloads em andamento continuam; escolha o que fazer com os que faltam.'
+            : 'Não encontrei torrent para todos os episódios pedidos.'}
+          {' '}Se continuar, os episódios abaixo ficam de fora (dá para buscá-los
+          de novo depois num novo job) — ou edite a seleção para cobri-los.
         </p>
         <ul className="mt-2 space-y-1 text-sm">
           {missing.map((m) => (
