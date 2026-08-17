@@ -304,6 +304,7 @@ class CancelRequest(BaseModel):
 class DestinationRequest(BaseModel):
     label: str
     path: str
+    media: str = "movie"  # movie | tv — bibliotecas separadas
     is_default: bool = False
 
 
@@ -352,15 +353,24 @@ async def delete_convert_preset(preset_id: int):
 # -------------------- destinos --------------------
 
 @app.get("/api/destinations")
-async def list_destinations():
-    return [_with_disk(d) for d in store.list_destinations()]
+async def list_destinations(media: str | None = None):
+    """Destinos, opcionalmente filtrados por mídia — filmes e séries têm
+    bibliotecas separadas (?media=movie|tv)."""
+    if media is not None and media not in ("movie", "tv"):
+        raise HTTPException(400, "media deve ser 'movie' ou 'tv'")
+    dests = (store.list_destinations_by_media(media) if media
+             else store.list_destinations())
+    return [_with_disk(d) for d in dests]
 
 
 @app.post("/api/destinations")
 async def add_destination(req: DestinationRequest):
     if not req.label.strip() or not req.path.strip():
         raise HTTPException(400, "Nome e caminho são obrigatórios")
-    dest = store.add_destination(req.label.strip(), req.path.strip(), req.is_default)
+    if req.media not in ("movie", "tv"):
+        raise HTTPException(400, "media deve ser 'movie' ou 'tv'")
+    dest = store.add_destination(req.label.strip(), req.path.strip(),
+                                 req.is_default, req.media)
     catalog.invalidate_library()  # os destinos definem o que conta como coleção
     return _with_disk(dest)
 
@@ -369,7 +379,10 @@ async def add_destination(req: DestinationRequest):
 async def update_destination(dest_id: int, req: DestinationRequest):
     if not req.label.strip() or not req.path.strip():
         raise HTTPException(400, "Nome e caminho são obrigatórios")
-    dest = store.update_destination(dest_id, req.label.strip(), req.path.strip(), req.is_default)
+    if req.media not in ("movie", "tv"):
+        raise HTTPException(400, "media deve ser 'movie' ou 'tv'")
+    dest = store.update_destination(dest_id, req.label.strip(), req.path.strip(),
+                                    req.is_default, req.media)
     if not dest:
         raise HTTPException(404, "Destino não encontrado")
     catalog.invalidate_library()

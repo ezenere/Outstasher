@@ -456,9 +456,11 @@ def _norm_title(text: str) -> str:
 
 
 def _scan_library() -> frozenset[tuple[str, str | None]]:
-    """(titulo_normalizado, ano|None) de cada pasta de filme em cada destino."""
+    """(titulo_normalizado, ano|None) de cada pasta de filme nos destinos de
+    FILMES — as bibliotecas de filme e série são separadas, então uma pasta
+    parecida num destino de séries não conta como "filme na coleção"."""
     keys = set()
-    for dest in store.list_destinations():
+    for dest in store.list_destinations_by_media("movie"):
         root = Path(dest["path"])
         try:
             if not root.is_dir():
@@ -515,9 +517,10 @@ _series_cache: dict = {"at": None, "entries": ()}
 def _scan_series() -> tuple[dict, ...]:
     """Um registro por pasta de série: {tmdb_id, norm_title, year,
     seasons: {temporada: set(episódios)}} — episódios lidos do SxxEyy nos
-    nomes de arquivo dentro das subpastas Season NN."""
+    nomes de arquivo dentro das subpastas Season NN. Só os destinos de
+    SÉRIES entram (bibliotecas separadas)."""
     entries = []
-    for dest in store.list_destinations():
+    for dest in store.list_destinations_by_media("tv"):
         root = Path(dest["path"])
         try:
             if not root.is_dir():

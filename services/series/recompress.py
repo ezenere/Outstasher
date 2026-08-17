@@ -42,7 +42,7 @@ async def create_recompress_batch(destination_id: int | None, folder: str,
             src = catalog.media_path(destination_id, folder, rel)
             srcs.append((rel, src))
         dest = (store.get_destination(destination_id) if destination_id
-                else store.default_destination())
+                else store.default_destination("tv"))
         if dest is None:
             raise ValueError("Nenhum destino cadastrado")
         return opts, srcs, dest

@@ -346,6 +346,8 @@ export interface Destination {
   id: number
   label: string
   path: string
+  /** Biblioteca a que o destino pertence (filmes e séries são separadas). */
+  media?: 'movie' | 'tv'
   is_default: boolean
   disk?: DiskInfo | null
 }

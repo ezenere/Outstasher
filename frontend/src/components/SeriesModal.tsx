@@ -75,7 +75,7 @@ export default function SeriesModal({
       .then((r) => setOwned(r.seasons))
       .catch(() => {})
     api<Language[]>('/api/languages').then(setLanguages).catch(() => {})
-    api<Destination[]>('/api/destinations')
+    api<Destination[]>('/api/destinations?media=tv')
       .then((ds) => {
         setDestinations(ds)
         setDestId(ds.find((d) => d.is_default)?.id ?? ds[0]?.id ?? null)

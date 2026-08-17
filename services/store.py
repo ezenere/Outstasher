@@ -55,9 +55,17 @@ def init():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             label TEXT NOT NULL,
             path TEXT NOT NULL,
+            media TEXT NOT NULL DEFAULT 'movie',
             is_default INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
         )""")
+    # migração de bancos anteriores à separação filme/série: a coluna `media`
+    # aparece via ALTER (CREATE IF NOT EXISTS não altera tabela existente).
+    # Destinos antigos viram 'movie' — era o único uso possível até então.
+    cols = {r[1] for r in _conn.execute("PRAGMA table_info(destinations)")}
+    if "media" not in cols:
+        _conn.execute("ALTER TABLE destinations "
+                      "ADD COLUMN media TEXT NOT NULL DEFAULT 'movie'")
     _conn.execute("""
         CREATE TABLE IF NOT EXISTS torrent_targets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -187,53 +195,79 @@ def delete_convert_preset(preset_id: int) -> bool:
 def list_destinations() -> list[dict]:
     with _lock:
         rows = _conn.execute(
-            "SELECT id, label, path, is_default FROM destinations "
+            "SELECT id, label, path, media, is_default FROM destinations "
             "ORDER BY is_default DESC, label COLLATE NOCASE").fetchall()
-    return [{"id": r[0], "label": r[1], "path": r[2], "is_default": bool(r[3])} for r in rows]
+    return [_dest_row(r) for r in rows]
+
+
+def _dest_row(r) -> dict:
+    return {"id": r[0], "label": r[1], "path": r[2], "media": r[3],
+            "is_default": bool(r[4])}
+
+
+def list_destinations_by_media(media: str) -> list[dict]:
+    """Destinos de UMA mídia ('movie'/'tv') — filmes e séries têm bibliotecas
+    separadas; cada fluxo só enxerga os destinos da própria mídia."""
+    with _lock:
+        rows = _conn.execute(
+            "SELECT id, label, path, media, is_default FROM destinations "
+            "WHERE media = ? ORDER BY is_default DESC, label COLLATE NOCASE",
+            (media,)).fetchall()
+    return [_dest_row(r) for r in rows]
 
 
 def get_destination(dest_id: int) -> dict | None:
     with _lock:
         r = _conn.execute(
-            "SELECT id, label, path, is_default FROM destinations WHERE id = ?",
+            "SELECT id, label, path, media, is_default FROM destinations WHERE id = ?",
             (dest_id,)).fetchone()
-    return {"id": r[0], "label": r[1], "path": r[2], "is_default": bool(r[3])} if r else None
+    return _dest_row(r) if r else None
 
 
-def default_destination() -> dict | None:
+def default_destination(media: str = "movie") -> dict | None:
+    """Destino padrão DA MÍDIA (o is_default é por mídia)."""
     with _lock:
         r = _conn.execute(
-            "SELECT id, label, path, is_default FROM destinations "
-            "ORDER BY is_default DESC, id LIMIT 1").fetchone()
-    return {"id": r[0], "label": r[1], "path": r[2], "is_default": bool(r[3])} if r else None
+            "SELECT id, label, path, media, is_default FROM destinations "
+            "WHERE media = ? ORDER BY is_default DESC, id LIMIT 1",
+            (media,)).fetchone()
+    return _dest_row(r) if r else None
 
 
-def add_destination(label: str, path: str, is_default: bool = False) -> dict:
+def add_destination(label: str, path: str, is_default: bool = False,
+                    media: str = "movie") -> dict:
     from datetime import datetime
     with _lock:
         if is_default:
-            _conn.execute("UPDATE destinations SET is_default = 0")
+            # o padrão é POR mídia: marcar um destino de série como padrão não
+            # desmarca o padrão dos filmes
+            _conn.execute("UPDATE destinations SET is_default = 0 WHERE media = ?",
+                          (media,))
         cur = _conn.execute(
-            "INSERT INTO destinations (label, path, is_default, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (label, path, 1 if is_default else 0,
+            "INSERT INTO destinations (label, path, media, is_default, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (label, path, media, 1 if is_default else 0,
              datetime.now().isoformat(timespec="seconds")))
         _conn.commit()
         dest_id = cur.lastrowid
     return get_destination(dest_id)
 
 
-def update_destination(dest_id: int, label: str, path: str, is_default: bool) -> dict | None:
+def update_destination(dest_id: int, label: str, path: str, is_default: bool,
+                       media: str | None = None) -> dict | None:
     with _lock:
-        exists = _conn.execute(
-            "SELECT 1 FROM destinations WHERE id = ?", (dest_id,)).fetchone()
-        if not exists:
+        row = _conn.execute(
+            "SELECT media FROM destinations WHERE id = ?", (dest_id,)).fetchone()
+        if not row:
             return None
+        media = media or row[0]
         if is_default:
-            _conn.execute("UPDATE destinations SET is_default = 0")
+            _conn.execute("UPDATE destinations SET is_default = 0 WHERE media = ?",
+                          (media,))
         _conn.execute(
-            "UPDATE destinations SET label = ?, path = ?, is_default = ? WHERE id = ?",
-            (label, path, 1 if is_default else 0, dest_id))
+            "UPDATE destinations SET label = ?, path = ?, media = ?, "
+            "is_default = ? WHERE id = ?",
+            (label, path, media, 1 if is_default else 0, dest_id))
         _conn.commit()
     return get_destination(dest_id)
 

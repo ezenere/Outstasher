@@ -15,12 +15,12 @@ def _make_series(root: Path, folder: str, seasons: dict[int, list[int]]):
     return base
 
 
-def _dest(temp_db, tmp_path) -> int:
-    dests = temp_db.list_destinations()
+def _dest(temp_db, tmp_path, media: str = "movie") -> int:
+    dests = temp_db.list_destinations_by_media(media)
     if dests:
-        temp_db.update_destination(dests[0]["id"], "t", str(tmp_path), True)
+        temp_db.update_destination(dests[0]["id"], "t", str(tmp_path), True, media)
         return dests[0]["id"]
-    return temp_db.add_destination("t", str(tmp_path), True)["id"]
+    return temp_db.add_destination("t", str(tmp_path), True, media)["id"]
 
 
 def test_list_items_detecta_serie(temp_db, tmp_path):
@@ -47,7 +47,8 @@ def test_item_detail_agrupa_por_temporada(temp_db, tmp_path):
 
 
 def test_owned_episodes_por_tmdbid_e_por_titulo(temp_db, tmp_path):
-    dest_id = _dest(temp_db, tmp_path)
+    # o índice de séries só olha destinos de SÉRIES (bibliotecas separadas)
+    dest_id = _dest(temp_db, tmp_path, media="tv")
     assert dest_id
     _make_series(tmp_path, "Breaking Bad (2008) [tmdbid-1396]",
                  {1: [1, 2, 3], 2: [5]})

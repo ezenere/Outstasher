@@ -591,10 +591,15 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
     dest = None
     if not download_only:
         dest = store.get_destination(destination_id) if destination_id else None
+        if dest is not None and dest.get("media", "movie") != "movie":
+            raise ValueError(
+                f"O destino '{dest['label']}' é da biblioteca de SÉRIES — "
+                f"filmes vão para um destino de filmes")
         if dest is None:
-            dest = store.default_destination()
+            dest = store.default_destination("movie")
         if dest is None:
-            raise ValueError("Nenhum destino cadastrado — cadastre uma pasta de destino antes")
+            raise ValueError("Nenhum destino de FILMES cadastrado — cadastre "
+                             "uma pasta de destino antes")
 
     # destino dos torrents e opcional: sem ele, usa pasta padrao do qBittorrent
     # e nao traduz o content_path (comportamento antigo do .env)
@@ -693,10 +698,14 @@ async def create_manual(tmdb_id: int, language: str, video_path: str, audio_path
         _jobs.pop(old_id, None)
         store.delete_job(old_id)
     dest = store.get_destination(destination_id) if destination_id else None
+    if dest is not None and dest.get("media", "movie") != "movie":
+        raise ValueError(f"O destino '{dest['label']}' é da biblioteca de "
+                         f"SÉRIES — filmes vão para um destino de filmes")
     if dest is None:
-        dest = store.default_destination()
+        dest = store.default_destination("movie")
     if dest is None:
-        raise ValueError("Nenhum destino cadastrado — cadastre uma pasta de destino antes")
+        raise ValueError("Nenhum destino de FILMES cadastrado — cadastre "
+                         "uma pasta de destino antes")
 
     job = {
         "id": uuid.uuid4().hex[:10],

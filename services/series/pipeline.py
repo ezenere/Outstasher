@@ -87,10 +87,15 @@ async def create_series(tmdb_id: int, language: str,
         convert = transcode.validate(convert).to_dict()
 
     dest = store.get_destination(destination_id) if destination_id else None
+    if dest is not None and dest.get("media", "movie") != "tv":
+        raise ValueError(
+            f"O destino '{dest['label']}' é da biblioteca de FILMES — séries "
+            f"vão para um destino de séries (Configurações → Destinos)")
     if dest is None:
-        dest = store.default_destination()
+        dest = store.default_destination("tv")
     if dest is None:
-        raise ValueError("Nenhum destino cadastrado — cadastre uma pasta de destino antes")
+        raise ValueError("Nenhum destino de SÉRIES cadastrado — crie um em "
+                         "Configurações → Destinos (mídia: Séries)")
     target = store.get_torrent_target(torrent_target_id) if torrent_target_id else None
     if target is None:
         target = store.default_torrent_target()
