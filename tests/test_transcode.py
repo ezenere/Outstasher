@@ -297,7 +297,10 @@ def test_hw_plan_or_reject():
                 # serem inertes sob ICQ na Arc (comprovado empiricamente)
                 assert "-global_quality" in p.args and "-crf" not in p.args
                 assert "-extbrc" not in p.args and "-look_ahead_depth" not in p.args
-            assert "-g" in p.args    # GOP longo (default de HW é curto)
+            # keyframe a cada 2 s (padrão de streaming), IDR forçado na GPU
+            gi = p.args.index("-g")
+            assert int(p.args[gi + 1]) == round(24 * 2)
+            assert ("-forced-idr" if hw == "nvenc" else "-forced_idr") in p.args
             assert "nv12" in p.args  # pix_fmt de HW (fonte 8-bit)
         else:
             with pytest.raises(ValueError, match="não está disponível"):
@@ -498,3 +501,18 @@ def test_describe_preset():
     o = tc.validate({"audio_codec": "aac", "preset": "veryslow"})
     assert tc.describe(o) == ["áudio AAC"]
     assert tc.describe({"video_codec": "av1", "video_bitrate": 3000}) == ["AV1", "3.0 Mbps"]
+
+
+def test_gop_2s_em_software(real_encoders):
+    """Keyframe a cada 2 s também no encoder de software (x264 recebe -g e
+    -keyint_min = fps*2; antes só a GPU tinha -g, e com 10 s)."""
+    if "libx264" not in real_encoders:
+        pytest.skip("sem libx264 neste ffmpeg")
+    vs = vstream(br=20_000_000)
+    p = tc.plan_video(probe(vs), vs, tc.validate(
+        {"video_codec": "h264", "quality_mode": "crf", "crf": 23}))
+    assert p.encode
+    fps = tc._fps_of(vs) or 24.0
+    gop = str(int(round(fps * tc.GOP_SECONDS)))
+    assert p.args[p.args.index("-g") + 1] == gop
+    assert p.args[p.args.index("-keyint_min") + 1] == gop

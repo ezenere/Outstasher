@@ -149,7 +149,9 @@ copy). Opções:
   real na GPU; a faixa de qualidade (CQ/ICQ, 1–51) e o 10-bit (não existe em
   H.264 por hardware) seguem o encoder escolhido. Na GPU o modo qualidade
   constante liga lookahead estendido (`-extbrc`/`-look_ahead_depth` no QSV,
-  `-multipass`/`-rc-lookahead`/AQ no NVENC) e GOP de ~10 s; o decode também
+  `-multipass`/`-rc-lookahead`/AQ no NVENC); todo re-encode sai com
+  keyframe a cada 2 s (padrão de streaming — seek instantâneo e cortes de
+  stream copy precisos), em software ou hardware; o decode também
   acontece na GPU quando possível (testado com o arquivo real, com fallback
   para software) — sem filtros de CPU no meio, os frames ficam na VRAM do
   decode ao encode. Fontes HDR10 têm a sinalização de cor reaplicada e os
