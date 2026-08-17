@@ -128,9 +128,10 @@ async def _align_episode(job: dict, key: str, ep: dict):
         return
 
     segs = edl_mod.segments(edl_dict)
-    # ffprobe é bloqueante (subprocess): fora do event loop, como o resto
-    dub_a, orig_a, _ch = await asyncio.to_thread(
-        _audio_indexes, dub, orig, job["language"])
+    # ffprobe é bloqueante (subprocess): fora do event loop, como o resto.
+    # Para MEDIR usa o par de mesma língua (faixa inglesa do dual áudio vs
+    # original): correlação bem mais nítida do que dublagem vs original
+    dub_a, orig_a = await asyncio.to_thread(_alignment_pair, dub, orig)
     log, _ = jobs._ffmpeg_hooks(job)
     segs = await asyncio.to_thread(
         refine.refine_offsets, segs, dub, dub_a, orig, orig_a, log)
@@ -158,6 +159,17 @@ async def _align_episode(job: dict, key: str, ep: dict):
     ep["state"] = "done"
     ep["error"] = None
     jobs._event(job, "merge", f"✅ {key} concluído (EDL): {ep['output']}")
+
+
+def _alignment_pair(dub_path: str, orig_path: str) -> tuple[int, int]:
+    """(a:N do dublado, a:N do original) para MEDIR offset — de preferência a
+    mesma língua nos dois (o dual áudio BR costuma trazer a faixa inglesa,
+    idêntica à do original: pico de correlação limpo)."""
+    probes = [merger.ffprobe_json(orig_path), merger.ffprobe_json(dub_path)]
+    for pr in probes:
+        merger.annotate_type_indexes(pr)
+    orig_a, dub_a = merger.choose_alignment_pair(probes, 0)
+    return dub_a, orig_a
 
 
 def _audio_indexes(dub_path: str, orig_path: str,
@@ -233,6 +245,24 @@ async def _merge_episode(job: dict, key: str, ep: dict, convert_opts):
     if _cls.check_duration_ratio(d_a, d_b):
         raise NeedsContentAlign(
             f"durações {d_a:.0f}s vs {d_b:.0f}s — caminho rápido não se aplica")
+    # o merge de filmes valida o offset em DUAS janelas (0:30 e ~60%); em série
+    # isso deixa passar junções de intervalo comercial (2 frames = 68 ms) e
+    # cenas cortadas no meio — caso real Mr Robot S01E01. Aqui: uma janela a
+    # cada 5 min, tolerância de lip sync (50 ms); qualquer desvio -> alinhador
+    # por conteúdo, que corta no silêncio certo em vez de aplicar um offset só
+    from services.series.align import refine as _ref
+    dub_a, orig_a = await asyncio.to_thread(
+        _alignment_pair, ep["src"]["dubbed"], ep["src"]["original"])
+    constant, pts = await asyncio.to_thread(
+        _ref.scan_constant_offset, ep["src"]["dubbed"], dub_a,
+        ep["src"]["original"], orig_a, min(d_a, d_b))
+    if not constant:
+        offs = ", ".join(f"{t / 60:.0f}min {o * 1000:+.0f}ms" for t, o, _ in pts)
+        raise NeedsContentAlign(f"offset varia ao longo do episódio ({offs})")
+    if pts:
+        jobs._event(job, "merge",
+                    f"{key}: offset constante em {len(pts)} janela(s) "
+                    f"({pts[0][1] * 1000:+.0f} ms) — caminho rápido")
     folder = naming.series_folder_name(m["original_title"], m["year"],
                                        job.get("tmdb_id"))
     season_dir = naming.season_dir_name(ep["season"])
