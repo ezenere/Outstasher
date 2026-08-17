@@ -95,15 +95,24 @@ function FramePreview({ jobId, episode, seg }: {
   episode: string
   seg: EdlSegment
 }) {
-  const [urls, setUrls] = useState<(string | null)[]>([null, null, null, null])
+  const six = seg.kind === 'replaced'
+  const [urls, setUrls] = useState<(string | null)[]>(
+    Array<string | null>(six ? 6 : 4).fill(null))
   useEffect(() => {
     let dead = false
     const ta = Math.max(0, seg.a_start)
     const tb = Math.max(0, seg.b_start ?? seg.a_start)
+    // fronteiras (antes/depois) — nas duas devem ser IGUAIS entre dublado e
+    // original se o alinhamento está certo. Em "cena substituída" entra também
+    // o MEIO do trecho: é aí que o conteúdo diverge (ou não — falso positivo)
     const specs: ['a' | 'b', number][] = [
       ['a', Math.max(0, ta - 1)], ['a', seg.a_end + 1],
       ['b', Math.max(0, tb - 1)], ['b', (seg.b_end ?? tb) + 1],
     ]
+    if (seg.kind === 'replaced') {
+      specs.splice(1, 0, ['a', (seg.a_start + seg.a_end) / 2])
+      specs.splice(4, 0, ['b', ((seg.b_start ?? ta) + (seg.b_end ?? ta)) / 2])
+    }
     const fetched: string[] = []
     Promise.all(specs.map(async ([side, t]) => {
       try {
@@ -121,9 +130,12 @@ function FramePreview({ jobId, episode, seg }: {
       fetched.forEach((u) => URL.revokeObjectURL(u))
     }
   }, [jobId, episode, seg])
-  const labels = ['dublado (antes)', 'dublado (depois)', 'original (antes)', 'original (depois)']
+  const labels = six
+    ? ['dublado (antes)', 'dublado (MEIO)', 'dublado (depois)',
+       'original (antes)', 'original (MEIO)', 'original (depois)']
+    : ['dublado (antes)', 'dublado (depois)', 'original (antes)', 'original (depois)']
   return (
-    <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+    <div className={`mt-2 grid grid-cols-2 gap-1.5 ${six ? 'sm:grid-cols-3' : 'sm:grid-cols-4'}`}>
       {urls.map((u, i) => (
         <figure key={i} className="min-w-0">
           {u ? (
@@ -155,8 +167,25 @@ export default function AlignmentReview({ job, onResolved }: {
   // "aplicar como regra": guarda a intenção para a PRÓXIMA ação escolhida
   const [asRule, setAsRule] = useState(false)
 
+  // trechos que pedem decisão, na ordem do episódio (a "listinha")
+  function decidable(ep: string): number[] {
+    return episodes[ep].segments
+      .map((s, i) => (DECIDABLE.has(s.kind) ? i : -1))
+      .filter((i) => i >= 0)
+  }
+
+  function step(ep: string, from: number, dir: 1 | -1): number | null {
+    const list = decidable(ep)
+    const pos = list.indexOf(from)
+    const next = list[pos + dir]
+    return next === undefined ? null : next
+  }
+
   function decide(ep: string, idx: number, action: ReviewAction) {
     setActions((cur) => ({ ...cur, [ep]: { ...(cur[ep] ?? {}), [idx]: action } }))
+    // decidiu -> vai para o próximo trecho automaticamente (fica no último)
+    const nxt = step(ep, idx, 1)
+    if (nxt !== null) setSel({ ep, idx: nxt })
     if (asRule) {
       const seg = episodes[ep].segments[idx]
       const dur = Math.max(seg.a_end - seg.a_start,
@@ -246,18 +275,80 @@ export default function AlignmentReview({ job, onResolved }: {
                 <Track edl={edl} side="b" selected={sel?.ep === key ? sel.idx : null}
                   onPick={(idx) => setSel({ ep: key, idx })} />
 
+                {/* listinha dos trechos que pedem decisão */}
+                <ol className="mt-1 divide-y divide-zinc-800/60 rounded-lg border border-zinc-800 text-xs">
+                  {decidable(key).map((i, pos) => {
+                    const s = edl.segments[i]
+                    const act = actions[key]?.[i] ?? s.action
+                    const active = sel?.ep === key && sel.idx === i
+                    return (
+                      <li key={i}>
+                        <button
+                          onClick={() => setSel({ ep: key, idx: i })}
+                          className={`flex w-full items-center gap-2 px-2 py-1 text-left hover:bg-zinc-800/60 ${
+                            active ? 'bg-zinc-800/80' : ''}`}
+                        >
+                          <span className="w-5 shrink-0 text-zinc-500 tabular-nums">{pos + 1}.</span>
+                          <span className={`h-2 w-2 shrink-0 rounded-full ${SEG_COLOR[s.kind] ?? 'bg-zinc-600'}`} />
+                          <span className="min-w-0 flex-1 truncate text-zinc-300">
+                            {KIND_LABEL[s.kind]}
+                            <span className="ml-1.5 text-zinc-500 tabular-nums">
+                              {fmtT(s.a_start)}–{fmtT(s.a_end)}
+                            </span>
+                          </span>
+                          {act ? (
+                            <span className="shrink-0 rounded bg-emerald-950 px-1.5 py-px text-[10px] text-emerald-300">
+                              {ACTIONS_FOR[s.kind]?.find((a) => a.value === act)?.label ?? act}
+                            </span>
+                          ) : s.kind === 'replaced' ? (
+                            <span className="shrink-0 text-[10px] text-red-400">sem decisão</span>
+                          ) : (
+                            <span className="shrink-0 text-[10px] text-zinc-500">padrão</span>
+                          )}
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ol>
+
                 {sel?.ep === key && (() => {
                   const seg = edl.segments[sel.idx]
                   const chosen = actions[key]?.[sel.idx] ?? seg.action
+                  const prev = step(key, sel.idx, -1)
+                  const nxt = step(key, sel.idx, 1)
+                  const pos = decidable(key).indexOf(sel.idx) + 1
                   return (
                     <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-900/50 p-2.5">
-                      <div className="text-sm font-medium text-zinc-200">
-                        {KIND_LABEL[seg.kind]}
-                        <span className="ml-2 text-xs font-normal text-zinc-500 tabular-nums">
-                          dub {fmtT(seg.a_start)}–{fmtT(seg.a_end)}
-                          {seg.b_start != null && <> · orig {fmtT(seg.b_start)}–{fmtT(seg.b_end ?? seg.b_start)}</>}
-                          {' '}· confiança {(seg.confidence * 100).toFixed(0)}%
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => prev !== null && setSel({ ep: key, idx: prev })}
+                          disabled={prev === null}
+                          title="Trecho anterior"
+                          className="rounded border border-zinc-700 px-2 py-0.5 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+                        >
+                          ‹ anterior
+                        </button>
+                        <span className="text-xs text-zinc-500 tabular-nums">
+                          {pos}/{decidable(key).length}
                         </span>
+                        <button
+                          onClick={() => nxt !== null && setSel({ ep: key, idx: nxt })}
+                          disabled={nxt === null}
+                          title="Próximo trecho"
+                          className="rounded border border-zinc-700 px-2 py-0.5 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+                        >
+                          próximo ›
+                        </button>
+                        <div className="min-w-0 flex-1 text-sm font-medium text-zinc-200">
+                          {KIND_LABEL[seg.kind]}
+                          <span className="ml-2 text-xs font-normal text-zinc-500 tabular-nums">
+                            dub {fmtT(seg.a_start)}–{fmtT(seg.a_end)}
+                            {seg.b_start != null && <> · orig {fmtT(seg.b_start)}–{fmtT(seg.b_end ?? seg.b_start)}</>}
+                            {seg.kind === 'replaced'
+                              ? <> · divergência do miolo {Math.round(seg.residual)}/64</>
+                              : <> · confiança {(seg.confidence * 100).toFixed(0)}%</>}
+                          </span>
+                        </div>
                       </div>
                       <FramePreview jobId={job.id} episode={key} seg={seg} />
                       <div className="mt-2 flex flex-wrap gap-3">

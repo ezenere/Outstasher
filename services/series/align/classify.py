@@ -111,10 +111,12 @@ def classify_runs(runs: list[tuple], D: np.ndarray, lo: np.ndarray,
         if kind == "replaced":
             seg.note = "conteúdo divergente com a mesma duração — revisar"
         segs.append(seg)
-    return _postprocess(segs, fps)
+    return _postprocess(segs, fps, D, lo)
 
 
-def _postprocess(segs: list[Segment], fps: float) -> list[Segment]:
+def _postprocess(segs: list[Segment], fps: float,
+                 D: np.ndarray | None = None,
+                 lo: np.ndarray | None = None) -> list[Segment]:
     """Funde fragmentação espúria e descarta ruído (ordem importa):
     1. descarta gaps < MIN_GAP_S (ruído de hash, não edição);
     2. funde vizinhos do mesmo tipo separados por < MERGE_ADJACENT_S;
@@ -155,14 +157,34 @@ def _postprocess(segs: list[Segment], fps: float) -> list[Segment]:
             prev.confidence = max(0.0, 1.0 - prev.residual / 32.0)
             continue
         merged.append(s)
-    return _fuse_replaced_pairs(merged)
+    return _fuse_replaced_pairs(merged, fps, D, lo)
 
 
 # par de gaps com durações parecidas dentro desta razão = substituição
 _REPLACED_RATIO = 1.4
 
 
-def _fuse_replaced_pairs(segs: list[Segment]) -> list[Segment]:
+def _diagonal_residual(a0: float, b0: float, n_frames: int, fps: float,
+                       D: np.ndarray | None, lo: np.ndarray | None) -> float:
+    """Hamming médio ao longo da diagonal (a0,b0)->(a0+n,b0+n), em frames.
+    64 (máximo) quando não há matriz — a UI mostra o número REAL de quão
+    diferente o miolo é, em vez de um 0% de confiança por construção."""
+    if D is None or lo is None or n_frames <= 0:
+        return 64.0
+    i0, j0 = int(round(a0 * fps)), int(round(b0 * fps))
+    vals = []
+    for k in range(n_frames):
+        i, j = i0 + k, j0 + k
+        if 0 <= i < D.shape[0]:
+            kk = j - int(lo[i])
+            if 0 <= kk < D.shape[1] and D[i, kk] != 255:
+                vals.append(float(D[i, kk]))
+    return float(np.mean(vals)) if vals else 64.0
+
+
+def _fuse_replaced_pairs(segs: list[Segment], fps: float = FPS,
+                         D: np.ndarray | None = None,
+                         lo: np.ndarray | None = None) -> list[Segment]:
     """gap_dub + gap_orig ADJACENTES com durações parecidas = cena SUBSTITUÍDA.
 
     Com gap afim barato, o DP não força uma diagonal de resíduo alto sobre
@@ -183,9 +205,14 @@ def _fuse_replaced_pairs(segs: list[Segment]) -> list[Segment]:
             if da > 0 and db > 0 and max(da, db) / min(da, db) <= _REPLACED_RATIO:
                 gd = s if s.kind == "gap_dub" else nxt
                 go = s if s.kind == "gap_orig" else nxt
+                # resíduo MEDIDO no miolo (diagonal do trecho): a confiança
+                # passa a refletir o quão diferente o conteúdo é de fato — a
+                # decisão continua humana, mas o número deixa de ser 0 fixo
+                n = int(round(min(da, db) * fps))
+                res = _diagonal_residual(gd.a_start, go.b_start or 0.0, n, fps, D, lo)
                 out.append(Segment(
                     "replaced", gd.a_start, gd.a_end, go.b_start, go.b_end,
-                    residual=64.0, confidence=0.0,
+                    residual=res, confidence=max(0.0, 1.0 - res / 32.0),
                     note="conteúdo divergente com duração parecida "
                          "(cena substituída?) — revisar"))
                 i += 2
