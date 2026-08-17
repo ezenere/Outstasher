@@ -209,7 +209,54 @@ def _fuse_replaced_pairs(segs: list[Segment], fps: float = FPS,
                 # passa a refletir o quão diferente o conteúdo é de fato — a
                 # decisão continua humana, mas o número deixa de ser 0 fixo
                 n = int(round(min(da, db) * fps))
-                res = _diagonal_residual(gd.a_start, go.b_start or 0.0, n, fps, D, lo)
+                # a diagonal "natural" do par pode estar alguns frames torta
+                # (o DP às vezes deixa um match de 1 frame entre os gaps, que o
+                # piso de ruído descarta) — mede numa vizinhança de offsets e
+                # fica com o melhor; é ESSE offset que vale se virar match
+                b_nat = go.b_start or 0.0
+                b_end = go.b_end or 0.0
+                span = min(8, int(round(abs(da - db) * fps)) + 2)
+                res, a0, b0, n = 64.0, gd.a_start, b_nat, 0
+                for d in range(-span, span + 1):
+                    # começa DENTRO dos dois gaps (avança um dos lados) e mede
+                    # até onde os dois ainda têm frames
+                    ca = gd.a_start + max(0, -d) / fps
+                    cb = b_nat + max(0, d) / fps
+                    nc = int(round(min(gd.a_end - ca, b_end - cb) * fps))
+                    if nc < 2:
+                        continue
+                    r = _diagonal_residual(ca, cb, nc, fps, D, lo)
+                    if r < res:
+                        res, a0, b0, n = r, ca, cb, nc
+                if D is not None and res <= RESIDUAL_REPLACED:
+                    # FALSO POSITIVO: o miolo é o MESMO conteúdo (plano parado
+                    # em duas encodes distintas, com resíduo um pouco acima do
+                    # limiar de match) — o DP achou mais barato contornar com
+                    # dois gaps do que atravessar pagando a penalidade frame a
+                    # frame. Vira MATCH com o offset do trecho; a diferença de
+                    # duração (a fatia que sobra de um dos lados) fica como o
+                    # gap pequeno que ela realmente é.
+                    dur = n / fps
+                    # sobras (< span frames) de cada lado viram gaps pequenos —
+                    # os menores que o piso de ruído somem no próximo passo
+                    if a0 > gd.a_start + 1e-6:
+                        out.append(Segment("gap_dub", gd.a_start, a0, b0, b0))
+                    if b0 > b_nat + 1e-6:
+                        out.append(Segment("gap_orig", a0, a0, b_nat, b0))
+                    out.append(Segment(
+                        "match", a0, a0 + dur, b0, b0 + dur,
+                        slope=1.0, residual=res,
+                        confidence=max(0.0, 1.0 - res / 32.0),
+                        offset=b0 - a0,
+                        note="par de gaps refundido: miolo igual"))
+                    if gd.a_end > a0 + dur + 1e-6:
+                        out.append(Segment("gap_dub", a0 + dur, gd.a_end,
+                                           b0 + dur, b0 + dur))
+                    if b_end > b0 + dur + 1e-6:
+                        out.append(Segment("gap_orig", a0 + dur, a0 + dur,
+                                           b0 + dur, b_end))
+                    i += 2
+                    continue
                 out.append(Segment(
                     "replaced", gd.a_start, gd.a_end, go.b_start, go.b_end,
                     residual=res, confidence=max(0.0, 1.0 - res / 32.0),
@@ -219,7 +266,12 @@ def _fuse_replaced_pairs(segs: list[Segment], fps: float = FPS,
                 continue
         out.append(s)
         i += 1
-    return out
+    # sobras de 1-2 frames criadas pela refusão são ruído, como qualquer gap
+    # abaixo do piso — some aqui (o piso já rodou antes desta etapa)
+    return [s for s in out
+            if not (s.kind in ("gap_dub", "gap_orig")
+                    and max(s.a_end - s.a_start,
+                            (s.b_end or 0) - (s.b_start or 0)) < MIN_GAP_S)]
 
 
 def confidence_profile(segs: list[Segment], duration_a: float,

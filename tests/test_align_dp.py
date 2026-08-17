@@ -156,3 +156,22 @@ def test_check_duration_ratio():
     assert classify.check_duration_ratio(1320.0, 1290.0) is None
     assert classify.check_duration_ratio(2640.0, 1320.0) is not None  # fundido
     assert classify.check_duration_ratio(0.0, 100.0) is not None
+
+
+def test_plano_parado_ruidoso_nao_vira_substituicao():
+    """Falso positivo real: plano parado onde as duas encodes divergem um
+    pouco (resíduo ~16, acima do limiar de match 12) — o DP contorna com dois
+    gaps e o pós-processamento fundia em 'replaced'. Com o miolo MEDIDO igual,
+    volta a ser match (+ o gap pequeno da diferença de duração)."""
+    a = _hashes(200)
+    b = a.copy()
+    # ruído moderado nos frames 80..120: inverte 16 bits fixos de cada hash
+    mask = np.uint64((1 << 16) - 1)
+    b[80:120] = a[80:120] ^ mask
+    segs = _classify(a, b)
+    kinds = [s.kind for s in segs]
+    assert "replaced" not in kinds, kinds
+    # e o trecho ruidoso é atravessado como match (offset 0)
+    for s in segs:
+        if s.kind == "match":
+            assert abs(s.offset) < 0.3
