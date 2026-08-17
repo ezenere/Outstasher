@@ -98,6 +98,10 @@ function FramePreview({ jobId, episode, seg }: {
   const six = seg.kind === 'replaced'
   const [urls, setUrls] = useState<(string | null)[]>(
     Array<string | null>(six ? 6 : 4).fill(null))
+  // chave por VALOR: o detalhe do job recarrega a cada 5 s e cada reload cria
+  // um objeto `seg` novo — se o efeito dependesse do objeto, os frames seriam
+  // buscados de novo a cada tick. Só tempos/tipo mudam de verdade.
+  const segKey = `${seg.kind}|${seg.a_start}|${seg.a_end}|${seg.b_start}|${seg.b_end}`
   useEffect(() => {
     let dead = false
     const ta = Math.max(0, seg.a_start)
@@ -129,7 +133,8 @@ function FramePreview({ jobId, episode, seg }: {
       dead = true
       fetched.forEach((u) => URL.revokeObjectURL(u))
     }
-  }, [jobId, episode, seg])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId, episode, segKey])
   const labels = six
     ? ['dublado (antes)', 'dublado (MEIO)', 'dublado (depois)',
        'original (antes)', 'original (MEIO)', 'original (depois)']
