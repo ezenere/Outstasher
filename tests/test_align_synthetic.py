@@ -93,7 +93,67 @@ def test_arquivos_sem_relacao_viram_conflito(tmp_path):
 
 
 def test_duracoes_incompativeis_viram_conflito(tmp_path):
-    a = _base_video(tmp_path / "a.mkv", dur=30)
+    # razão ~3: fora da faixa de "arquivo fundido" (~2) — segue conflito
+    a = _base_video(tmp_path / "a.mkv", dur=20)
     b = _base_video(tmp_path / "b.mkv", dur=60)
     with pytest.raises(engine.AlignConflict, match="fundidos|divididos"):
         engine.align_pair(str(a), str(b))
+
+
+def test_original_fundido_dois_episodios(tmp_path):
+    """Caso real (razão ~2): o ORIGINAL é um arquivo com dois episódios
+    concatenados; o dublado é só o segundo. Em vez de conflito, o alinhador
+    localiza o episódio na 2ª metade e a EDL traz a janela do original."""
+    ep1 = _base_video(tmp_path / "ep1.mkv", dur=40)
+    # ep2 com conteúdo DIFERENTE (outra fonte lavfi) para as metades não se
+    # confundirem
+    ep2 = tmp_path / "ep2.mkv"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc=s=320x180:d=42:r=24",
+         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+         "-pix_fmt", "yuv420p", str(ep2)], check=True)
+    fused = tmp_path / "fused.mkv"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-i", str(ep1), "-i", str(ep2), "-filter_complex",
+         "[0:v][1:v]concat=n=2:v=1[v]", "-map", "[v]",
+         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+         "-pix_fmt", "yuv420p", str(fused)], check=True)
+    dub = _reencoded(ep2, tmp_path / "dub.mkv")   # dublado = só o ep2
+
+    edl = engine.align_pair(str(dub), str(fused), episode="S01E02")
+    assert edl["merged_side"] == "orig"
+    w0, w1 = edl["b_window"]
+    # o episódio 2 começa em ~40 s no arquivo fundido (tolerância 4 s)
+    assert abs(w0 - 40.0) < 4.0, edl["b_window"]
+    assert w1 > 75.0
+    st = edl_mod.stats(edl)
+    assert st["match_pct"] > 90, edl["segments"]
+    matches = [s for s in edl["segments"] if s["kind"] == "match"]
+    assert matches and abs(matches[0]["offset"] - 40.0) < 2.0
+
+
+def test_dublado_fundido_nao_precisa_de_janela_no_original(tmp_path):
+    """Espelho: o DUBLADO é o fundido; o original é só o 1º episódio. Os
+    tempos a saem absolutos e não há janela do original."""
+    ep1 = _base_video(tmp_path / "ep1.mkv", dur=40)
+    ep2 = tmp_path / "ep2.mkv"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc=s=320x180:d=42:r=24",
+         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+         "-pix_fmt", "yuv420p", str(ep2)], check=True)
+    fused = tmp_path / "fused.mkv"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-i", str(ep1), "-i", str(ep2), "-filter_complex",
+         "[0:v][1:v]concat=n=2:v=1[v]", "-map", "[v]",
+         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+         "-pix_fmt", "yuv420p", str(fused)], check=True)
+    orig = _reencoded(ep1, tmp_path / "orig.mkv")
+    edl = engine.align_pair(str(fused), str(orig), episode="S01E01")
+    assert edl["merged_side"] == "dub"
+    assert "b_window" not in edl and edl["a_window"][0] < 4.0
+    matches = [s for s in edl["segments"] if s["kind"] == "match"]
+    assert matches and abs(matches[0]["offset"]) < 2.0

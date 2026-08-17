@@ -201,3 +201,22 @@ def test_apply_review_acao_invalida(temp_db):
     job = _review_job()
     with pytest.raises(ValueError, match="inválida"):
         pipeline._apply_review(job, {"actions": {"S01E01": {"1": "explodir"}}})
+
+
+@pytest.mark.ffmpeg
+def test_render_corta_original_fundido_na_janela(tmp_path):
+    """Original de 60 s = dois "episódios" de 30 s; a EDL cobre só o segundo
+    (b_window 30–60). A saída tem ~30 s, o áudio dublado entra alinhado ao
+    trecho cortado e os capítulos do original não são copiados."""
+    orig = _media(tmp_path / "orig.mkv", 60, seed=1)
+    dub = _media(tmp_path / "dub.mkv", 30, seed=2)
+    segs = [Segment("match", 0.0, 30.0, 30.0, 60.0, offset=30.0)]
+    out = tmp_path / "out.mkv"
+    render_mod.render(segs, str(dub), str(orig), str(out), "pt",
+                      log=lambda m: None, b_window=(30.0, 60.0))
+    info = _probe(out)
+    dur = float(info["format"]["duration"])
+    # keyframe anterior ao início pode adiantar alguns segundos: 30 ≤ dur ≤ 42
+    assert 29.0 <= dur <= 42.0, dur
+    audios = [s for s in info["streams"] if s["codec_type"] == "audio"]
+    assert len(audios) == 2

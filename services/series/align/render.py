@@ -43,14 +43,68 @@ def _layout(channels: int) -> str:
     return {1: "mono", 2: "stereo", 6: "5.1", 8: "7.1"}.get(channels, "stereo")
 
 
+def _keyframe_at_or_before(path: str, t: float) -> float | None:
+    """Maior keyframe de vídeo <= t (procura em janelas crescentes para trás).
+    None se não achar — o chamador decide o fallback."""
+    for back in (10.0, 30.0, 90.0):
+        lo = max(0.0, t - back)
+        p = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-skip_frame", "nokey", "-show_entries", "frame=pts_time",
+             "-of", "csv=p=0", "-read_intervals", f"{lo:.3f}%{t + 0.5:.3f}",
+             path], capture_output=True, text=True, timeout=120)
+        kfs = []
+        for line in p.stdout.splitlines():
+            try:
+                v = float(line.strip().split(",")[0])
+            except ValueError:
+                continue
+            if v <= t + 1e-3:
+                kfs.append(v)
+        if kfs:
+            return max(kfs)
+        if lo == 0.0:
+            break
+    return None
+
+
 def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
-           target_lang: str, log=print, on_progress=None, on_start=None):
-    """Renderiza a EDL num MKV final. Bloqueante (roda ffmpeg)."""
+           target_lang: str, log=print, on_progress=None, on_start=None,
+           b_window: tuple[float, float] | list | None = None):
+    """Renderiza a EDL num MKV final. Bloqueante (roda ffmpeg).
+
+    b_window: (início, fim) em segundos ABSOLUTOS do original quando ele é um
+    arquivo FUNDIDO (dois episódios) — o vídeo é cortado nessa janela. O corte
+    começa no KEYFRAME anterior ao início (stream copy não corta no meio de
+    um GOP) e todos os tempos b são deslocados por esse mesmo valor, então o
+    sync não muda; sobra no máximo um GOP do episódio vizinho no começo,
+    preenchido com áudio original como qualquer trecho sem dublagem.
+    """
     probe_orig = merger.ffprobe_json(orig_path)
     probe_dub = merger.ffprobe_json(dub_path)
     merger.annotate_type_indexes(probe_orig)
     merger.annotate_type_indexes(probe_dub)
     duration_b = float(probe_orig["format"]["duration"])
+
+    in_opts: list[str] = []
+    if b_window:
+        w0, w1 = float(b_window[0]), float(b_window[1])
+        kf = _keyframe_at_or_before(orig_path, w0)
+        if kf is None:
+            kf = w0
+            log(f"⚠️ não achei keyframe antes de {w0:.1f}s — cortando em {w0:.1f}s "
+                f"(o vídeo pode começar alguns frames adiantado)")
+        in_opts = ["-ss", f"{kf:.3f}", "-to", f"{w1:.3f}"]
+        # o input passa a começar em 0 = kf: desloca os tempos b da EDL
+        segs = [Segment(s.kind, s.a_start, s.a_end,
+                        None if s.b_start is None else s.b_start - kf,
+                        None if s.b_end is None else s.b_end - kf,
+                        s.slope, s.residual, s.confidence,
+                        None if s.offset is None else s.offset - kf,
+                        s.note, dict(s.extra)) for s in segs]
+        duration_b = w1 - kf
+        log(f"Original fundido: cortando {kf:.1f}s–{w1:.1f}s "
+            f"(keyframe {w0 - kf:.1f}s antes do início do episódio)")
 
     # faixa dublada: melhor áudio do idioma alvo no arquivo dublado
     iso = merger.canonical_lang(target_lang)
@@ -109,7 +163,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
 
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
            "-fflags", "+genpts", "-progress", "pipe:1",
-           "-i", orig_path, "-i", dub_path]
+           *in_opts, "-i", orig_path, "-i", dub_path]
     chapters_file = None
     if fills:
         chapters_file = _chapters_metadata(fills)
@@ -132,7 +186,9 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
     # capítulos: com preenchimentos, os capítulos AUDITÁVEIS dos fills entram
     # no lugar dos originais (misturar os dois exigiria reescrever ambos no
     # mesmo ffmetadata — fica para quando alguém sentir falta)
-    cmd += ["-map_chapters", "2" if fills else "0"]
+    # capítulos do original não valem num corte de arquivo fundido (tempos do
+    # episódio duplo): só os de preenchimento, ou nenhum
+    cmd += ["-map_chapters", "2" if fills else ("-1" if b_window else "0")]
     cmd += ["-avoid_negative_ts", "make_zero", "-max_interleave_delta", "0",
             output]
 

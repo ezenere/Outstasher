@@ -61,16 +61,16 @@ async def merge_all(job: dict):
                 jobs._event(job, "merge", f"✅ {key} concluído: {ep['output']}")
             except asyncio.CancelledError:
                 raise
-            except merger.VersionMismatch as e:
-                # cortes divergem: entra o alinhador por CONTEÚDO (dHash + DP).
-                # Exceção levantada DENTRO de um handler não cai no `except
-                # Exception` irmão — sem o try próprio, uma falha do alinhador
-                # (ffmpeg, render...) derrubaria o job inteiro em vez de falhar
-                # só este episódio
+            except (merger.VersionMismatch, NeedsContentAlign) as e:
+                # cortes divergem (ou arquivo fundido): entra o alinhador por
+                # CONTEÚDO (dHash + DP). Exceção levantada DENTRO de um handler
+                # não cai no `except Exception` irmão — sem o try próprio, uma
+                # falha do alinhador (ffmpeg, render...) derrubaria o job
+                # inteiro em vez de falhar só este episódio
+                why = (f"offsets divergentes ({e.tau1_ms:+.0f} → {e.tau2_ms:+.0f} ms)"
+                       if isinstance(e, merger.VersionMismatch) else str(e))
                 jobs._event(job, "merge",
-                            f"{key}: offsets divergentes ({e.tau1_ms:+.0f} → "
-                            f"{e.tau2_ms:+.0f} ms) — rodando o alinhador por "
-                            f"conteúdo...")
+                            f"{key}: {why} — rodando o alinhador por conteúdo...")
                 try:
                     await _align_episode(job, key, ep)
                 except asyncio.CancelledError:
@@ -136,9 +136,14 @@ async def _align_episode(job: dict, key: str, ep: dict):
         refine.refine_offsets, segs, dub, dub_a, orig, orig_a, log)
     dur_a = edl_dict["source_dub"]["duration"]
     segs, needs = rules.apply_rules(segs, job.get("review_rules") or [], dur_a)
+    # o rebuild só reescreve os segmentos: os metadados do arquivo FUNDIDO
+    # (janela/nota) têm que sobreviver — o render corta o original por eles
+    extras = {k: edl_dict[k] for k in ("merged_side", "a_window", "b_window", "note")
+              if k in edl_dict}
     edl_dict = edl_mod.build(segs, key, dub, dur_a, orig,
                              edl_dict["source_orig"]["duration"],
                              profile=edl_dict.get("confidence_profile"))
+    edl_dict.update(extras)
     # review.required do build considera todo `replaced`; com ação (explícita
     # ou por regra) a revisão está RESOLVIDA
     edl_dict["review"]["required"] = needs
@@ -197,19 +202,37 @@ async def _render_from_edl(job: dict, key: str, ep: dict):
     job["output"] = str(output)
     segs = edl_mod.segments(ep["edl"])
     log, on_progress = jobs._ffmpeg_hooks(job)
+    if ep["edl"].get("note"):
+        log(ep["edl"]["note"])
     try:
         await asyncio.to_thread(
             render_mod.render, segs, ep["src"]["dubbed"],
             ep["src"]["original"], str(output), job["language"],
-            log, on_progress, jobs._register_proc(job["id"]))
+            log, on_progress, jobs._register_proc(job["id"]),
+            ep["edl"].get("b_window"))
     finally:
         jobs._ffmpeg_procs.pop(job["id"], None)
     ep["output"] = str(output)
 
 
+class NeedsContentAlign(Exception):
+    """O par não serve para o caminho rápido (offset escalar) — vai direto
+    para o alinhador por conteúdo."""
+
+
 async def _merge_episode(job: dict, key: str, ep: dict, convert_opts):
     """Um episódio: mesmo fluxo do merge de filmes, com o nome de série."""
     m = job["movie"]
+    # arquivo FUNDIDO (razão de duração ~2): o offset escalar do caminho
+    # rápido não tem como estar certo — e a validação em duas janelas pode
+    # até "concordar" por acaso e entregar lixo. Vai direto para o alinhador.
+    from services.series.align import classify as _cls, engine as _eng
+    d_a, d_b = await asyncio.gather(
+        asyncio.to_thread(_eng._duration, ep["src"]["dubbed"]),
+        asyncio.to_thread(_eng._duration, ep["src"]["original"]))
+    if _cls.check_duration_ratio(d_a, d_b):
+        raise NeedsContentAlign(
+            f"durações {d_a:.0f}s vs {d_b:.0f}s — caminho rápido não se aplica")
     folder = naming.series_folder_name(m["original_title"], m["year"],
                                        job.get("tmdb_id"))
     season_dir = naming.season_dir_name(ep["season"])
