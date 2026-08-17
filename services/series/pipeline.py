@@ -169,7 +169,8 @@ async def _prepare(job: dict):
                    if s["season"] is not None and s["season"] >= 0}
     job["known_seasons"] = sorted(s for s in all_seasons if s > 0)
 
-    _check_requested_seasons(all_seasons, job["request"])
+    req = job["request"]
+    _check_requested_seasons(all_seasons, req)
 
     # temporadas a consultar: inteiras pedidas + as dos episódios avulsos
     wanted: dict[int, set[int] | None] = {s: None for s in req["seasons"]}
