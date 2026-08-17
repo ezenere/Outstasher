@@ -208,7 +208,12 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         # entram no lugar dos originais; num corte de arquivo fundido os do
         # original não valem (tempos do episódio duplo)
         cmd2 += ["-map_chapters", "2" if fills else ("-1" if b_window else "0")]
-        cmd2 += ["-avoid_negative_ts", "make_zero", output]
+        # -max_interleave_delta 0: intercalação estrita do MKV — sem isso o
+        # muxer "força saída" quando há stream esparsa (legenda) e alguns
+        # players travam a reprodução (caso real anterior). É seguro aqui
+        # porque este passo é SÓ cópia (nenhum filtergraph disputando fila).
+        cmd2 += ["-avoid_negative_ts", "make_zero", "-max_interleave_delta", "0",
+                 output]
         p2 = subprocess.run(cmd2, capture_output=True, text=True,
                             encoding="utf-8", errors="replace")
         if p2.returncode != 0:

@@ -449,7 +449,7 @@ def merge_segmented(file1: str, file2: str, output: str, target_lang: str | None
     cmd += ["-map_chapters", "-1" if chapters_src is None
             else ("0" if chapters_src == ref_input else "1")]
     cmd += ["-map_metadata", "0",
-            "-avoid_negative_ts", "make_zero",
+            "-avoid_negative_ts", "make_zero", "-max_interleave_delta", "0",
             output]
 
     Path(output).parent.mkdir(parents=True, exist_ok=True)
