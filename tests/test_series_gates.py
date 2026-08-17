@@ -203,6 +203,24 @@ def test_apply_manual_candidato_invalido(temp_db):
         pipeline._apply_manual(job, {"picks": {"S01E01": {"dubbed": "nope"}}})
 
 
+# -------------------- validação de temporadas pedidas --------------------
+
+def test_temporada_0_especiais_e_aceita():
+    # regressão: a UI lista "Especiais" (S0) e o job pedia [0,1,2] — a
+    # validação rejeitava a própria seleção oferecida (job 513180aed1)
+    all_seasons = {0, 1, 2}
+    pipeline._check_requested_seasons(all_seasons, {"seasons": [0, 1, 2],
+                                                    "episodes": {}})
+    pipeline._check_requested_seasons(all_seasons, {"seasons": [],
+                                                    "episodes": {0: [1]}})
+
+
+def test_temporada_inexistente_rejeita():
+    with pytest.raises(ValueError, match="S09"):
+        pipeline._check_requested_seasons({0, 1, 2}, {"seasons": [1, 9],
+                                                      "episodes": {}})
+
+
 # -------------------- order_map (remap de ordem alternativa) --------------------
 
 def test_search_ref_com_order_map(temp_db):

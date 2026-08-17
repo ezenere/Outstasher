@@ -160,16 +160,16 @@ async def _prepare(job: dict):
     job["movie"] = {k: info[k] for k in
                     ("id", "original_title", "localized_title", "english_title",
                      "original_language", "year", "overview", "poster")}
-    known = {s["season"] for s in info["seasons"]
-             if s["season"] and s["season"] > 0}
-    job["known_seasons"] = sorted(known)
+    # TODAS as temporadas do TMDB, incluindo a 0 ("Especiais") — a UI as lista
+    # e o pedido tem que ser aceito. known_seasons (packs) fica SÓ com as > 0:
+    # um torrent "série completa" não costuma trazer os especiais, e tratá-los
+    # como cobertos criaria atribuições fantasma (episódio "baixado" que não
+    # está no pack).
+    all_seasons = {s["season"] for s in info["seasons"]
+                   if s["season"] is not None and s["season"] >= 0}
+    job["known_seasons"] = sorted(s for s in all_seasons if s > 0)
 
-    req = job["request"]
-    bad = [s for s in req["seasons"] if s not in known]
-    bad += [s for s in req["episodes"] if s not in known]
-    if bad:
-        raise ValueError("Temporada(s) inexistente(s) no TMDB: "
-                         + ", ".join(f"S{s:02d}" for s in sorted(set(bad))))
+    _check_requested_seasons(all_seasons, job["request"])
 
     # temporadas a consultar: inteiras pedidas + as dos episódios avulsos
     wanted: dict[int, set[int] | None] = {s: None for s in req["seasons"]}
@@ -213,6 +213,16 @@ async def _prepare(job: dict):
     jobs._event(job, "info",
                 f"Série: {title} ({job['movie']['year']}) — "
                 f"{len(_active_refs(job))} episódio(s) a baixar")
+
+
+def _check_requested_seasons(all_seasons: set[int], req: dict):
+    """O pedido só pode referenciar temporadas que o TMDB conhece — incluindo
+    a 0 (Especiais), que a UI lista e o usuário pode marcar."""
+    bad = [s for s in req["seasons"] if s not in all_seasons]
+    bad += [s for s in req["episodes"] if s not in all_seasons]
+    if bad:
+        raise ValueError("Temporada(s) inexistente(s) no TMDB: "
+                         + ", ".join(f"S{s:02d}" for s in sorted(set(bad))))
 
 
 def _active_refs(job: dict) -> list[tuple[int, int]]:
