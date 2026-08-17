@@ -328,8 +328,6 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
     { original: {}, dubbed: {} })
   // editor de episódios aberto para qual (role, candidato)
   const [editing, setEditing] = useState<{ role: string; cid: string } | null>(null)
-  // manual_pick: aba Automático (plano do sistema) x Manual (seleção invertida)
-  const [pickMode, setPickMode] = useState<'auto' | 'manual'>('manual')
   // magnets/links próprios adicionados no manual (aparecem na lista do papel)
   const [custom, setCustom] = useState<TorrentChoice[]>([])
   const [customUrls, setCustomUrls] = useState<Record<string, string>>({})
@@ -573,10 +571,6 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
     const anySelected = Object.values(sel).some((m) => Object.keys(m).length > 0)
 
     function submit() {
-      if (pickMode === 'auto') {
-        void send('manual_pick', { torrents: [] })  // plano automático do sistema
-        return
-      }
       const torrents: Record<string, unknown>[] = []
       for (const role of ['original', 'dubbed'] as const) {
         for (const [cid, eps] of Object.entries(sel[role] ?? {})) {
@@ -595,64 +589,19 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
       void send('manual_pick', { torrents })
     }
 
-    const preselected = gate.payload.preselected ?? []
 
     return (
       <section className="mt-6 rounded-xl border border-purple-900/60 bg-purple-950/20 p-4">
-        <div className="mb-3 flex flex-wrap items-center gap-3">
-          <h2 className="font-semibold text-purple-300">Escolha os torrents</h2>
-          <div className="flex gap-1 rounded-lg border border-zinc-700 bg-zinc-900 p-1">
-            {([['auto', 'Automático'], ['manual', 'Manual']] as const).map(([k, label]) => (
-              <button
-                key={k}
-                onClick={() => setPickMode(k)}
-                className={`rounded-md px-3 py-0.5 text-sm transition-colors ${
-                  pickMode === k ? 'bg-purple-600 font-semibold text-white' : 'text-zinc-400 hover:text-zinc-200'}`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {pickMode === 'auto' && (
-          <div className="mb-3">
-            <p className="mb-2 text-sm text-zinc-300">
-              O plano que o sistema montou sozinho (qualidade primeiro; pack
-              desempata). Confirme para baixar assim, ou passe para Manual.
-            </p>
-            {preselected.length === 0 ? (
-              <div className="rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-sm text-amber-300">
-                A busca não encontrou nenhum torrent utilizável — use o modo
-                Manual para colar um magnet/link próprio.
-              </div>
-            ) : (
-              <ul className="divide-y divide-zinc-800/60 rounded-lg border border-zinc-800 text-sm">
-                {preselected.map((t) => (
-                  <li key={t.n} className="flex flex-wrap items-center gap-2 px-3 py-1.5">
-                    <span className={`shrink-0 rounded px-1.5 py-0.5 text-xs font-medium ${
-                      t.role === 'original' ? 'bg-sky-950 text-sky-300' : 'bg-purple-950 text-purple-300'}`}>
-                      {t.role === 'original' ? 'original' : 'dublado'}
-                    </span>
-                    <span className="min-w-0 flex-1 truncate" title={t.title}>{t.title}</span>
-                    <span className="shrink-0 text-xs text-zinc-500">{t.quality ?? '—'} · {t.coverage.length} ep.</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-
-        {pickMode === 'manual' && (
+        <h2 className="mb-2 font-semibold text-purple-300">Escolha os torrents</h2>
         <p className="mb-3 text-sm text-zinc-300">
           Marque os torrents que quer baixar; cada um assume automaticamente os
           episódios que o TÍTULO indica (dá para editar). Papel sem nenhuma
           marca mantém o plano automático. O que ficar sem cobertura passa pelo
           aviso de lacunas antes de baixar; o match fino com os ARQUIVOS
-          acontece depois do download.
+          acontece depois do download. Sem candidato bom? Cole um magnet/link
+          próprio no papel.
         </p>
-        )}
-        {pickMode === 'manual' && (['original', 'dubbed'] as const).map((role) => {
+        {(['original', 'dubbed'] as const).map((role) => {
           const covered = coveredBy(role)
           const touched = Object.keys(sel[role] ?? {}).length > 0
           const missing = requested.filter((k) => !covered.has(k))
@@ -786,7 +735,7 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
           className="mt-1 inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
         >
           <Download width={15} height={15} />
-          {pickMode === 'auto' || !anySelected ? 'Confirmar plano automático' : 'Confirmar seleção'}
+          {anySelected ? 'Confirmar seleção' : 'Confirmar plano automático'}
         </button>
       </section>
     )
