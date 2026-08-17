@@ -916,8 +916,38 @@ def _find_candidate(job: dict, role: str, candidate_id: str) -> dict:
         f"Candidato {candidate_id!r} não encontrado (a busca pode ter sido refeita)")
 
 
+def _custom_candidate(sel: dict) -> dict:
+    """Candidato a partir de um magnet/link informado pelo usuário (sem passar
+    pelo Jackett). O título vem do campo `title`, do `dn=` do magnet ou do
+    próprio link — é dele que sai a cobertura "auto" (SxxEyy/temporada)."""
+    from urllib.parse import parse_qs, unquote_plus, urlparse
+    url = (sel.get("magnet") or sel.get("link") or "").strip()
+    if not url:
+        raise ValueError("Informe um magnet: ou link de .torrent")
+    if not (url.startswith("magnet:") or url.startswith(("http://", "https://"))):
+        raise ValueError("Só aceito magnet: ou link http(s) de .torrent")
+    title = (sel.get("title") or "").strip()
+    if not title and url.startswith("magnet:"):
+        q = parse_qs(urlparse(url).query)
+        title = unquote_plus(q.get("dn", [""])[0])
+    if not title:
+        title = url.rsplit("/", 1)[-1].split("?", 1)[0] or "torrent manual"
+    cov = parse.parse_coverage(title)
+    return {
+        "id": f"custom:{abs(hash(url)) % 10**8}", "title": title,
+        "tracker": "manual", "seeders": None, "size": 0,
+        "quality": parse.pack_resolution_tier(title)[1],
+        "coverage": cov.label(), "score": None, "tier": None,
+        "magnet": url if url.startswith("magnet:") else None,
+        "link": None if url.startswith("magnet:") else url,
+        "infohash": None, "files": None,
+    }
+
+
 def _apply_manual_torrents(job: dict, decision: dict):
-    """Formato invertido: torrents marcados -> episódios atribuídos."""
+    """Formato invertido: torrents marcados -> episódios atribuídos. Cada item
+    referencia um candidato da busca (candidate_id) OU um magnet/link próprio
+    (magnet/link + title opcional)."""
     sels = decision.get("torrents") or []
     if not sels:
         jobs._event(job, "chosen",
@@ -928,16 +958,25 @@ def _apply_manual_torrents(job: dict, decision: dict):
     # (role, identidade) -> {cand, eps explícitos, auto?}
     chosen: dict[tuple[str, str], dict] = {}
     roles_touched: set[str] = set()
+    n_custom = 0
     for sel in sels:
         role = sel.get("role")
         if role not in ROLES:
             raise ValueError(f"Papel inválido: {role!r}")
-        cand = _find_candidate(job, role, sel.get("candidate_id"))
+        if sel.get("magnet") or sel.get("link"):
+            cand = _custom_candidate(sel)
+            n_custom += 1
+        else:
+            cand = _find_candidate(job, role, sel.get("candidate_id"))
         eps = sel.get("episodes", "auto")
         if eps == "auto":
             cov = parse.parse_coverage(cand["title"])
             eps = [ep_key(s, e) for s, e in _active_refs(job)
                    if cov.covers(*_search_ref(job, ep_key(s, e)), known)]
+            if not eps and cand["tracker"] == "manual":
+                raise ValueError(
+                    f"O título '{cand['title']}' não indica temporada/episódio "
+                    f"— informe os episódios que este magnet cobre")
             explicit = False
         else:
             bad = [k for k in eps if k not in valid_keys]
@@ -1009,8 +1048,9 @@ def _apply_manual_torrents(job: dict, decision: dict):
         })
     jobs._event(job, "chosen",
                 f"Modo manual: {len(sels)} torrent(s) escolhido(s) "
-                f"({', '.join(sorted(roles_touched))}) — lacunas passam pelo "
-                f"gate normal")
+                f"({', '.join(sorted(roles_touched))})"
+                + (f", {n_custom} magnet(s)/link(s) próprio(s)" if n_custom else "")
+                + " — lacunas passam pelo gate normal")
     store.upsert_job(job)
 
 

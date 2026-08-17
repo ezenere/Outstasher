@@ -428,3 +428,40 @@ def test_manual_torrents_mid_download_preserva_o_que_ja_baixou(temp_db):
     assert by_n[0]["state"] == "done" and by_n[0]["coverage"] == ["S01E01"]
     assert any(t["coverage"] == ["S01E02"] and t["state"] == "pending"
                for t in job["torrents"])
+
+
+# -------------------- magnet próprio na escolha manual --------------------
+
+def test_manual_magnet_proprio_auto_pelo_dn(temp_db):
+    job = _job()
+    job["torrents"] = []
+    magnet = ("magnet:?xt=urn:btih:" + "c" * 40
+              + "&dn=Breaking.Bad.S01.1080p.BluRay.DUAL-GRP")
+    pipeline._apply_manual(job, {"torrents": [
+        {"magnet": magnet, "role": "dubbed", "episodes": "auto"},
+    ]})
+    dubbed = [t for t in job["torrents"] if t["role"] == "dubbed"]
+    assert len(dubbed) == 1
+    assert dubbed[0]["coverage"] == ["S01E01", "S01E02"]  # "S01" do dn
+    assert dubbed[0]["magnet"] == magnet
+    assert dubbed[0]["tracker"] == "manual"
+
+
+def test_manual_magnet_sem_titulo_exige_episodios(temp_db):
+    job = _job()
+    magnet = "magnet:?xt=urn:btih:" + "d" * 40
+    with pytest.raises(ValueError, match="informe os episódios"):
+        pipeline._apply_manual(job, {"torrents": [
+            {"magnet": magnet, "role": "original", "episodes": "auto"}]})
+    # com episódios explícitos passa
+    pipeline._apply_manual(job, {"torrents": [
+        {"magnet": magnet, "role": "original", "title": "meu pack",
+         "episodes": ["S01E02"]}]})
+    assert [t["coverage"] for t in job["torrents"] if t["role"] == "original"] == [["S01E02"]]
+
+
+def test_manual_link_invalido(temp_db):
+    job = _job()
+    with pytest.raises(ValueError, match="magnet"):
+        pipeline._apply_manual(job, {"torrents": [
+            {"link": "ftp://x/y.torrent", "role": "original", "episodes": ["S01E01"]}]})

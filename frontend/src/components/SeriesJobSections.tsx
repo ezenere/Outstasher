@@ -328,6 +328,12 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
     { original: {}, dubbed: {} })
   // editor de episódios aberto para qual (role, candidato)
   const [editing, setEditing] = useState<{ role: string; cid: string } | null>(null)
+  // manual_pick: aba Automático (plano do sistema) x Manual (seleção invertida)
+  const [pickMode, setPickMode] = useState<'auto' | 'manual'>('manual')
+  // magnets/links próprios adicionados no manual (aparecem na lista do papel)
+  const [custom, setCustom] = useState<TorrentChoice[]>([])
+  const [customUrls, setCustomUrls] = useState<Record<string, string>>({})
+  const [magnetForm, setMagnetForm] = useState<{ role: 'original' | 'dubbed'; url: string; title: string } | null>(null)
   const gate = job.awaiting
   if (job.status !== 'awaiting' || !gate) return null
 
@@ -475,8 +481,59 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
   }
 
   if (gate.reason === 'manual_pick') {
-    const byTorrent = gate.payload.by_torrent ?? { original: [], dubbed: [] }
+    const base = gate.payload.by_torrent ?? { original: [], dubbed: [] }
     const requested = gate.payload.requested ?? []
+    // candidatos da busca + magnets próprios (o papel do custom vai no id)
+    const byTorrent: Record<'original' | 'dubbed', TorrentChoice[]> = {
+      original: [...custom.filter((c) => c.id.startsWith('custom:original:')), ...(base.original ?? [])],
+      dubbed: [...custom.filter((c) => c.id.startsWith('custom:dubbed:')), ...(base.dubbed ?? [])],
+    }
+
+    // cobertura pelo TÍTULO de um magnet próprio (mesma regra do backend:
+    // SxxEyy / S01 / temporada / "completa" contra os episódios pedidos)
+    function matchesFromTitle(title: string): string[] {
+      const t = title.toLowerCase()
+      const eps = new Set<string>()
+      for (const m of t.matchAll(/s(\d{1,2})[ ._-]?e(\d{1,3})/g)) {
+        eps.add(`S${m[1].padStart(2, '0')}E${m[2].padStart(2, '0')}`)
+      }
+      if (eps.size) return requested.filter((k) => eps.has(k))
+      const seasons = new Set<number>()
+      for (const m of t.matchAll(/(?:^|[^a-z0-9])s(\d{1,2})(?![0-9]|[ ._-]?e\d)/g)) seasons.add(Number(m[1]))
+      for (const m of t.matchAll(/(?:season|temporada)[ ._-]?(\d{1,2})|(\d{1,2})[^\d\s]{0,6}[ ._-]?temporada/g)) {
+        seasons.add(Number(m[1] ?? m[2]))
+      }
+      if (seasons.size) return requested.filter((k) => seasons.has(Number(k.slice(1, 3))))
+      if (/complet|integral|batch|cole[cç][aã]o/.test(t)) return [...requested]
+      return []
+    }
+
+    function addMagnet() {
+      if (!magnetForm) return
+      const url = magnetForm.url.trim()
+      if (!/^(magnet:|https?:\/\/)/.test(url)) {
+        void dialog.alert({ title: 'Link inválido', message: 'Cole um magnet: ou um link http(s) de .torrent.' })
+        return
+      }
+      let title = magnetForm.title.trim()
+      if (!title && url.startsWith('magnet:')) {
+        const dn = new URLSearchParams(url.slice(url.indexOf('?') + 1)).get('dn')
+        if (dn) title = dn
+      }
+      if (!title) title = url.split('/').pop()?.split('?')[0] || 'torrent manual'
+      const id = `custom:${magnetForm.role}:${Date.now()}`
+      const matches = matchesFromTitle(title)
+      setCustom((cur) => [...cur, {
+        id, title, tracker: 'manual', seeders: 0, size: 0, quality: null,
+        coverage: matches.length ? `${matches.length} ep. pelo título` : '?',
+        score: null, matches,
+      }])
+      setCustomUrls((cur) => ({ ...cur, [id]: url }))
+      // já entra marcado (auto pelo título; sem match, abre o editor)
+      setSel((cur) => ({ ...cur, [magnetForm.role]: { ...(cur[magnetForm.role] ?? {}), [id]: matches.length ? 'auto' : [] } }))
+      if (!matches.length) setEditing({ role: magnetForm.role, cid: id })
+      setMagnetForm(null)
+    }
 
     // episódios cobertos por papel com a seleção atual (auto = matches)
     function coveredBy(role: string): Set<string> {
@@ -516,18 +573,77 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
     const anySelected = Object.values(sel).some((m) => Object.keys(m).length > 0)
 
     function submit() {
-      const torrents: { candidate_id: string; role: string; episodes: string[] | 'auto' }[] = []
+      if (pickMode === 'auto') {
+        void send('manual_pick', { torrents: [] })  // plano automático do sistema
+        return
+      }
+      const torrents: Record<string, unknown>[] = []
       for (const role of ['original', 'dubbed'] as const) {
         for (const [cid, eps] of Object.entries(sel[role] ?? {})) {
-          torrents.push({ candidate_id: cid, role, episodes: eps })
+          if (cid.startsWith('custom:')) {
+            const url = customUrls[cid]
+            const c = custom.find((x) => x.id === cid)
+            torrents.push({
+              [url.startsWith('magnet:') ? 'magnet' : 'link']: url,
+              title: c?.title, role, episodes: eps,
+            })
+          } else {
+            torrents.push({ candidate_id: cid, role, episodes: eps })
+          }
         }
       }
       void send('manual_pick', { torrents })
     }
 
+    const preselected = gate.payload.preselected ?? []
+
     return (
       <section className="mt-6 rounded-xl border border-purple-900/60 bg-purple-950/20 p-4">
-        <h2 className="mb-2 font-semibold text-purple-300">Escolha os torrents</h2>
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          <h2 className="font-semibold text-purple-300">Escolha os torrents</h2>
+          <div className="flex gap-1 rounded-lg border border-zinc-700 bg-zinc-900 p-1">
+            {([['auto', 'Automático'], ['manual', 'Manual']] as const).map(([k, label]) => (
+              <button
+                key={k}
+                onClick={() => setPickMode(k)}
+                className={`rounded-md px-3 py-0.5 text-sm transition-colors ${
+                  pickMode === k ? 'bg-purple-600 font-semibold text-white' : 'text-zinc-400 hover:text-zinc-200'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {pickMode === 'auto' && (
+          <div className="mb-3">
+            <p className="mb-2 text-sm text-zinc-300">
+              O plano que o sistema montou sozinho (qualidade primeiro; pack
+              desempata). Confirme para baixar assim, ou passe para Manual.
+            </p>
+            {preselected.length === 0 ? (
+              <div className="rounded-lg border border-amber-900/60 bg-amber-950/20 p-3 text-sm text-amber-300">
+                A busca não encontrou nenhum torrent utilizável — use o modo
+                Manual para colar um magnet/link próprio.
+              </div>
+            ) : (
+              <ul className="divide-y divide-zinc-800/60 rounded-lg border border-zinc-800 text-sm">
+                {preselected.map((t) => (
+                  <li key={t.n} className="flex flex-wrap items-center gap-2 px-3 py-1.5">
+                    <span className={`shrink-0 rounded px-1.5 py-0.5 text-xs font-medium ${
+                      t.role === 'original' ? 'bg-sky-950 text-sky-300' : 'bg-purple-950 text-purple-300'}`}>
+                      {t.role === 'original' ? 'original' : 'dublado'}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate" title={t.title}>{t.title}</span>
+                    <span className="shrink-0 text-xs text-zinc-500">{t.quality ?? '—'} · {t.coverage.length} ep.</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
+        {pickMode === 'manual' && (
         <p className="mb-3 text-sm text-zinc-300">
           Marque os torrents que quer baixar; cada um assume automaticamente os
           episódios que o TÍTULO indica (dá para editar). Papel sem nenhuma
@@ -535,7 +651,8 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
           aviso de lacunas antes de baixar; o match fino com os ARQUIVOS
           acontece depois do download.
         </p>
-        {(['original', 'dubbed'] as const).map((role) => {
+        )}
+        {pickMode === 'manual' && (['original', 'dubbed'] as const).map((role) => {
           const covered = coveredBy(role)
           const touched = Object.keys(sel[role] ?? {}).length > 0
           const missing = requested.filter((k) => !covered.has(k))
@@ -628,6 +745,38 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
                   <div className="text-xs text-zinc-500">Nenhum candidato encontrado para este papel.</div>
                 )}
               </div>
+              {/* magnet/link próprio para este papel */}
+              {magnetForm?.role === role ? (
+                <div className="mt-2 rounded-lg border border-zinc-700 bg-zinc-900 p-2.5">
+                  <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
+                    <input
+                      value={magnetForm.url}
+                      onChange={(e) => setMagnetForm({ ...magnetForm, url: e.target.value })}
+                      placeholder="magnet:?xt=… ou https://…/arquivo.torrent"
+                      className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 font-mono text-xs outline-none focus:border-blue-500"
+                    />
+                    <input
+                      value={magnetForm.title}
+                      onChange={(e) => setMagnetForm({ ...magnetForm, title: e.target.value })}
+                      placeholder="Título (opcional — sai do dn= do magnet; define os episódios 'auto')"
+                      className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs outline-none focus:border-blue-500"
+                    />
+                    <div className="flex gap-1">
+                      <button onClick={addMagnet}
+                        className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold hover:bg-blue-500">Adicionar</button>
+                      <button onClick={() => setMagnetForm(null)}
+                        className="rounded-lg border border-zinc-700 px-2 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800">Cancelar</button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setMagnetForm({ role, url: '', title: '' })}
+                  className="mt-2 rounded-lg border border-dashed border-zinc-700 px-3 py-1 text-xs text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
+                >
+                  + Adicionar magnet/link próprio ({role === 'original' ? 'original' : 'dublado'})
+                </button>
+              )}
             </div>
           )
         })}
@@ -637,7 +786,7 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
           className="mt-1 inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
         >
           <Download width={15} height={15} />
-          {anySelected ? 'Confirmar seleção' : 'Confirmar plano automático'}
+          {pickMode === 'auto' || !anySelected ? 'Confirmar plano automático' : 'Confirmar seleção'}
         </button>
       </section>
     )
