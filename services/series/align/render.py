@@ -161,45 +161,67 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
     chains.append(f"{''.join(labels)}concat=n={len(labels)}:v=0:a=1[dub_out]")
     filter_complex = ";".join(chains)
 
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-           "-fflags", "+genpts", "-progress", "pipe:1",
-           *in_opts, "-i", orig_path, "-i", dub_path]
-    chapters_file = None
-    if fills:
-        chapters_file = _chapters_metadata(fills)
-        cmd += ["-f", "ffmetadata", "-i", chapters_file]
-    cmd += ["-filter_complex", filter_complex,
-            "-map", "0:v:0", "-c:v", "copy"]
-    # áudios do original em stream copy (todas as línguas), depois o dublado
-    n_orig_a = len(merger.get_streams(probe_orig, "audio"))
-    for k in range(n_orig_a):
-        cmd += ["-map", f"0:a:{k}"]
-    cmd += ["-map", "[dub_out]"]
-    cmd += ["-c:a", "copy"]
-    codec, bitrate = merger.filtered_codec_and_bitrate(channels)
-    cmd += [f"-c:a:{n_orig_a}", codec, f"-b:a:{n_orig_a}", bitrate,
-            f"-metadata:s:a:{n_orig_a}", f"language={iso}",
-            f"-disposition:a:{n_orig_a}", "default"]
-    # legendas do original intactas
-    if merger.get_streams(probe_orig, "subtitle"):
-        cmd += ["-map", "0:s?", "-c:s", "copy"]
-    # capítulos: com preenchimentos, os capítulos AUDITÁVEIS dos fills entram
-    # no lugar dos originais (misturar os dois exigiria reescrever ambos no
-    # mesmo ffmetadata — fica para quando alguém sentir falta)
-    # capítulos do original não valem num corte de arquivo fundido (tempos do
-    # episódio duplo): só os de preenchimento, ou nenhum
-    cmd += ["-map_chapters", "2" if fills else ("-1" if b_window else "0")]
-    cmd += ["-avoid_negative_ts", "make_zero", "-max_interleave_delta", "0",
-            output]
-
     Path(output).parent.mkdir(parents=True, exist_ok=True)
+    codec, bitrate = merger.filtered_codec_and_bitrate(channels)
     log(f"Renderizando EDL: {len(slices)} fatia(s), {len(fills)} preenchimento(s)"
         + ("" if has_rubberband() else " (sem rubberband: fallback asetrate)"))
+
+    # DOIS PASSOS de propósito. Num único ffmpeg, o áudio original entrava no
+    # filter_complex (preenchimentos) E saía em stream copy — o mesmo stream
+    # decodificado para 20+ buffersrc e copiado para o muxer engasga as filas
+    # do ffmpeg (deadlock com 0% para sempre; caso real Mr Robot S01E06, os
+    # episódios anteriores só passaram por sorte de escalonamento). Separar
+    # o áudio dublado remontado num .mka e depois só MUXAR cópias elimina a
+    # condição por construção.
+    tmp_dir = Path(tempfile.mkdtemp(prefix="edl_render_"))
+    dub_mka = tmp_dir / "dub.mka"
+    chapters_file = None
     try:
-        merger._run_ffmpeg_progress(cmd, duration_b, on_progress, on_start)
+        # passo 1: só a faixa dublada remontada (áudio, sem vídeo)
+        cmd1 = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-progress", "pipe:1",
+                *in_opts, "-i", orig_path, "-i", dub_path,
+                "-filter_complex", filter_complex,
+                "-map", "[dub_out]", "-c:a", codec, "-b:a", bitrate,
+                "-vn", "-sn", str(dub_mka)]
+        merger._run_ffmpeg_progress(cmd1, duration_b, on_progress, on_start)
+
+        # passo 2: mux com stream copy de tudo (rápido)
+        cmd2 = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-fflags", "+genpts",
+                *in_opts, "-i", orig_path, "-i", str(dub_mka)]
+        if fills:
+            chapters_file = _chapters_metadata(fills)
+            cmd2 += ["-f", "ffmetadata", "-i", chapters_file]
+        cmd2 += ["-map", "0:v:0", "-c:v", "copy"]
+        # áudios do original (todas as línguas), depois o dublado
+        n_orig_a = len(merger.get_streams(probe_orig, "audio"))
+        for k in range(n_orig_a):
+            cmd2 += ["-map", f"0:a:{k}"]
+        cmd2 += ["-map", "1:a:0", "-c:a", "copy",
+                 f"-metadata:s:a:{n_orig_a}", f"language={iso}",
+                 f"-disposition:a:{n_orig_a}", "default"]
+        # legendas do original intactas
+        if merger.get_streams(probe_orig, "subtitle"):
+            cmd2 += ["-map", "0:s?", "-c:s", "copy"]
+        # capítulos: com preenchimentos, os capítulos AUDITÁVEIS dos fills
+        # entram no lugar dos originais; num corte de arquivo fundido os do
+        # original não valem (tempos do episódio duplo)
+        cmd2 += ["-map_chapters", "2" if fills else ("-1" if b_window else "0")]
+        cmd2 += ["-avoid_negative_ts", "make_zero", output]
+        p2 = subprocess.run(cmd2, capture_output=True, text=True,
+                            encoding="utf-8", errors="replace")
+        if p2.returncode != 0:
+            raise merger.MergeError(
+                f"mux final falhou: {p2.stderr.strip()[-800:]}")
     finally:
         if chapters_file:
             Path(chapters_file).unlink(missing_ok=True)
+        dub_mka.unlink(missing_ok=True)
+        try:
+            tmp_dir.rmdir()
+        except OSError:
+            pass
 
 
 def _plan_slices(segs: list[Segment],

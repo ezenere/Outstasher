@@ -18,8 +18,11 @@
   via -filter_complex (aresample=async=1:first_pts=0, asetpts, adelay/atrim)
   e re-encoda (AAC p/ mono-estereo; AC3 p/ multicanal, que preserva a ordem
   dos canais — o AAC nativo do ffmpeg embaralha layouts surround)
-- flags plex-friendly: -fflags +genpts, -avoid_negative_ts make_zero,
-  -max_interleave_delta 0; legendas mov_text/tx3g viram subrip no MKV
+- flags plex-friendly: -fflags +genpts, -avoid_negative_ts make_zero;
+  legendas mov_text/tx3g viram subrip no MKV. (NÃO usar
+  -max_interleave_delta 0: ele manda o muxer esperar um pacote de CADA
+  stream sem limite — com legenda esparsa (PGS que só começa minutos
+  depois) as filas enchem e o ffmpeg trava com 0% para sempre.)
 
 Requer ffmpeg + ffprobe no PATH e numpy.
 """
@@ -895,7 +898,7 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
 
     cmd += ["-map_chapters", "-1" if chapters_src is None else str(0 if chapters_src == ref_input else 1)]
     cmd += ["-map_metadata", "0",
-            "-avoid_negative_ts", "make_zero", "-max_interleave_delta", "0",
+            "-avoid_negative_ts", "make_zero",
             output]
 
     Path(output).parent.mkdir(parents=True, exist_ok=True)
