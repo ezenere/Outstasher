@@ -14,8 +14,11 @@ from services import selector
 
 # SxxEyy com separadores comuns (S01E02, s1e2, S01.E02, S01_E02, S01 E02).
 # Range opcional na sequência: S01E01-E03 / S01E01-03 / S01E01~03.
+# "T01E02" também: T de Temporada, convenção de packs brasileiros (só na forma
+# com o E — "T2" solto seria ambíguo com sequência de filme, e não é aceito
+# como temporada solta).
 _SXXEYY_RE = re.compile(
-    r"[sS](\d{1,2})[ ._-]?[eE](\d{1,3})"
+    r"[sStT](\d{1,2})[ ._-]?[eE](\d{1,3})"
     r"(?:[ ]?[-~][ ]?[eE]?(\d{1,3}))?")
 
 # forma "1x02" (scene antiga). e com EXATAMENTE 2 dígitos: 3 casaria o 264 de

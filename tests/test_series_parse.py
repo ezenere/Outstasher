@@ -17,6 +17,14 @@ def test_sxxeyy_basico():
     assert parse.parse_episode_refs("Show S01 E02") == [(1, 2)]
 
 
+def test_txxeyy_convencao_brasileira():
+    # caso real: pack "By Lucas Firmo" com arquivos "T01E01 - olámigo.mov.mkv"
+    assert parse.parse_episode_refs("T01E01 - olámigo.mov.mkv") == [(1, 1)]
+    assert parse.parse_episode_refs("Show t02e11 720p") == [(2, 11)]
+    # "T2" solto NÃO vira temporada (poderia ser "Terminator 2")
+    assert parse.parse_coverage("Terminator T2 1080p").kind == "unknown"
+
+
 def test_sxxeyy_range():
     assert parse.parse_episode_refs("Show S01E01-E03 1080p") == [(1, 1), (1, 2), (1, 3)]
     assert parse.parse_episode_refs("Show S01E01-03") == [(1, 1), (1, 2), (1, 3)]
