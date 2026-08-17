@@ -350,7 +350,11 @@ export default function AlignmentReview({ job, onResolved }: {
                             dub {fmtT(seg.a_start)}–{fmtT(seg.a_end)}
                             {seg.b_start != null && <> · orig {fmtT(seg.b_start)}–{fmtT(seg.b_end ?? seg.b_start)}</>}
                             {seg.kind === 'replaced'
-                              ? <> · divergência do miolo {Math.round(seg.residual)}/64</>
+                              ? <span title="Distância média dos fingerprints ao longo do MIOLO do trecho: 0 = idênticos, 64 = totalmente diferentes; abaixo de 12 é o mesmo conteúdo (provável falso positivo). 64 exato = sem medição (EDL antiga).">
+                                  {' '}· miolo: {seg.residual >= 64
+                                    ? 'sem medição'
+                                    : `${Math.round(seg.residual)}/64 (${seg.residual < 12 ? 'igual' : seg.residual < 20 ? 'parecido' : 'diferente'})`}
+                                </span>
                               : <> · confiança {(seg.confidence * 100).toFixed(0)}%</>}
                           </span>
                         </div>
