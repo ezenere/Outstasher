@@ -19,7 +19,9 @@
   e re-encoda (AAC p/ mono-estereo; AC3 p/ multicanal, que preserva a ordem
   dos canais — o AAC nativo do ffmpeg embaralha layouts surround)
 - flags plex-friendly: -fflags +genpts, -avoid_negative_ts make_zero,
-  -max_interleave_delta 0; legendas mov_text/tx3g viram subrip no MKV
+  -max_interleave_delta 0 (intercalação estrita: sem ele, stream esparsa
+  de legenda faz o muxer 'forçar saída' e alguns players travam a
+  reprodução); legendas mov_text/tx3g viram subrip no MKV
 
 Requer ffmpeg + ffprobe no PATH e numpy.
 """
@@ -81,6 +83,12 @@ class MergeResult:
     linked: bool = False  # True quando pulou o merge e só hardlinkou/copiou
     offset_ms: float | None = None
     notes: list[str] = field(default_factory=list)
+    # qual input (0=file1, 1=file2) ficou como referência de vídeo/timeline
+    ref_input: int | None = None
+    # deslocamento (s) aplicado no container a cada input: tempo_saída =
+    # tempo_no_arquivo + input_shifts[i] — para quem anexa material externo
+    # (legendas do torrent) depois do merge
+    input_shifts: tuple[float, float] = (0.0, 0.0)
 
 
 class MergeError(RuntimeError):
@@ -287,9 +295,16 @@ def _read_wav(path: str) -> np.ndarray:
     return np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
 
 
-def gcc_phat_delay_seconds(sig: np.ndarray, ref: np.ndarray, fs: int,
-                           max_tau: float | None = MAX_OFFSET_SECONDS) -> float:
-    """tau > 0 => sig ATRASADO vs ref; tau < 0 => sig ADIANTADO."""
+def gcc_phat_delay_with_confidence(
+        sig: np.ndarray, ref: np.ndarray, fs: int,
+        max_tau: float | None = MAX_OFFSET_SECONDS) -> tuple[float, float]:
+    """(tau, qualidade do pico). tau > 0 => sig ATRASADO vs ref.
+
+    A qualidade é a razão pico/média do |cc| na janela de busca: um pico
+    nítido (>3) indica correlação real; perto de 1 é ruído — o refino por
+    segmento do alinhador de séries usa isso para NÃO confiar num offset
+    medido em cima de música/silêncio.
+    """
     sig = sig - np.mean(sig)
     ref = ref - np.mean(ref)
     sig /= (np.std(sig) + 1e-12)
@@ -305,8 +320,17 @@ def gcc_phat_delay_seconds(sig: np.ndarray, ref: np.ndarray, fs: int,
     if max_tau is not None:
         max_shift = min(max_shift, int(fs * max_tau))
     cc = np.concatenate((cc[-max_shift:], cc[:max_shift + 1]))
-    shift = int(np.argmax(np.abs(cc)) - max_shift)
-    return shift / float(fs)
+    mag = np.abs(cc)
+    shift = int(np.argmax(mag) - max_shift)
+    peak_quality = float(mag.max() / (np.mean(mag) + 1e-12))
+    return shift / float(fs), peak_quality
+
+
+def gcc_phat_delay_seconds(sig: np.ndarray, ref: np.ndarray, fs: int,
+                           max_tau: float | None = MAX_OFFSET_SECONDS) -> float:
+    """tau > 0 => sig ATRASADO vs ref; tau < 0 => sig ADIANTADO."""
+    tau, _quality = gcc_phat_delay_with_confidence(sig, ref, fs, max_tau)
+    return tau
 
 
 # -------------------- selecao de streams --------------------
@@ -649,6 +673,7 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
     other_input = 1 - ref_input
     ref_path = file1 if ref_input == 0 else file2
     oth_path = file2 if ref_input == 0 else file1
+    result.ref_input = ref_input
     log(f"Melhor vídeo: {ref_path}")
 
     und_lang_by_input: dict[int, str] = {}
@@ -756,16 +781,26 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
 
     in_ref, in_oth = ["-i", ref_path], ["-i", oth_path]
     if container_sync and apply_offset:
+        shifts = [0.0, 0.0]
         if tau_s < 0:
             # arquivo 2 adiantado: atrasa o áudio dublado no container
             in_oth = ["-itsoffset", f"{-tau_s:.6f}", *in_oth]
+            shifts[other_input] = -tau_s
         else:
             # arquivo 2 atrasado: atrasa todo o resto (equivale a adiantá-lo)
             in_ref = ["-itsoffset", f"{tau_s:.6f}", *in_ref]
+            shifts[ref_input] = tau_s
             if chapters_src is not None and tau_s > 1:
                 result.notes.append(
                     f"capítulos podem ficar deslocados {tau_s:.1f}s "
                     f"(offset aplicado no container)")
+        result.input_shifts = (shifts[0], shifts[1])
+    elif apply_offset:
+        # drift: o áudio do outro input é re-encodado com adelay/atrim (−tau);
+        # a timeline de referência não muda
+        shifts = [0.0, 0.0]
+        shifts[other_input] = -tau_s
+        result.input_shifts = (shifts[0], shifts[1])
 
     # vídeo: copy por padrão; re-encode quando as opções avançadas pedirem.
     # Planejado antes do comando porque o plano pode trazer args de ENTRADA

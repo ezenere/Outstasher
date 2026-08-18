@@ -11,12 +11,14 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+import httpx
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 import config
 from services import auth, catalog, jackett, jobs, store, tmdb, transcode
+from services.series import pipeline as series_pipeline
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
 DIST_DIR = FRONTEND_DIR / "dist"
@@ -216,6 +218,64 @@ async def movies(q: str = "", page: int = 1):
     return result
 
 
+@app.get("/api/series")
+async def series(q: str = "", page: int = 1):
+    """Busca/populares de séries — espelho de /api/movies (mesmo shape de card).
+
+    O selo de coleção usa o mesmo índice (título, ano) do scan de pastas: uma
+    pasta de série no destino conta como "na coleção" (granularidade por
+    episódio chega com o catálogo de séries)."""
+    if not config.TMDB_API_KEY:
+        raise HTTPException(500, "TMDB_API_KEY não configurada no .env")
+    page = max(1, min(page, 500))
+    result = await (tmdb.search_tv(q.strip(), page) if q.strip()
+                    else tmdb.popular_tv(page))
+    keys = await asyncio.to_thread(catalog.library_keys)
+    for m in result.get("results", []):
+        m["in_catalog"] = catalog.in_library(m, keys)
+    return result
+
+
+@app.get("/api/series/{tv_id}/owned")
+async def series_owned(tv_id: int, title: str = "", year: str = ""):
+    """Episódios da série já presentes na coleção: {temporada: [episódios]}.
+
+    Casa por [tmdbid-N] na pasta; fallback por título/ano (a UI manda os dois
+    do card para evitar outra ida ao TMDB)."""
+    owned = await asyncio.to_thread(
+        catalog.owned_episodes, tv_id, title or None, year or None)
+    return {"seasons": owned}
+
+
+@app.get("/api/series/{tv_id}/season/{season}")
+async def series_season(tv_id: int, season: int):
+    """Episódios de uma temporada (nome, data de estreia, duração)."""
+    try:
+        return await tmdb.tv_season(tv_id, season)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(404, "Temporada não encontrada")
+        raise
+
+
+@app.get("/api/series/{tv_id}")
+async def series_detail(tv_id: int):
+    """Detalhe da série + lista de temporadas, para o modal de seleção."""
+    try:
+        d = await tmdb.tv_details(tv_id)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(404, "Série não encontrada")
+        raise
+    # shape de card (title = localizado) + temporadas
+    return {
+        "id": d["id"], "title": d["localized_title"],
+        "original_title": d["original_title"], "year": d["year"],
+        "overview": d["overview"], "poster": d["poster"],
+        "seasons": d["seasons"],
+    }
+
+
 class JobRequest(BaseModel):
     tmdb_id: int
     language: str
@@ -244,6 +304,7 @@ class CancelRequest(BaseModel):
 class DestinationRequest(BaseModel):
     label: str
     path: str
+    media: str = "movie"  # movie | tv — bibliotecas separadas
     is_default: bool = False
 
 
@@ -292,15 +353,24 @@ async def delete_convert_preset(preset_id: int):
 # -------------------- destinos --------------------
 
 @app.get("/api/destinations")
-async def list_destinations():
-    return [_with_disk(d) for d in store.list_destinations()]
+async def list_destinations(media: str | None = None):
+    """Destinos, opcionalmente filtrados por mídia — filmes e séries têm
+    bibliotecas separadas (?media=movie|tv)."""
+    if media is not None and media not in ("movie", "tv"):
+        raise HTTPException(400, "media deve ser 'movie' ou 'tv'")
+    dests = (store.list_destinations_by_media(media) if media
+             else store.list_destinations())
+    return [_with_disk(d) for d in dests]
 
 
 @app.post("/api/destinations")
 async def add_destination(req: DestinationRequest):
     if not req.label.strip() or not req.path.strip():
         raise HTTPException(400, "Nome e caminho são obrigatórios")
-    dest = store.add_destination(req.label.strip(), req.path.strip(), req.is_default)
+    if req.media not in ("movie", "tv"):
+        raise HTTPException(400, "media deve ser 'movie' ou 'tv'")
+    dest = store.add_destination(req.label.strip(), req.path.strip(),
+                                 req.is_default, req.media)
     catalog.invalidate_library()  # os destinos definem o que conta como coleção
     return _with_disk(dest)
 
@@ -309,7 +379,10 @@ async def add_destination(req: DestinationRequest):
 async def update_destination(dest_id: int, req: DestinationRequest):
     if not req.label.strip() or not req.path.strip():
         raise HTTPException(400, "Nome e caminho são obrigatórios")
-    dest = store.update_destination(dest_id, req.label.strip(), req.path.strip(), req.is_default)
+    if req.media not in ("movie", "tv"):
+        raise HTTPException(400, "media deve ser 'movie' ou 'tv'")
+    dest = store.update_destination(dest_id, req.label.strip(), req.path.strip(),
+                                    req.is_default, req.media)
     if not dest:
         raise HTTPException(404, "Destino não encontrado")
     catalog.invalidate_library()
@@ -429,10 +502,17 @@ async def catalog_item(folder: str, destination_id: int | None = None):
     # dados do TMDB (falha de rede nao quebra a pagina). Com a pasta já marcada
     # ([tmdbid-N]), busca pelo ID: ele foi escolhido/confirmado por alguém, e
     # adivinhar de novo pelo título erraria justamente nos casos que o ID
-    # resolve (remake, título localizado, coleção).
+    # resolve (remake, título localizado, coleção). Pasta de SÉRIE consulta a
+    # base de TV (filmes e séries têm espaços de id separados no TMDB).
+    is_series = detail.get("type") == "series"
     try:
-        detail["tmdb"] = (await tmdb.by_id(detail["tmdb_id"]) if detail["tmdb_id"]
-                          else await tmdb.match(detail["title"], detail["year"]))
+        if detail["tmdb_id"]:
+            detail["tmdb"] = await (tmdb.tv_by_id(detail["tmdb_id"]) if is_series
+                                    else tmdb.by_id(detail["tmdb_id"]))
+        else:
+            detail["tmdb"] = await (tmdb.tv_match(detail["title"], detail["year"])
+                                    if is_series
+                                    else tmdb.match(detail["title"], detail["year"]))
     except Exception:  # noqa: BLE001
         detail["tmdb"] = None
     return detail
@@ -508,6 +588,28 @@ async def create_recompress_job(req: RecompressRequest):
         raise HTTPException(400, str(e))
 
 
+class RecompressBatchRequest(BaseModel):
+    folder: str
+    rels: list[str]  # arquivos da série/temporada/episódios escolhidos
+    convert: dict
+    replace: bool = True
+    destination_id: int | None = None
+    tmdb_id: int | None = None
+
+
+@app.post("/api/jobs/recompress-batch")
+async def create_recompress_batch_job(req: RecompressBatchRequest):
+    """Recompressão em lote (série/temporada/episódios): um job media_type=tv
+    com progresso e falha POR ARQUIVO e a regra dos 75%."""
+    from services.series import recompress as series_recompress
+    try:
+        return await series_recompress.create_recompress_batch(
+            req.destination_id, req.folder, req.rels, req.convert,
+            req.replace, req.tmdb_id)
+    except (ValueError, catalog.CatalogError) as e:
+        raise HTTPException(400, str(e))
+
+
 @app.get("/api/capabilities")
 async def capabilities():
     """Codecs que o ffmpeg DESTE servidor sabe encodar — a UI de opções
@@ -552,6 +654,70 @@ async def create_manual_job(req: ManualJobRequest):
         raise HTTPException(400, str(e))
 
 
+class SeriesJobRequest(BaseModel):
+    tmdb_id: int
+    language: str
+    seasons: list[int] = []            # temporadas inteiras
+    episodes: dict[int, list[int]] = {}  # avulsos: {3: [1, 5]}
+    mode: str = "auto"                 # auto | manual
+    destination_id: int | None = None
+    torrent_target_id: int | None = None
+    convert: dict | None = None
+
+
+@app.post("/api/jobs/series")
+async def create_series_job(req: SeriesJobRequest):
+    """Job de série: baixa original + dublado de cada episódio pedido."""
+    try:
+        return await series_pipeline.create_series(
+            req.tmdb_id, req.language, req.seasons, req.episodes, req.mode,
+            req.destination_id, req.torrent_target_id, req.convert)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class ResolveRequest(BaseModel):
+    reason: str      # manual_pick | gaps_confirm | incompatible_torrents | force_continue
+    decision: dict = {}
+
+
+class SwitchTorrentRequest(BaseModel):
+    torrent_n: int
+    candidate_id: str | None = None  # None = próxima reserva compatível
+
+
+@app.post("/api/jobs/{job_id}/switch-torrent")
+async def switch_series_torrent(job_id: str, req: SwitchTorrentRequest):
+    """Troca manual de um torrent de série durante o download ("tentar
+    próximo(s)" quando candidate_id é nulo)."""
+    try:
+        return await series_pipeline.switch_torrent(job_id, req.torrent_n,
+                                                    req.candidate_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/jobs/{job_id}/torrent-candidates")
+async def series_torrent_candidates(job_id: str, n: int):
+    """Candidatos compatíveis (mesma cobertura) para trocar o torrent `n`."""
+    try:
+        return {"candidates": series_pipeline.torrent_alternatives(job_id, n)}
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/jobs/{job_id}/resolve")
+async def resolve_job_gate(job_id: str, req: ResolveRequest):
+    """Resolve o gate ativo de um job de série (decisões sempre do usuário)."""
+    try:
+        job = await series_pipeline.resolve(job_id, req.reason, req.decision)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    if not job:
+        raise HTTPException(404, "Job não encontrado (ou não é de série)")
+    return job
+
+
 @app.get("/api/jobs")
 async def list_jobs():
     return jobs.list_jobs()
@@ -565,25 +731,67 @@ async def jobs_summary():
     return jobs.summary()
 
 
+def _check_media(media: str | None) -> str | None:
+    """Valida o filtro de mídia dos endpoints de jobs (None = todos)."""
+    if media is not None and media not in ("movie", "tv"):
+        raise HTTPException(400, "media deve ser 'movie' ou 'tv'")
+    return media
+
+
 @app.get("/api/jobs/counts")
-async def jobs_counts():
-    """Contagem por grupo (active/error/done/all) para os badges do filtro."""
-    return jobs.counts()
+async def jobs_counts(media: str | None = None):
+    """Contagem por grupo (active/error/done/all) para os badges do filtro.
+
+    `media=movie|tv` restringe à dimensão de mídia (filmes/séries)."""
+    return jobs.counts(_check_media(media))
 
 
 @app.get("/api/jobs/list")
-async def jobs_list(group: str = "active", page: int = 1, per_page: int | None = None):
+async def jobs_list(group: str = "active", page: int = 1,
+                    per_page: int | None = None, media: str | None = None):
     """Cards enxutos da tela de Jobs, filtrados por grupo e paginados no backend.
 
     Sem `per_page` devolve tudo numa página (compatível com quem não pagina).
+    `media=movie|tv` filtra pela dimensão de mídia, combinável com o grupo.
     """
     if per_page is not None and per_page < 1:
         raise HTTPException(400, "per_page deve ser >= 1")
     jobs.touch_progress_demand()  # os cards mostram as barras: watchdog acelera
     try:
-        return jobs.list_group(group, page, per_page)
+        return jobs.list_group(group, page, per_page, _check_media(media))
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@app.get("/api/jobs/{job_id}/frame")
+async def job_frame(job_id: str, episode: str, side: str = "a", t: float = 0.0):
+    """Um frame JPEG de um dos arquivos de origem de um episódio, para a
+    revisão de alinhamento comparar as duas versões lado a lado.
+
+    side: "a" = dublado, "b" = original. `t` em segundos NO ARQUIVO pedido.
+    """
+    job = jobs.get_job(job_id)
+    if not job or job.get("media_type") != "tv":
+        raise HTTPException(404, "Job de série não encontrado")
+    ep = (job.get("episodes") or {}).get(episode)
+    if not ep:
+        raise HTTPException(404, f"Episódio {episode} não existe neste job")
+    src = (ep.get("src") or {}).get("dubbed" if side == "a" else "original")
+    if not src or not Path(src).is_file():
+        raise HTTPException(404, "Arquivo de origem não está mais no disco")
+
+    def grab() -> bytes:
+        p = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-ss", f"{max(0.0, t):.3f}", "-i", src, "-frames:v", "1",
+             "-vf", "scale=480:-2", "-f", "image2", "-c:v", "mjpeg", "pipe:1"],
+            capture_output=True, timeout=30)
+        if p.returncode != 0 or not p.stdout:
+            raise HTTPException(500, "ffmpeg não extraiu o frame")
+        return p.stdout
+
+    data = await asyncio.to_thread(grab)
+    return Response(content=data, media_type="image/jpeg")
 
 
 @app.get("/api/jobs/{job_id}")

@@ -194,6 +194,30 @@ class QbitClient:
         r.raise_for_status()
         return r.json()
 
+    async def files(self, torrent_hash: str) -> list[dict]:
+        """Arquivos de um torrent: [{index, name, size, priority, progress}].
+
+        Logo após adicionar um magnet a lista vem VAZIA (metadados ainda não
+        chegaram) — o chamador precisa tentar de novo depois (o pipeline de
+        séries usa a mesma janela de graça do watchdog)."""
+        r = await self._get("/api/v2/torrents/files", {"hash": torrent_hash})
+        r.raise_for_status()
+        return r.json()
+
+    async def file_prio(self, torrent_hash: str, file_ids: list[int], priority: int):
+        """Prioridade de arquivos dentro do torrent (0 = não baixar).
+
+        É como um season pack baixa só os episódios pedidos: os demais arquivos
+        vão para prioridade 0 antes de o download andar."""
+        if not file_ids:
+            return
+        r = await self._post("/api/v2/torrents/filePrio", {
+            "hash": torrent_hash,
+            "id": "|".join(str(i) for i in file_ids),
+            "priority": str(priority),
+        })
+        r.raise_for_status()
+
     async def delete(self, hashes: str, delete_files: bool):
         """Remove torrents (hashes separados por '|'), opcionalmente com os dados."""
         r = await self._post("/api/v2/torrents/delete", {

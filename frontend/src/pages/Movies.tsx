@@ -9,14 +9,19 @@ import {
 import { useJobsSummary } from '../jobsSummary'
 import AdvancedOptions from '../components/AdvancedOptions'
 import { useDialog } from '../components/Dialog'
+import SeriesModal from '../components/SeriesModal'
 import { DiskFree, Empty, MovieStateBadge, MovieStateIcon, useScrollLock } from '../components/ui'
 
 // estados "em progresso": se um filme estava num destes e sumiu do summary,
 // entendemos que terminou -> marca como 'done' (Baixado) localmente.
 const IN_PROGRESS = new Set<MovieState>(['converting', 'downloading', 'searching', 'awaiting'])
 
+// a home busca filmes OU séries (endpoints/TMDB separados); o toggle troca
+type MediaKind = 'movie' | 'tv'
+
 export default function Movies() {
   const dialog = useDialog()
+  const [mediaKind, setMediaKind] = useState<MediaKind>('movie')
   const [movies, setMovies] = useState<Movie[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
@@ -30,6 +35,7 @@ export default function Movies() {
   const [targets, setTargets] = useState<TorrentTarget[]>([])
   const [targetId, setTargetId] = useState<number | null>(null)
   const [selected, setSelected] = useState<Movie | null>(null)
+  const [selectedSeries, setSelectedSeries] = useState<Movie | null>(null)
   const [starting, setStarting] = useState(false)
   const [justStarted, setJustStarted] = useState<number | null>(null)
   // paginação: guarda o termo buscado, a página atual e o total de páginas
@@ -39,41 +45,46 @@ export default function Movies() {
   const [loadingMore, setLoadingMore] = useState(false)
   useScrollLock(selected !== null)  // modal aberto trava o scroll do body
 
-  // estado de cada filme (tmdb_id -> convertendo/baixando/...). Deriva do
-  // summary compartilhado do cabeçalho (fonte única, atualizado a cada 5s).
+  // estado de cada item (chave media:tmdb_id -> convertendo/baixando/...).
+  // A chave é composta porque um id de filme e um de série podem colidir no
+  // TMDB (bases separadas). Deriva do summary compartilhado do cabeçalho
+  // (fonte única, atualizado a cada 5s).
   const summary = useJobsSummary()
-  // filmes que já vimos "em progresso" e sumiram do summary -> terminaram.
+  // itens que já vimos "em progresso" e sumiram do summary -> terminaram.
   // Guardamos localmente pois o summary não traz 'done'.
-  const finished = useRef<Set<number>>(new Set())
-  const prevSummary = useRef<Map<number, MovieState>>(new Map())
-  const [states, setStates] = useState<Map<number, MovieState>>(new Map())
+  const finished = useRef<Set<string>>(new Set())
+  const prevSummary = useRef<Map<string, MovieState>>(new Map())
+  const [states, setStates] = useState<Map<string, MovieState>>(new Map())
+  // chave do card exibido no toggle atual
+  const skey = (id: number) => `${mediaKind}:${id}`
 
-  // reduz o summary a um mapa tmdb_id -> state a cada atualização; aplica a
-  // regra "sumiu de em-progresso -> done".
+  // reduz o summary a um mapa media:tmdb_id -> state a cada atualização;
+  // aplica a regra "sumiu de em-progresso -> done".
   useEffect(() => {
-    const cur = new Map<number, MovieState>()
+    const cur = new Map<string, MovieState>()
     for (const s of summary) {
       if (s.recompress) continue  // reusa o tmdb_id de um filme já baixado
-      const prev = cur.get(s.tmdb_id)
-      // o backend já ordena por prioridade; o 1º de cada tmdb_id vence
-      if (prev === undefined) cur.set(s.tmdb_id, s.state)
+      const key = `${s.media_type ?? 'movie'}:${s.tmdb_id}`
+      const prev = cur.get(key)
+      // o backend já ordena por prioridade; o 1º de cada chave vence
+      if (prev === undefined) cur.set(key, s.state)
     }
     // detecta término: estava em progresso no tick anterior e sumiu agora
-    for (const [tid, st] of prevSummary.current) {
-      if (IN_PROGRESS.has(st) && !cur.has(tid)) finished.current.add(tid)
+    for (const [key, st] of prevSummary.current) {
+      if (IN_PROGRESS.has(st) && !cur.has(key)) finished.current.add(key)
     }
     // se voltou a aparecer no summary (readicionado), deixa de ser "finished"
-    for (const tid of cur.keys()) finished.current.delete(tid)
+    for (const key of cur.keys()) finished.current.delete(key)
     prevSummary.current = cur
 
     const next = new Map(cur)
-    for (const tid of finished.current) if (!next.has(tid)) next.set(tid, 'done')
+    for (const key of finished.current) if (!next.has(key)) next.set(key, 'done')
     setStates(next)
   }, [summary])
 
   useEffect(() => {
     api<Language[]>('/api/languages').then(setLanguages).catch(() => {})
-    api<Destination[]>('/api/destinations')
+    api<Destination[]>('/api/destinations?media=movie')
       .then((ds) => {
         setDestinations(ds)
         setDestId(ds.find((d) => d.is_default)?.id ?? ds[0]?.id ?? null)
@@ -86,7 +97,17 @@ export default function Movies() {
       })
       .catch(() => {})
     void search('')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // trocar o toggle refaz a busca atual no outro endpoint
+  useEffect(() => {
+    void search(searched)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mediaKind])
+
+  // endpoint da busca conforme o toggle (mesmo shape de página nos dois)
+  const searchBase = mediaKind === 'tv' ? '/api/series' : '/api/movies'
 
   // nova busca: reseta a lista e carrega a página 1
   async function search(q: string) {
@@ -94,7 +115,7 @@ export default function Movies() {
     setError(null)
     setSearched(q)
     try {
-      const p = await api<MoviePage>(`/api/movies?q=${encodeURIComponent(q)}&page=1`)
+      const p = await api<MoviePage>(`${searchBase}?q=${encodeURIComponent(q)}&page=1`)
       setMovies(p.results)
       setPage(p.page)
       setTotalPages(p.total_pages)
@@ -109,7 +130,7 @@ export default function Movies() {
     setLoadingMore(true)
     try {
       const next = page + 1
-      const p = await api<MoviePage>(`/api/movies?q=${encodeURIComponent(searched)}&page=${next}`)
+      const p = await api<MoviePage>(`${searchBase}?q=${encodeURIComponent(searched)}&page=${next}`)
       // dedup por id (o TMDB às vezes repete títulos entre páginas)
       setMovies((cur) => {
         const seen = new Set((cur ?? []).map((m) => m.id))
@@ -127,7 +148,7 @@ export default function Movies() {
   async function start(kind: 'both' | 'original' | 'dubbed') {
     if (!selected) return
     // avisa se o filme já está sendo baixado/convertido/finalizado
-    const existing = states.get(selected.id)
+    const existing = states.get(`movie:${selected.id}`)
     if (existing && !(await dialog.confirm({
       title: 'Baixar de novo?',
       message: `Este filme já tem um download ${MOVIE_STATE_LABEL[existing].toLowerCase()}. Quer baixar de novo mesmo assim?`,
@@ -164,13 +185,31 @@ export default function Movies() {
   return (
     <div>
       <div className="flex gap-2">
+        {/* toggle filmes/séries: mesma busca, endpoints e modais diferentes */}
+        <div className="flex shrink-0 gap-1 rounded-lg border border-zinc-700 bg-zinc-900 p-1">
+          {([['movie', 'Filmes'], ['tv', 'Séries']] as const).map(([k, label]) => (
+            <button
+              key={k}
+              onClick={() => setMediaKind(k)}
+              className={`rounded-md px-3 text-sm transition-colors ${
+                mediaKind === k
+                  ? 'bg-blue-600 font-semibold text-white'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         <div className="relative flex-1">
           <Search width={16} height={16} className="absolute top-1/2 left-3 -translate-y-1/2 text-zinc-500" />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && search(query)}
-            placeholder="Buscar filme no TMDB... (vazio = populares)"
+            placeholder={mediaKind === 'tv'
+              ? 'Buscar série no TMDB... (vazio = populares)'
+              : 'Buscar filme no TMDB... (vazio = populares)'}
             className="w-full rounded-lg border border-zinc-700 bg-zinc-900 py-2.5 pr-3 pl-9 text-sm outline-none focus:border-blue-500"
           />
         </div>
@@ -187,14 +226,15 @@ export default function Movies() {
         {error && <Empty>Erro: {error}</Empty>}
         {movies?.length === 0 && <Empty>Nada encontrado.</Empty>}
         {movies?.map((m) => {
-          const state = states.get(m.id)
-          const started = justStarted === m.id
+          const state = states.get(skey(m.id))
+          const started = mediaKind === 'movie' && justStarted === m.id
           return (
             <button
               key={m.id}
-              onClick={() => setSelected(m)}
+              onClick={() => (mediaKind === 'tv' ? setSelectedSeries(m) : setSelected(m))}
               className={`flex flex-col relative overflow-hidden rounded-xl border-2 bg-zinc-900 text-left transition-transform hover:-translate-y-1 ${
-                selected?.id === m.id ? 'border-blue-500' : state ? 'border-zinc-700' : 'border-transparent'
+                (mediaKind === 'tv' ? selectedSeries?.id === m.id : selected?.id === m.id)
+                  ? 'border-blue-500' : state ? 'border-zinc-700' : 'border-transparent'
               }`}
             >
               {(state || started) && (
@@ -252,6 +292,10 @@ export default function Movies() {
             {loadingMore ? 'Carregando…' : `Carregar mais (${page}/${totalPages})`}
           </button>
         </div>
+      )}
+
+      {selectedSeries && (
+        <SeriesModal series={selectedSeries} onClose={() => setSelectedSeries(null)} />
       )}
 
       {selected && (

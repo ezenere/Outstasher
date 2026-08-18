@@ -70,6 +70,12 @@ AUDIO_CODECS = {
 RESOLUTION_CAPS = {"4320": 7680, "2160": 3840, "1080": 1920, "720": 1280, "480": 854}
 RESOLUTION_TOLERANCE = 1.08
 
+# intervalo entre keyframes na saída re-encodada, em segundos. 2 s é o padrão
+# de streaming (segmentos HLS/DASH): seek imediato em qualquer player e cortes
+# por stream copy (episódio fundido, capítulos) precisos. Contra o GOP de 10 s
+# dos defaults o custo é pequeno (~1-3% de bitrate no mesmo CRF).
+GOP_SECONDS = 2.0
+
 # níveis genéricos de preset -> valor por encoder (velocidade vs compressão)
 PRESET_LEVELS = ("veryfast", "fast", "default", "slow", "veryslow")
 _NVENC_PRESETS = {"veryfast": "p1", "fast": "p3", "default": "p4",
@@ -610,10 +616,21 @@ def plan_video(probe: dict, vstream: dict, opts: ConvertOptions,
         notes.append(f"vídeo re-encodado em {codec_id.upper()} ({encoder}, "
                      f"{target_kbps} kbps, preset {opts.preset})")
 
-    if is_hw:
-        # GOP longo (~10 s): o default dos encoders de HW herda GOPs curtos de
-        # streaming, que custam eficiência em arquivo parado
-        args += ["-g", str(int(round((_fps_of(vstream) or 24.0) * 10)))]
+    # keyframe a cada GOP_SECONDS (padrão de streaming — HLS/DASH usam 2 s):
+    # seek instantâneo e cortes de stream copy (série fundida, capítulos)
+    # caem perto de onde se pede. Custa ~1-3% de bitrate contra o GOP de 10 s
+    # que os defaults (x264/x265: 250 frames) e os encoders de HW usavam.
+    # Vale para TODOS os encoders — filmes e séries passam pelo mesmo plano.
+    gop = int(round((_fps_of(vstream) or 24.0) * GOP_SECONDS))
+    args += ["-g", str(gop)]
+    if encoder.endswith("_nvenc"):
+        args += ["-forced-idr", "1"]   # keyframe = IDR (seek limpo, como stream)
+    elif encoder.endswith("_qsv"):
+        args += ["-forced_idr", "1"]
+    elif encoder in ("libx264", "libx265"):
+        # keyint_min == g: keyframes REGULARES a cada 2 s, não só onde o
+        # scenecut quiser (o scenecut continua ligado e adiciona os seus)
+        args += ["-keyint_min", str(gop)]
 
     # ---- profundidade de cor ----
     ten_bit_out = src_10bit if opts.bit_depth == "keep" else (opts.bit_depth == "10")

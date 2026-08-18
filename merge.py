@@ -129,6 +129,55 @@ def run_series(dir1: Path, dir2: Path, out_dir: Path, target_lang: str | None,
     return len(failures)
 
 
+def run_align_report(dub_root: Path, orig_root: Path, out_dir: Path) -> int:
+    """Alinha cada par de episodios POR CONTEUDO e imprime a confianca — SEM
+    merge. E o modo de triagem de uma temporada: em minutos se descobre quais
+    episodios sao limpos e quais vao dar trabalho manual. Grava a matriz de
+    distancia de cada par como PNG em out_dir (debug visual). Retorna o nº de
+    conflitos/falhas."""
+    from services.series.align import engine, edl as edl_mod
+
+    for d in (dub_root, orig_root):
+        if not d.is_dir():
+            sys.exit(f"ERRO: '{d}' nao e uma pasta")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    eps_dub = _scan_episodes(dub_root)
+    eps_orig = _scan_episodes(orig_root)
+    common = sorted(set(eps_dub) & set(eps_orig))
+    for key in sorted(set(eps_dub) ^ set(eps_orig)):
+        side = "dublado" if key in eps_dub else "original"
+        print(f"  (pulado: {key} so existe no lado {side})")
+    if not common:
+        sys.exit("ERRO: nenhum episodio em comum entre as duas pastas")
+
+    print(f"\n{'ep':8} {'match%':>7} {'residuo':>8} {'segs':>5}  situacao")
+    problems = 0
+    for key in common:
+        png = out_dir / f"{key}.png"
+        try:
+            edl = engine.align_pair(str(eps_dub[key]), str(eps_orig[key]),
+                                    episode=key, dump_png=str(png))
+        except engine.AlignConflict as e:
+            print(f"{key:8} {'—':>7} {'—':>8} {'—':>5}  ⚠️ CONFLITO: {e}")
+            problems += 1
+            continue
+        except Exception as e:  # noqa: BLE001 — um episodio nao para o lote
+            print(f"{key:8} {'—':>7} {'—':>8} {'—':>5}  ❌ {type(e).__name__}: {e}")
+            problems += 1
+            continue
+        st = edl_mod.stats(edl)
+        flag = ("🔴 revisar (substituicao)" if st["review_required"]
+                else "🟢 limpo" if st["match_pct"] > 97
+                else "🟡 com edicoes (gaps)")
+        kinds = ", ".join(f"{k}x{v}" for k, v in sorted(st["kinds"].items()))
+        print(f"{key:8} {st['match_pct']:>6.1f}% {st['mean_residual'] or 0:>8.2f} "
+              f"{len(edl['segments']):>5}  {flag} [{kinds}]")
+        if st["review_required"]:
+            problems += 1
+    print(f"\nPNGs da matriz de distancia em: {out_dir}")
+    return problems
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -140,6 +189,11 @@ def main():
     ap.add_argument("--series", action="store_true",
                     help="modo serie: escaneia as duas pastas, casa episodios por "
                          "SxxExx e faz o merge de cada par (saida: SXXEXX.mkv)")
+    ap.add_argument("--align-report", action="store_true",
+                    help="modo serie SEM merge: alinha cada par por CONTEUDO "
+                         "(dHash + DP) e imprime o relatorio de confianca; grava "
+                         "a matriz de distancia de cada episodio como PNG na "
+                         "pasta de saida (debug visual)")
 
     d = SegmentParams()  # defaults dos thresholds exibidos no --help
     seg = ap.add_argument_group(
@@ -189,6 +243,11 @@ def main():
             return merge_segmented(f1, f2, out, target_lang=target_lang, params=params)
     else:
         merge_fn = None  # run_series/abaixo caem no merge classico
+
+    if args.align_report:
+        failures = run_align_report(Path(args.file2), Path(args.file1),
+                                    Path(args.output))
+        sys.exit(1 if failures else 0)
 
     if args.series:
         failures = run_series(Path(args.file1), Path(args.file2), Path(args.output),

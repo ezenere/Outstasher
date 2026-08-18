@@ -8,6 +8,7 @@ import { convertSummary, post, prog, type Job, type JobEvent, type JobProgress }
 import { api } from '../api'
 import { Badge, CandidatesTable, ClampText, Collapsible, Elapsed, Empty, KindTags, MergeBar, ProgressBar } from '../components/ui'
 import { useDialog } from '../components/Dialog'
+import { SeriesEpisodes, SeriesGate, SeriesReport, SeriesTorrents } from '../components/SeriesJobSections'
 import { jobTitle, removeJob } from './Jobs'
 
 export default function JobDetail() {
@@ -273,6 +274,11 @@ export default function JobDetail() {
       )}
 
       {/* ---- ações pendentes (o mais urgente vem primeiro) ---- */}
+      {/* gates de série (lacunas / incompatibilidade / escolha manual) */}
+      {job.media_type === 'tv' && <SeriesGate job={job} onResolved={reload} />}
+      {/* relatório final da série (com recriação das falhas) */}
+      {job.media_type === 'tv' && <SeriesReport job={job} />}
+
       {job.status === 'awaiting' && job.drift_confirm && (
         <section className="mt-6 rounded-xl border border-amber-900/60 bg-amber-950/20 p-4">
           <h2 className="mb-2 flex items-center gap-1.5 font-semibold text-amber-300">
@@ -346,6 +352,10 @@ export default function JobDetail() {
           {job.status === 'merging' && job.progress?.merge && <MergeBar p={job.progress.merge} />}
         </section>
       )}
+
+      {/* série: todos os torrents em andamento + estado por episódio */}
+      {job.media_type === 'tv' && <SeriesTorrents job={job} onChanged={reload} />}
+      {job.media_type === 'tv' && <SeriesEpisodes job={job} />}
 
       {(pv || pa) && (
         <section className="mt-6">

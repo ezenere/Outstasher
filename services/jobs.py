@@ -28,6 +28,7 @@ import httpx
 import config
 from services import catalog, jackett, merger, selector, store, tmdb, transcode
 from services.qbittorrent import QbitClient, QbitError
+from services.series import subs as ext_subs
 
 # problemas de comunicação com o qBittorrent que NÃO devem falhar o job
 # durante o download: rede fora, sessão caída, restart do qBittorrent...
@@ -200,7 +201,11 @@ def resume_pending():
     """Retoma jobs interrompidos por um restart do servidor."""
     # cópia: _set(..., "error") remove o job de _jobs no meio da iteração
     for job in list(_jobs.values()):
-        if _is_recompress(job):
+        if job.get("media_type") == "tv":
+            # pipeline de séries é desacoplado; import tardio evita ciclo
+            from services.series import pipeline as series_pipeline
+            series_pipeline.resume(job)
+        elif _is_recompress(job):
             _resume_recompress(job)
         elif _is_local_files(job):
             _resume_manual(job)
@@ -242,7 +247,11 @@ def _resume_manual(job: dict):
 
 
 def _public(job: dict) -> dict:
-    return {k: v for k, v in job.items() if k not in ("events", "search")}
+    # search/search_tv ficam de fora do detalhe: são grandes e a UI recebe os
+    # candidatos pelo canal certo (job["search"] no manual de filmes entra via
+    # get_job; nos gates de série eles vêm no payload de job["awaiting"])
+    return {k: v for k, v in job.items() if k not in ("events", "search",
+                                                      "search_tv")}
 
 
 def _lookup(job_id: str) -> dict | None:
@@ -312,9 +321,17 @@ _STATE_RANK = {"converting": 0, "downloading": 1, "searching": 2,
                "awaiting": 3, "done": 4, "error": 5}
 
 
-def _all_jobs() -> list[dict]:
-    """Ativos (memória) + terminais (banco), sem duplicar."""
-    return list(_jobs.values()) + store.load_jobs_by_status(_TERMINAL_STATUSES)
+def _media_type(job: dict) -> str:
+    """Dimensão de mídia do job. Jobs anteriores à feature de séries não têm a
+    chave no JSON — são todos filmes."""
+    return job.get("media_type", "movie")
+
+
+def _all_jobs(media: str | None = None) -> list[dict]:
+    """Ativos (memória) + terminais (banco), sem duplicar. `media` filtra pela
+    dimensão de mídia (movie/tv)."""
+    mem = [j for j in _jobs.values() if media is None or _media_type(j) == media]
+    return mem + store.load_jobs_by_status(_TERMINAL_STATUSES, media=media)
 
 
 def _movie_title(job: dict) -> str:
@@ -332,7 +349,19 @@ def _download_pct(job: dict) -> float | None:
     sem leitura do qBittorrent conta como 0% — o denominador é o que o job
     PRECISA baixar, não o que já reportou (senão o vídeo sozinho em 40% viraria
     "40% do job", e a barra andaria para trás quando o áudio aparecesse).
+
+    Série: média dos torrents do plano PONDERADA pela cobertura (um pack de 10
+    episódios pesa 10x um avulso — a barra reflete episódios, não torrents).
     """
+    if job.get("media_type") == "tv":
+        torrents = job.get("torrents") or []
+        weights = [max(1, len(t.get("coverage") or [])) for t in torrents]
+        pcts = [100.0 if t.get("state") == "done"
+                else _pct(t.get("progress")) for t in torrents]
+        if not torrents or not any(p is not None for p in pcts):
+            return None
+        total = sum(weights)
+        return sum((p or 0.0) * w for p, w in zip(pcts, weights)) / total
     needed = _needed_torrents(job)
     read = [_pct(job["progress"].get(k)) for k in needed]
     if not any(p is not None for p in read):
@@ -355,6 +384,7 @@ def summary() -> list[dict]:
         out.append({"id": j["id"], "tmdb_id": j.get("tmdb_id"),
                     "title": _movie_title(j), "status": j["status"],
                     "state": state, "pct": pct,
+                    "media_type": _media_type(j),
                     "recompress": _is_recompress(j)})
     out.sort(key=lambda x: _STATE_RANK[x["state"]])
     return out
@@ -368,14 +398,15 @@ _GROUPS = {
 }
 
 
-def counts() -> dict[str, int]:
+def counts(media: str | None = None) -> dict[str, int]:
     """Contagem por grupo (active/error/done/all) para os badges do filtro.
 
     O banco é a fonte: todo job (ativo ou terminal) tem uma linha lá e as
     transições de status persistem na hora (via _event), então o `status` no
     banco está sempre atualizado — não precisa somar a memória por cima.
+    `media` ("movie"/"tv") restringe à dimensão de mídia.
     """
-    by_status = store.count_jobs_by_status()
+    by_status = store.count_jobs_by_status(media)
     c = {"all": sum(by_status.values()), "active": 0, "error": 0, "done": 0}
     for group, statuses in _GROUPS.items():
         c[group] = sum(by_status.get(s, 0) for s in statuses)
@@ -388,6 +419,7 @@ def _slim_job(job: dict) -> dict:
     ficam no detalhe do job."""
     return {
         "id": job["id"], "tmdb_id": job.get("tmdb_id"), "language": job["language"],
+        "media_type": _media_type(job),
         "mode": job.get("mode"), "kind": job.get("kind", "both"),
         "download_only": job.get("download_only", False),
         "convert": bool(job.get("convert")),
@@ -406,11 +438,29 @@ def _slim_job(job: dict) -> dict:
             "merge_read": (job["progress"].get("merge") or {}).get("read_pct")
             if job["progress"].get("merge") else None,
         },
+        **_slim_series(job),
     }
 
 
+def _slim_series(job: dict) -> dict:
+    """Resumo de série para o card da lista (nada por episódio — isso é do
+    detalhe): contagens por estado + % agregado + gate ativo."""
+    if job.get("media_type") != "tv":
+        return {}
+    eps = job.get("episodes") or {}
+    by_state: dict[str, int] = {}
+    for v in eps.values():
+        by_state[v["state"]] = by_state.get(v["state"], 0) + 1
+    return {"series": {
+        "episodes_total": len(eps),
+        "by_state": by_state,
+        "download_pct": _download_pct(job),
+        "awaiting_reason": (job.get("awaiting") or {}).get("reason"),
+    }}
+
+
 def list_group(group: str = "active", page: int = 1,
-               per_page: int | None = None) -> dict:
+               per_page: int | None = None, media: str | None = None) -> dict:
     """Cards enxutos da tela de Jobs, filtrados por grupo NO BACKEND.
 
     Devolve {"items": [...], "page", "per_page", "total", "pages"}. Sem
@@ -419,21 +469,24 @@ def list_group(group: str = "active", page: int = 1,
     Os grupos só de status terminal paginam no SQL; 'active' e 'all' envolvem a
     memória (os ativos não estão só no banco) e paginam depois de montar a
     lista — 'active' é curto por natureza, então o custo é irrelevante.
+    `media` ("movie"/"tv") filtra pela dimensão de mídia, combinável com o grupo.
     """
     if group == "active":
-        jobs_ = [j for j in _jobs.values() if j["status"] in _GROUPS["active"]]
+        jobs_ = [j for j in _jobs.values() if j["status"] in _GROUPS["active"]
+                 and (media is None or _media_type(j) == media)]
     elif group == "all":
-        jobs_ = _all_jobs()
+        jobs_ = _all_jobs(media)
     else:
         statuses = _GROUPS.get(group)
         if not statuses:
             raise ValueError(f"grupo inválido: {group!r}")
-        total = sum(store.count_jobs_by_status().get(s, 0) for s in statuses)
+        total = sum(store.count_jobs_by_status(media).get(s, 0) for s in statuses)
         if per_page is None:
-            rows = store.load_jobs_by_status(statuses)
+            rows = store.load_jobs_by_status(statuses, media=media)
         else:
             page = max(1, page)
-            rows = store.load_jobs_by_status(statuses, per_page, (page - 1) * per_page)
+            rows = store.load_jobs_by_status(statuses, per_page,
+                                             (page - 1) * per_page, media=media)
         return _page(rows, page, per_page, total)
 
     jobs_.sort(key=lambda j: j["created_at"], reverse=True)
@@ -539,10 +592,15 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
     dest = None
     if not download_only:
         dest = store.get_destination(destination_id) if destination_id else None
+        if dest is not None and dest.get("media", "movie") != "movie":
+            raise ValueError(
+                f"O destino '{dest['label']}' é da biblioteca de SÉRIES — "
+                f"filmes vão para um destino de filmes")
         if dest is None:
-            dest = store.default_destination()
+            dest = store.default_destination("movie")
         if dest is None:
-            raise ValueError("Nenhum destino cadastrado — cadastre uma pasta de destino antes")
+            raise ValueError("Nenhum destino de FILMES cadastrado — cadastre "
+                             "uma pasta de destino antes")
 
     # destino dos torrents e opcional: sem ele, usa pasta padrao do qBittorrent
     # e nao traduz o content_path (comportamento antigo do .env)
@@ -641,10 +699,14 @@ async def create_manual(tmdb_id: int, language: str, video_path: str, audio_path
         _jobs.pop(old_id, None)
         store.delete_job(old_id)
     dest = store.get_destination(destination_id) if destination_id else None
+    if dest is not None and dest.get("media", "movie") != "movie":
+        raise ValueError(f"O destino '{dest['label']}' é da biblioteca de "
+                         f"SÉRIES — filmes vão para um destino de filmes")
     if dest is None:
-        dest = store.default_destination()
+        dest = store.default_destination("movie")
     if dest is None:
-        raise ValueError("Nenhum destino cadastrado — cadastre uma pasta de destino antes")
+        raise ValueError("Nenhum destino de FILMES cadastrado — cadastre "
+                         "uma pasta de destino antes")
 
     job = {
         "id": uuid.uuid4().hex[:10],
@@ -940,18 +1002,24 @@ async def cancel(job_id: str, delete_torrents: bool = False) -> dict | None:
     _cancelling.discard(job_id)
     if delete_torrents and is_active and _has_torrents(job):
         # limpeza no qBittorrent com teto de tempo: se ele estiver fora do ar,
-        # a remoção do job NÃO pode ficar travada esperando o timeout de rede
-        for kind in ("video", "audio"):
+        # a remoção do job NÃO pode ficar travada esperando o timeout de rede.
+        # Série: todos os torrents do job carregam a tag compartilhada dl-{id};
+        # filme: uma tag por papel (video/audio).
+        tags = ([f"dl-{job['id']}"] if job.get("media_type") == "tv"
+                else [_tag(job, k) for k in ("video", "audio")])
+        for tag in tags:
             try:
                 await asyncio.wait_for(
-                    _qbit.delete_by_tag(_tag(job, kind), delete_files=True),
-                    timeout=10)
+                    _qbit.delete_by_tag(tag, delete_files=True), timeout=10)
             except (Exception, asyncio.TimeoutError) as e:  # noqa: BLE001
                 reason = "sem resposta (qBittorrent fora do ar?)" if isinstance(
                     e, asyncio.TimeoutError) else str(e)
                 _event(job, "qbit",
-                       f"⚠️ Não removi o torrent de {kind}: {reason} — "
+                       f"⚠️ Não removi torrent(s) da tag {tag}: {reason} — "
                        f"apague manualmente no qBittorrent se precisar")
+    if job.get("media_type") == "tv":
+        from services.series import pipeline as series_pipeline
+        series_pipeline.forget(job_id)
     if job["status"] not in _TERMINAL_STATUSES:
         _set(job, "cancelled",
              "Cancelado pelo usuário" + (" (torrents removidos)" if delete_torrents else ""))
@@ -971,6 +1039,9 @@ async def retry(job_id: str) -> dict | None:
     old = _lookup(job_id)  # jobs em erro/cancelados vivem só no banco agora
     if not old or old["status"] not in ("error", "cancelled"):
         return None
+    if old.get("media_type") == "tv":
+        from services.series import pipeline as series_pipeline
+        return await series_pipeline.retry(old)
     if _is_recompress(old):
         r = old["recompress"]
         return await create_recompress(old.get("destination_id"), r["folder"], r["rel"],
@@ -1397,6 +1468,9 @@ async def _run_from_download(job: dict):
         # o qBittorrent pode segurar o arquivo recém-concluído por um tempo)
         files = {kind: await _resolve_video_file(job, content, kind)
                  for kind, content in paths.items()}
+        # raiz do torrent por papel: as legendas externas (.srt/.ass) ficam
+        # ao lado do vídeo ou em Subs/ — procuradas na hora da entrega
+        job["src_roots"] = {kind: content for kind, content in paths.items()}
         # merge (ffmpeg) e entrega single (hardlink/cópia) entram na mesma fila:
         # só 1 por vez, para uma cópia grande não concorrer com uma conversão.
         lock = _get_merge_lock()
@@ -1745,6 +1819,9 @@ async def _deliver_single(job: dict, files: dict):
             _ffmpeg_procs.pop(job["id"], None)
         job["progress"]["merge"] = None
         job["output"] = result.output
+        await _attach_external_subs(job, result.output, {kind: src_file},
+                                    (0.0, 0.0) if kind == "video" else (None, 0.0), log,
+                                    linked=result.linked)
         done_label = "sem conversão necessária" if result.linked else "convertido"
         _set(job, "done", f"Concluído ({label}, {done_label}): {result.output}")
         await _cleanup_torrents(job)
@@ -1761,8 +1838,61 @@ async def _deliver_single(job: dict, files: dict):
         _event(job, "info", n)
 
     job["output"] = str(output)
+    await _attach_external_subs(job, str(output), {kind: src_file},
+                                (0.0, 0.0) if kind == "video" else (None, 0.0),
+                                lambda m: _event(job, "merge", m), linked=True)
     _set(job, "done", f"Concluído ({label}): {output}")
     await _cleanup_torrents(job)
+
+
+async def _attach_external_subs(job: dict, output: str, files: dict,
+                                shifts, log, linked: bool = False):
+    """Legendas externas dos torrents (.srt/.ass/.vtt) no arquivo entregue.
+
+    files: {"video": Path, "audio": Path} (os que existirem); shifts: (s_video,
+    s_audio) em segundos — tempo_saída = tempo_no_arquivo + shift; None = lado
+    sem referência de tempo (não entra). Saída MKV recém-criada → mux; saída
+    hardlinkada (ou não-MKV) → sidecars ao lado (muxar obrigaria a copiar o
+    filme inteiro). Nunca derruba o job."""
+    roots = job.get("src_roots") or {}
+
+    def _find(kind: str) -> list[str]:
+        f = files.get(kind)
+        if f is None:
+            return []
+        root = roots.get(kind)
+        try:
+            root_p = _map_qbit_path(job, root) if root else Path(f).parent
+        except Exception:  # noqa: BLE001
+            root_p = Path(f).parent
+        return [str(p) for p in ext_subs.find_for_movie(root_p, str(f))]
+
+    try:
+        v_subs, a_subs = await asyncio.gather(
+            asyncio.to_thread(_find, "video"), asyncio.to_thread(_find, "audio"))
+        if not v_subs and not a_subs:
+            return
+        movie = job.get("movie") or {}
+        orig_lang = merger.canonical_lang(merger.LANG_ISO.get(
+            movie.get("original_language") or "", movie.get("original_language") or "und"))
+        dub_lang = merger.canonical_lang(merger.LANG_ISO.get(job["language"], job["language"]))
+        # job de um torrent só: um "kind" pode ser dublado ou original
+        v_lang = dub_lang if job.get("kind") == "dubbed" and "audio" not in files else orig_lang
+        a_lang = dub_lang
+        mode = "sidecar" if (linked or Path(output).suffix.lower() != ".mkv") else "mux"
+        n = await asyncio.to_thread(
+            ext_subs.attach, output, v_subs, a_subs,
+            None if shifts[0] is None else ext_subs.shift_fn(shifts[0]),
+            None if shifts[1] is None else ext_subs.shift_fn(shifts[1]),
+            str(files.get("video") or ""), str(files.get("audio") or ""),
+            v_lang, a_lang, log, mode)
+        if n:
+            _event(job, "merge", f"{n} legenda(s) externa(s) do torrent "
+                                 f"{'gravada(s) ao lado' if mode == 'sidecar' else 'anexada(s)'}")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        _event(job, "merge", f"⚠️ legendas externas não anexadas ({e})")
 
 
 async def _merge(job: dict, video_file: Path, audio_file: Path,
@@ -1801,6 +1931,14 @@ async def _merge(job: dict, video_file: Path, audio_file: Path,
     job["progress"]["merge"] = None  # terminou (com sucesso): some a barra
 
     job["output"] = result.output
+    if result.linked:
+        ref = result.ref_input if result.ref_input is not None else 0
+        shifts = (0.0 if ref == 0 else None, 0.0 if ref == 1 else None)
+    else:
+        shifts = result.input_shifts
+    await _attach_external_subs(
+        job, result.output, {"video": video_file, "audio": audio_file}, shifts, log,
+        linked=result.linked)
     if result.linked:
         _set(job, "done", f"Áudio no idioma alvo já existia no melhor vídeo — hardlink criado: {result.output}")
     else:

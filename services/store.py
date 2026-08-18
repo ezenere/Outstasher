@@ -44,14 +44,28 @@ def init():
             data TEXT
         )""")
     _conn.execute("CREATE INDEX IF NOT EXISTS idx_events_job ON events(job_id)")
+    _conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
+    # jobs antigos não têm media_type no JSON: IFNULL trata como filme. O índice
+    # usa a MESMA expressão das queries para o SQLite conseguir aproveitá-lo.
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_media "
+        "ON jobs(IFNULL(json_extract(data, '$.media_type'), 'movie'))")
     _conn.execute("""
         CREATE TABLE IF NOT EXISTS destinations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             label TEXT NOT NULL,
             path TEXT NOT NULL,
+            media TEXT NOT NULL DEFAULT 'movie',
             is_default INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
         )""")
+    # migração de bancos anteriores à separação filme/série: a coluna `media`
+    # aparece via ALTER (CREATE IF NOT EXISTS não altera tabela existente).
+    # Destinos antigos viram 'movie' — era o único uso possível até então.
+    cols = {r[1] for r in _conn.execute("PRAGMA table_info(destinations)")}
+    if "media" not in cols:
+        _conn.execute("ALTER TABLE destinations "
+                      "ADD COLUMN media TEXT NOT NULL DEFAULT 'movie'")
     _conn.execute("""
         CREATE TABLE IF NOT EXISTS torrent_targets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -181,53 +195,79 @@ def delete_convert_preset(preset_id: int) -> bool:
 def list_destinations() -> list[dict]:
     with _lock:
         rows = _conn.execute(
-            "SELECT id, label, path, is_default FROM destinations "
+            "SELECT id, label, path, media, is_default FROM destinations "
             "ORDER BY is_default DESC, label COLLATE NOCASE").fetchall()
-    return [{"id": r[0], "label": r[1], "path": r[2], "is_default": bool(r[3])} for r in rows]
+    return [_dest_row(r) for r in rows]
+
+
+def _dest_row(r) -> dict:
+    return {"id": r[0], "label": r[1], "path": r[2], "media": r[3],
+            "is_default": bool(r[4])}
+
+
+def list_destinations_by_media(media: str) -> list[dict]:
+    """Destinos de UMA mídia ('movie'/'tv') — filmes e séries têm bibliotecas
+    separadas; cada fluxo só enxerga os destinos da própria mídia."""
+    with _lock:
+        rows = _conn.execute(
+            "SELECT id, label, path, media, is_default FROM destinations "
+            "WHERE media = ? ORDER BY is_default DESC, label COLLATE NOCASE",
+            (media,)).fetchall()
+    return [_dest_row(r) for r in rows]
 
 
 def get_destination(dest_id: int) -> dict | None:
     with _lock:
         r = _conn.execute(
-            "SELECT id, label, path, is_default FROM destinations WHERE id = ?",
+            "SELECT id, label, path, media, is_default FROM destinations WHERE id = ?",
             (dest_id,)).fetchone()
-    return {"id": r[0], "label": r[1], "path": r[2], "is_default": bool(r[3])} if r else None
+    return _dest_row(r) if r else None
 
 
-def default_destination() -> dict | None:
+def default_destination(media: str = "movie") -> dict | None:
+    """Destino padrão DA MÍDIA (o is_default é por mídia)."""
     with _lock:
         r = _conn.execute(
-            "SELECT id, label, path, is_default FROM destinations "
-            "ORDER BY is_default DESC, id LIMIT 1").fetchone()
-    return {"id": r[0], "label": r[1], "path": r[2], "is_default": bool(r[3])} if r else None
+            "SELECT id, label, path, media, is_default FROM destinations "
+            "WHERE media = ? ORDER BY is_default DESC, id LIMIT 1",
+            (media,)).fetchone()
+    return _dest_row(r) if r else None
 
 
-def add_destination(label: str, path: str, is_default: bool = False) -> dict:
+def add_destination(label: str, path: str, is_default: bool = False,
+                    media: str = "movie") -> dict:
     from datetime import datetime
     with _lock:
         if is_default:
-            _conn.execute("UPDATE destinations SET is_default = 0")
+            # o padrão é POR mídia: marcar um destino de série como padrão não
+            # desmarca o padrão dos filmes
+            _conn.execute("UPDATE destinations SET is_default = 0 WHERE media = ?",
+                          (media,))
         cur = _conn.execute(
-            "INSERT INTO destinations (label, path, is_default, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (label, path, 1 if is_default else 0,
+            "INSERT INTO destinations (label, path, media, is_default, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (label, path, media, 1 if is_default else 0,
              datetime.now().isoformat(timespec="seconds")))
         _conn.commit()
         dest_id = cur.lastrowid
     return get_destination(dest_id)
 
 
-def update_destination(dest_id: int, label: str, path: str, is_default: bool) -> dict | None:
+def update_destination(dest_id: int, label: str, path: str, is_default: bool,
+                       media: str | None = None) -> dict | None:
     with _lock:
-        exists = _conn.execute(
-            "SELECT 1 FROM destinations WHERE id = ?", (dest_id,)).fetchone()
-        if not exists:
+        row = _conn.execute(
+            "SELECT media FROM destinations WHERE id = ?", (dest_id,)).fetchone()
+        if not row:
             return None
+        media = media or row[0]
         if is_default:
-            _conn.execute("UPDATE destinations SET is_default = 0")
+            _conn.execute("UPDATE destinations SET is_default = 0 WHERE media = ?",
+                          (media,))
         _conn.execute(
-            "UPDATE destinations SET label = ?, path = ?, is_default = ? WHERE id = ?",
-            (label, path, 1 if is_default else 0, dest_id))
+            "UPDATE destinations SET label = ?, path = ?, media = ?, "
+            "is_default = ? WHERE id = ?",
+            (label, path, media, 1 if is_default else 0, dest_id))
         _conn.commit()
     return get_destination(dest_id)
 
@@ -443,20 +483,29 @@ def load_jobs() -> list[dict]:
     return [json.loads(r[0]) for r in rows]
 
 
+# mesma expressão do índice idx_jobs_media (jobs antigos, sem a chave, = filme)
+_MEDIA_EXPR = "IFNULL(json_extract(data, '$.media_type'), 'movie')"
+
+
 def load_jobs_by_status(statuses: tuple[str, ...], limit: int | None = None,
-                        offset: int = 0) -> list[dict]:
+                        offset: int = 0, media: str | None = None) -> list[dict]:
     """Carrega os jobs cujo status está na lista (ex.: só os ativos, ou só os
     terminais). Usa a coluna `status` indexada em vez de ler tudo.
 
     Com `limit`, pagina no SQL (ordenado por created_at desc, o mesmo critério
     da tela) — assim uma biblioteca com milhares de jobs terminais não vira um
-    JSON gigante a cada abertura da lista.
+    JSON gigante a cada abertura da lista. `media` ("movie"/"tv") filtra pela
+    dimensão de mídia direto no SQL.
     """
     if not statuses:
         return []
     ph = ",".join("?" for _ in statuses)
-    sql = f"SELECT data FROM jobs WHERE status IN ({ph}) ORDER BY created_at DESC"
+    sql = f"SELECT data FROM jobs WHERE status IN ({ph})"
     params: list = list(statuses)
+    if media is not None:
+        sql += f" AND {_MEDIA_EXPR} = ?"
+        params.append(media)
+    sql += " ORDER BY created_at DESC"
     if limit is not None:
         sql += " LIMIT ? OFFSET ?"
         params += [limit, offset]
@@ -474,11 +523,18 @@ def get_job(job_id: str) -> dict | None:
     return json.loads(row[0]) if row else None
 
 
-def count_jobs_by_status() -> dict[str, int]:
-    """{status: quantidade} — para os badges de contagem sem baixar as listas."""
+def count_jobs_by_status(media: str | None = None) -> dict[str, int]:
+    """{status: quantidade} — para os badges de contagem sem baixar as listas.
+
+    `media` ("movie"/"tv") restringe a contagem à dimensão de mídia."""
+    sql = "SELECT status, COUNT(*) FROM jobs"
+    params: list = []
+    if media is not None:
+        sql += f" WHERE {_MEDIA_EXPR} = ?"
+        params.append(media)
+    sql += " GROUP BY status"
     with _lock:
-        rows = _conn.execute(
-            "SELECT status, COUNT(*) FROM jobs GROUP BY status").fetchall()
+        rows = _conn.execute(sql, params).fetchall()
     return {status: n for status, n in rows}
 
 

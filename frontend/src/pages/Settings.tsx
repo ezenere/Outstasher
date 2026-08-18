@@ -552,6 +552,7 @@ interface DestForm {
   id: number | null
   label: string
   path: string
+  media: 'movie' | 'tv'
   is_default: boolean
 }
 
@@ -576,7 +577,8 @@ export function DestinationsSection() {
       return dialog.alert({ title: 'Campos obrigatórios', message: 'Preencha nome e caminho.' })
     setSaving(true)
     try {
-      const body = { label: form.label.trim(), path: form.path.trim(), is_default: form.is_default }
+      const body = { label: form.label.trim(), path: form.path.trim(),
+        media: form.media, is_default: form.is_default }
       if (form.id == null) await post('/api/destinations', body)
       else await put(`/api/destinations/${form.id}`, body)
       setForm(null)
@@ -603,7 +605,10 @@ export function DestinationsSection() {
   }
 
   async function makeDefault(d: Destination) {
-    await put(`/api/destinations/${d.id}`, { label: d.label, path: d.path, is_default: true })
+    // o padrão é POR mídia (um padrão de filmes + um de séries)
+    await put(`/api/destinations/${d.id}`, {
+      label: d.label, path: d.path, media: d.media ?? 'movie', is_default: true,
+    })
     void reload()
   }
 
@@ -612,14 +617,15 @@ export function DestinationsSection() {
       <div className="flex items-center gap-3">
         <h1 className="flex-1 text-lg font-semibold">Destinos do arquivo final</h1>
         <button
-          onClick={() => setForm({ id: null, label: '', path: '', is_default: !dests?.length })}
+          onClick={() => setForm({ id: null, label: '', path: '', media: 'movie', is_default: !dests?.length })}
           className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-semibold hover:bg-blue-500"
         >
           <Plus width={16} height={16} /> Novo
         </button>
       </div>
       <p className="mt-1 text-sm text-zinc-400">
-        Pastas onde o filme finalizado é salvo. O destino padrão vem pré-selecionado ao criar um download.
+        Pastas onde o arquivo finalizado é salvo. Filmes e séries têm bibliotecas
+        SEPARADAS: cada destino pertence a uma mídia, com um padrão para cada.
       </p>
 
       {form && (
@@ -629,9 +635,23 @@ export function DestinationsSection() {
             <Field label="Nome" value={form.label} onChange={(v) => setForm({ ...form, label: v })} placeholder="Ex.: HD Frio (filmes)" />
             <Field label="Caminho" value={form.path} onChange={(v) => setForm({ ...form, path: v })} placeholder="Ex.: /mnt/hd/filmes" mono />
           </div>
+          {/* mídia: define em qual biblioteca (e em quais seletores) o destino aparece */}
+          <div className="mt-3 flex items-center gap-4 text-sm text-zinc-300">
+            <span className="text-zinc-400">Mídia:</span>
+            <label className="flex items-center gap-1.5">
+              <input type="radio" checked={form.media === 'movie'}
+                onChange={() => setForm({ ...form, media: 'movie' })} />
+              Filmes
+            </label>
+            <label className="flex items-center gap-1.5">
+              <input type="radio" checked={form.media === 'tv'}
+                onChange={() => setForm({ ...form, media: 'tv' })} />
+              Séries
+            </label>
+          </div>
           <label className="mt-3 flex items-center gap-2 text-sm text-zinc-300">
             <input type="checkbox" checked={form.is_default} onChange={(e) => setForm({ ...form, is_default: e.target.checked })} />
-            Usar como padrão
+            Usar como padrão {form.media === 'tv' ? 'de séries' : 'de filmes'}
           </label>
           <FormButtons saving={saving} onSave={save} onCancel={() => setForm(null)} />
         </div>
@@ -646,15 +666,21 @@ export function DestinationsSection() {
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <span className="font-semibold">{d.label}</span>
+                <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${
+                  (d.media ?? 'movie') === 'tv'
+                    ? 'bg-sky-950 text-sky-300' : 'bg-blue-950 text-blue-300'}`}
+                >
+                  {(d.media ?? 'movie') === 'tv' ? 'Séries' : 'Filmes'}
+                </span>
                 {d.is_default && <DefaultBadge />}
               </div>
               <div className="truncate font-mono text-xs text-zinc-400">{d.path}</div>
               <div className="mt-2 max-w-md"><DiskBar disk={d.disk} /></div>
             </div>
             {!d.is_default && (
-              <IconBtn title="Tornar padrão" onClick={() => makeDefault(d)}><Star width={15} height={15} /></IconBtn>
+              <IconBtn title="Tornar padrão da mídia" onClick={() => makeDefault(d)}><Star width={15} height={15} /></IconBtn>
             )}
-            <IconBtn title="Editar" onClick={() => setForm({ id: d.id, label: d.label, path: d.path, is_default: d.is_default })}>
+            <IconBtn title="Editar" onClick={() => setForm({ id: d.id, label: d.label, path: d.path, media: d.media ?? 'movie', is_default: d.is_default })}>
               <EditPencil width={15} height={15} />
             </IconBtn>
             <IconBtn title="Remover" onClick={() => remove(d)}><Trash width={15} height={15} /></IconBtn>

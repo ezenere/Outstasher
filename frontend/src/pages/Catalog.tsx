@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Folder, MediaVideoList, NavArrowRight, Plus, Search, WarningTriangle, Xmark } from 'iconoir-react'
+import { Folder, MediaVideoList, NavArrowRight, Plus, Search, Tv, WarningTriangle, Xmark } from 'iconoir-react'
 import { api, type CatalogItem, type CatalogList, type Destination } from '../api'
 import AddMovieModal from '../components/AddMovieModal'
 import { DiskBar, Empty } from '../components/ui'
@@ -17,6 +17,8 @@ const SORTS: { key: SortKey; label: string }[] = [
 
 export default function Catalog() {
   const [destinations, setDestinations] = useState<Destination[]>([])
+  // catálogo de FILMES e de SÉRIES são separados (destinos por mídia)
+  const [media, setMedia] = useState<'movie' | 'tv'>('movie')
   const [destId, setDestId] = useState<number | null>(null)
   const [data, setData] = useState<CatalogList | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -30,10 +32,22 @@ export default function Catalog() {
     api<Destination[]>('/api/destinations')
       .then((ds) => {
         setDestinations(ds)
-        setDestId(ds.find((d) => d.is_default)?.id ?? ds[0]?.id ?? null)
+        const mine = ds.filter((d) => (d.media ?? 'movie') === 'movie')
+        setDestId(mine.find((d) => d.is_default)?.id ?? mine[0]?.id ?? null)
       })
       .catch(() => {})
   }, [])
+
+  // destinos da mídia ativa; trocar o toggle pula para o padrão daquela mídia
+  const mediaDests = destinations.filter((d) => (d.media ?? 'movie') === media)
+
+  function switchMedia(m: 'movie' | 'tv') {
+    setMedia(m)
+    setQuery('')
+    const mine = destinations.filter((d) => (d.media ?? 'movie') === m)
+    setDestId(mine.find((d) => d.is_default)?.id ?? mine[0]?.id ?? null)
+    if (!mine.length) setData(null)
+  }
 
   useEffect(() => {
     if (destId == null) return
@@ -70,13 +84,31 @@ export default function Catalog() {
     <div>
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="flex-1 text-lg font-semibold">Catálogo</h1>
-        <button
-          onClick={() => setAdding(true)}
-          title="Conversão manual: merge de dois arquivos que já estão no disco"
-          className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-semibold hover:bg-blue-500"
-        >
-          <Plus width={16} height={16} /> Adicionar filme
-        </button>
+        {/* bibliotecas separadas: o toggle troca o conjunto de destinos */}
+        <div className="flex gap-1 rounded-lg border border-zinc-700 bg-zinc-900 p-1">
+          {([['movie', 'Filmes'], ['tv', 'Séries']] as const).map(([k, label]) => (
+            <button
+              key={k}
+              onClick={() => switchMedia(k)}
+              className={`rounded-md px-3 py-0.5 text-sm transition-colors ${
+                media === k
+                  ? 'bg-blue-600 font-semibold text-white'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {media === 'movie' && (
+          <button
+            onClick={() => setAdding(true)}
+            title="Conversão manual: merge de dois arquivos que já estão no disco"
+            className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-semibold hover:bg-blue-500"
+          >
+            <Plus width={16} height={16} /> Adicionar filme
+          </button>
+        )}
         <label className="flex items-center gap-2 text-sm">
           Destino:
           <select
@@ -84,7 +116,7 @@ export default function Catalog() {
             onChange={(e) => setDestId(Number(e.target.value))}
             className="max-w-56 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm"
           >
-            {destinations.map((d) => (
+            {mediaDests.map((d) => (
               <option key={d.id} value={d.id}>
                 {d.label}{d.is_default ? ' ★' : ''}
               </option>
@@ -155,7 +187,15 @@ export default function Catalog() {
           A pasta deste destino não existe (ou não está montada) nesta máquina.
         </div>
       )}
-      {data?.exists && data.items.length === 0 && <Empty>Nenhum filme neste destino.</Empty>}
+      {mediaDests.length === 0 && (
+        <Empty>
+          Nenhum destino de {media === 'tv' ? 'séries' : 'filmes'} cadastrado —
+          crie um em Configurações → Destinos.
+        </Empty>
+      )}
+      {data?.exists && data.items.length === 0 && (
+        <Empty>{media === 'tv' ? 'Nenhuma série' : 'Nenhum filme'} neste destino.</Empty>
+      )}
       {data?.exists && data.items.length > 0 && items.length === 0 && (
         <Empty>Nenhum filme corresponde à busca.</Empty>
       )}
@@ -167,7 +207,9 @@ export default function Catalog() {
             to={`/catalog/item?destination_id=${destId}&folder=${encodeURIComponent(it.folder)}`}
             className="flex items-center gap-3 rounded-xl bg-zinc-900 px-4 py-3 hover:bg-zinc-800/70"
           >
-            {it.has_video ? (
+            {it.type === 'series' ? (
+              <Tv width={20} height={20} className="shrink-0 text-sky-400" />
+            ) : it.has_video ? (
               <MediaVideoList width={20} height={20} className="shrink-0 text-blue-400" />
             ) : (
               <Folder width={20} height={20} className="shrink-0 text-zinc-500" />
@@ -189,7 +231,11 @@ export default function Catalog() {
       </div>
 
       {adding && (
-        <AddMovieModal destinations={destinations} defaultDestId={destId} onClose={() => setAdding(false)} />
+        <AddMovieModal
+          destinations={destinations.filter((d) => (d.media ?? 'movie') === 'movie')}
+          defaultDestId={destId}
+          onClose={() => setAdding(false)}
+        />
       )}
     </div>
   )

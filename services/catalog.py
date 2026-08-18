@@ -91,6 +91,35 @@ def folder_name(title: str, year: str | None, tmdb_id: int | None = None) -> str
     return f"{name} [tmdbid-{tmdb_id}]" if tmdb_id else name
 
 
+# -------------------- séries --------------------
+
+# subpasta de temporada no layout Jellyfin ("Season 01"); aceita 1-2 dígitos
+_SEASON_DIR_RE = re.compile(r"^Season (\d{1,2})$", re.I)
+# referência de episódio no NOME DO ARQUIVO (SxxEyy) — para o índice de
+# episódios presentes e o agrupamento do detalhe
+_EPISODE_FILE_RE = re.compile(r"[sS](\d{1,2})[ ._-]?[eE](\d{1,3})")
+
+
+def season_of_dir(name: str) -> int | None:
+    m = _SEASON_DIR_RE.match(name)
+    return int(m.group(1)) if m else None
+
+
+def parse_episode_filename(name: str) -> tuple[int, int] | None:
+    """(temporada, episódio) do nome do arquivo, ou None."""
+    m = _EPISODE_FILE_RE.search(name)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def _is_series_dir(entry: Path) -> bool:
+    """Pasta de série = tem ao menos uma subpasta 'Season NN'."""
+    try:
+        return any(d.is_dir() and season_of_dir(d.name) is not None
+                   for d in entry.iterdir())
+    except OSError:
+        return False
+
+
 # -------------------- resolucao de destino --------------------
 
 def _resolve_dest(destination_id: int | None) -> dict:
@@ -136,6 +165,8 @@ def list_items(destination_id: int | None) -> dict:
                 "folder": entry.name,
                 "title": title,
                 "year": year,
+                # série = pasta com subpastas "Season NN" (layout Jellyfin)
+                "type": "series" if _is_series_dir(entry) else "movie",
                 "size": size,
                 "size_human": human_size(size),
                 "file_count": file_count,
@@ -270,17 +301,33 @@ def item_detail(destination_id: int | None, folder: str) -> dict:
             total += info["size"]
             files.append(info)
 
-    return {
+    is_series = _is_series_dir(item_dir)
+    out = {
         "destination": dest,
         "folder": folder,
         "title": title,
         "year": year,
+        "type": "series" if is_series else "movie",
         # id do TMDB já marcado no nome da pasta (None = pasta ainda não marcada)
         "tmdb_id": tmdb_id_in(folder),
         "size": total,
         "size_human": human_size(total),
         "files": files,
     }
+    if is_series:
+        # árvore por temporada (a UI mostra accordions): agrupa os arquivos
+        # pela subpasta Season NN do rel; o que está solto na raiz vai em None
+        seasons: dict[int | None, list[dict]] = {}
+        for f in files:
+            top = f["rel"].split("/", 1)[0] if "/" in f["rel"] else None
+            season = season_of_dir(top) if top else None
+            seasons.setdefault(season, []).append(f)
+        out["seasons"] = [
+            {"season": s, "files": fs}
+            for s, fs in sorted(seasons.items(),
+                                key=lambda kv: (kv[0] is None, kv[0] or 0))
+        ]
+    return out
 
 
 # -------------------- remocao --------------------
@@ -409,9 +456,11 @@ def _norm_title(text: str) -> str:
 
 
 def _scan_library() -> frozenset[tuple[str, str | None]]:
-    """(titulo_normalizado, ano|None) de cada pasta de filme em cada destino."""
+    """(titulo_normalizado, ano|None) de cada pasta de filme nos destinos de
+    FILMES — as bibliotecas de filme e série são separadas, então uma pasta
+    parecida num destino de séries não conta como "filme na coleção"."""
     keys = set()
-    for dest in store.list_destinations():
+    for dest in store.list_destinations_by_media("movie"):
         root = Path(dest["path"])
         try:
             if not root.is_dir():
@@ -437,8 +486,10 @@ def library_keys() -> frozenset[tuple[str, str | None]]:
 
 
 def invalidate_library() -> None:
-    """Marca o cache como vencido (a PRÓXIMA busca refaz o scan — nada roda já)."""
+    """Marca o cache como vencido (a PRÓXIMA busca refaz o scan — nada roda já).
+    Vale para os dois índices: filmes (chaves) e séries (episódios presentes)."""
     _library_cache["at"] = None
+    _series_cache["at"] = None
 
 
 def in_library(movie: dict, keys: frozenset) -> bool:
@@ -454,3 +505,71 @@ def in_library(movie: dict, keys: frozenset) -> bool:
         if (norm, year) in keys or (norm, None) in keys:
             return True
     return False
+
+
+# -------------------- índice de episódios presentes (séries) --------------------
+# Mesmo padrão do cache de coleção: TTL + invalidação junto (o
+# invalidate_library acima zera os dois — quem invalida um invalida o outro).
+
+_series_cache: dict = {"at": None, "entries": ()}
+
+
+def _scan_series() -> tuple[dict, ...]:
+    """Um registro por pasta de série: {tmdb_id, norm_title, year,
+    seasons: {temporada: set(episódios)}} — episódios lidos do SxxEyy nos
+    nomes de arquivo dentro das subpastas Season NN. Só os destinos de
+    SÉRIES entram (bibliotecas separadas)."""
+    entries = []
+    for dest in store.list_destinations_by_media("tv"):
+        root = Path(dest["path"])
+        try:
+            if not root.is_dir():
+                continue
+            for entry in root.iterdir():
+                if not entry.is_dir() or not _is_series_dir(entry):
+                    continue
+                title, year = _title_and_year(entry.name)
+                seasons: dict[int, set[int]] = {}
+                for f in entry.rglob("*"):
+                    if not f.is_file() or f.suffix.lower() not in VIDEO_EXTENSIONS:
+                        continue
+                    ref = parse_episode_filename(f.name)
+                    if ref:
+                        seasons.setdefault(ref[0], set()).add(ref[1])
+                entries.append({
+                    "tmdb_id": tmdb_id_in(entry.name),
+                    "norm_title": _norm_title(title),
+                    "year": year,
+                    "seasons": seasons,
+                })
+        except OSError:
+            continue
+    return tuple(entries)
+
+
+def series_index() -> tuple[dict, ...]:
+    """Índice de séries na coleção (cache com o mesmo TTL da biblioteca)."""
+    at = _series_cache["at"]
+    if at is None or _library_cache["at"] is None \
+            or time.monotonic() - at > LIBRARY_TTL_SECONDS:
+        _series_cache["entries"] = _scan_series()
+        _series_cache["at"] = time.monotonic()
+    return _series_cache["entries"]
+
+
+def owned_episodes(tmdb_id: int | None, title: str | None,
+                   year: str | None) -> dict[int, list[int]]:
+    """Episódios já presentes na coleção para uma série do TMDB.
+
+    Casa por [tmdbid-N] quando a pasta está marcada; senão por título
+    normalizado (+ ano, com fallback sem ano). Alimenta o pré-marcado do
+    modal de série ("adicionar episódios") e o selo parcial."""
+    norm = _norm_title(title or "")
+    for e in series_index():
+        if tmdb_id and e["tmdb_id"] == tmdb_id:
+            return {s: sorted(eps) for s, eps in e["seasons"].items()}
+    for e in series_index():
+        if norm and e["norm_title"] == norm and (
+                e["year"] == (year or None) or e["year"] is None):
+            return {s: sorted(eps) for s, eps in e["seasons"].items()}
+    return {}

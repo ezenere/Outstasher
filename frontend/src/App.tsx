@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { BrowserRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom'
-import { Bookmark, Cube, LogOut, MediaVideo, Settings as SettingsIcon } from 'iconoir-react'
+import { Bookmark, Cube, LogOut, Search, Settings as SettingsIcon } from 'iconoir-react'
 import { api, authStatus, getToken, logout, type JobSummary } from './api'
 import { JobsSummaryContext } from './jobsSummary'
 import Movies from './pages/Movies'
@@ -104,7 +104,7 @@ export default function App() {
             </span>
             <nav className="flex flex-1 gap-1">
               <Tab to="/">
-                <MediaVideo width={16} height={16} /> Filmes
+                <Search width={16} height={16} /> Buscar
               </Tab>
               <Tab to="/jobs" dot={pending}>
                 <Cube width={16} height={16} /> Jobs

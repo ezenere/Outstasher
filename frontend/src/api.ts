@@ -10,6 +10,8 @@ export interface Movie {
   rating: number | null
   /** Já existe na coleção (pasta em algum destino) — cache de 30 min no backend. */
   in_catalog?: boolean
+  /** 'tv' nos cards vindos de /api/series; ausente = filme. */
+  media_type?: 'movie' | 'tv'
 }
 
 /** Página de resultados de filmes do TMDB (/api/movies). */
@@ -18,6 +20,218 @@ export interface MoviePage {
   page: number
   total_pages: number
   total_results: number
+}
+
+// ---------- séries (TMDB TV) ----------
+
+/** Temporada na lista do detalhe da série (/api/series/{id}). */
+export interface SeasonInfo {
+  season: number
+  name: string | null
+  episode_count: number | null
+  air_date: string | null
+}
+
+/** Detalhe da série + temporadas, para o modal de seleção. */
+export interface SeriesDetail {
+  id: number
+  title: string | null
+  original_title: string | null
+  year: string
+  overview: string | null
+  poster: string | null
+  seasons: SeasonInfo[]
+}
+
+/** Episódio de uma temporada (/api/series/{id}/season/{n}). */
+export interface EpisodeInfo {
+  episode: number
+  name: string | null
+  air_date: string | null
+  runtime: number | null
+  overview: string | null
+}
+
+export interface SeasonDetail {
+  season: number
+  name: string | null
+  episodes: EpisodeInfo[]
+}
+
+/** Subestado de um episódio dentro de um job de série. */
+export type EpisodeState =
+  | 'pending' | 'downloading' | 'downloaded' | 'aligning' | 'review'
+  | 'merging' | 'done' | 'failed' | 'skipped_future' | 'skipped_missing'
+
+export const EPISODE_STATE_LABEL: Record<EpisodeState, string> = {
+  pending: 'Aguardando',
+  downloading: 'Baixando',
+  downloaded: 'Baixado',
+  aligning: 'Alinhando',
+  review: 'Revisão',
+  merging: 'Convertendo',
+  done: 'Concluído',
+  failed: 'Falhou',
+  skipped_future: 'Não lançado',
+  skipped_missing: 'Pulado (sem torrent)',
+}
+
+/** Episódio dentro de job["episodes"] (chave "S01E02"). */
+export interface JobEpisode {
+  season: number
+  episode: number
+  name: string | null
+  air_date: string | null
+  runtime: number | null
+  state: EpisodeState
+  src: Partial<Record<'original' | 'dubbed', string>>
+  output: string | null
+  error: string | null
+}
+
+/** Torrent do plano de um job de série (as duas línguas na mesma lista). */
+export interface SeriesTorrent {
+  n: number
+  role: 'original' | 'dubbed'
+  tag: string
+  title: string
+  tracker: string | null
+  seeders: number | null
+  size: number | null
+  quality: string | null
+  coverage_label: string | null
+  coverage: string[]
+  state: 'pending' | 'downloading' | 'done' | 'abandoned'
+  hash: string | null
+  progress: Progress | null
+  selected_files: string[] | null
+  content_path: string | null
+}
+
+/** Candidato de série (mesmo shape do Candidate + cobertura). */
+export interface SeriesCandidate {
+  id: string
+  title: string
+  tracker: string | null
+  seeders: number
+  size: number
+  quality: string | null
+  coverage: string | null
+  score: number | null
+  tier?: number
+}
+
+export type GateReason =
+  | 'manual_pick' | 'gaps_confirm' | 'incompatible_torrents'
+  | 'alignment_review' | 'drift'
+
+/** Candidato na visão invertida do manual: torrent + episódios que o TÍTULO
+ *  dele cobre (o match fino pelo arquivo acontece após o download). */
+export interface TorrentChoice extends SeriesCandidate {
+  matches: string[]
+}
+
+/** Gate ativo de um job de série (job.awaiting). */
+export interface JobGate {
+  reason: GateReason
+  payload: {
+    /** gaps_confirm */
+    missing?: { episode: string; name: string | null; missing: string[] }[]
+    /** gaps_confirm no MEIO do download: os arquivos reais de um pack
+     *  revelaram que ele não tinha episódios atribuídos pelo título. */
+    mid_download?: boolean
+    /** incompatible_torrents */
+    torrents?: {
+      n: number
+      role: 'original' | 'dubbed'
+      title: string
+      coverage: string[]
+      signals: string[]
+      alternatives: SeriesCandidate[]
+    }[]
+    episode_groups?: { id: string; name: string; type: number; episode_count: number }[]
+    /** manual_pick */
+    candidates?: Record<'original' | 'dubbed', Record<string, SeriesCandidate[]>>
+    by_torrent?: Record<'original' | 'dubbed', TorrentChoice[]>
+    requested?: string[]
+    preselected?: { n: number; role: string; title: string; quality: string | null; coverage: string[] }[]
+  }
+}
+
+/** Troca manual de um torrent de série ("tentar próximo(s)" com candidateId nulo). */
+export function switchSeriesTorrent(jobId: string, torrentN: number,
+                                    candidateId: string | null = null) {
+  return post<Job>(`/api/jobs/${jobId}/switch-torrent`,
+    { torrent_n: torrentN, candidate_id: candidateId })
+}
+
+/** Candidatos compatíveis (mesma cobertura) para trocar um torrent do plano. */
+export function seriesTorrentCandidates(jobId: string, n: number) {
+  return api<{ candidates: SeriesCandidate[] }>(
+    `/api/jobs/${jobId}/torrent-candidates?n=${n}`)
+}
+
+/** Resumo de série no card da lista (/api/jobs/list). */
+export interface SeriesSummary {
+  episodes_total: number
+  by_state: Partial<Record<EpisodeState, number>>
+  download_pct: number | null
+  awaiting_reason: GateReason | null
+}
+
+/** Resolve o gate ativo de um job de série. */
+export function resolveGate(jobId: string, reason: GateReason | 'force_continue',
+                            decision: object = {}) {
+  return post<Job>(`/api/jobs/${jobId}/resolve`, { reason, decision })
+}
+
+// ---------- EDL (revisão de alinhamento) ----------
+
+export type SegmentKind = 'match' | 'gap_dub' | 'gap_orig' | 'replaced' | 'pal' | 'drift'
+export type ReviewAction = 'fill_original' | 'silence' | 'use_dub' | 'accept'
+
+/** Segmento da EDL (tempos em s; a = dublado, b = original). */
+export interface EdlSegment {
+  kind: SegmentKind
+  a_start: number
+  a_end: number
+  b_start: number | null
+  b_end: number | null
+  offset: number | null
+  slope: number | null
+  residual: number
+  confidence: number
+  note: string
+  /** Decisão de revisão já aplicada (explícita ou por regra). */
+  action?: ReviewAction
+}
+
+export interface Edl {
+  version: number
+  episode: string
+  source_dub: { path: string; duration: number }
+  source_orig: { path: string; duration: number }
+  segments: EdlSegment[]
+  confidence_profile: number[] | null
+  review: { required: boolean; flagged: { a_start: number; a_end: number; reason: string }[] }
+}
+
+/** Regra de revisão reaplicável ("aplicar a todos os episódios"). */
+export interface ReviewRule {
+  when: { kind?: SegmentKind; position?: 'start' | 'end' | 'middle' | 'any'; min_len?: number; max_len?: number }
+  action: ReviewAction
+}
+
+/** Busca um frame de comparação como blob-URL (o <img> puro não manda o
+ *  header de Authorization — buscamos via fetch autenticado). O chamador é
+ *  dono do URL e deve dar URL.revokeObjectURL ao descartar. */
+export async function fetchFrame(jobId: string, episode: string,
+                                 side: 'a' | 'b', t: number): Promise<string> {
+  const r = await fetch(
+    `/api/jobs/${jobId}/frame?episode=${episode}&side=${side}&t=${t.toFixed(2)}`,
+    { headers: { Authorization: `Bearer ${getToken() ?? ''}` } })
+  if (!r.ok) throw new Error(`frame ${r.status}`)
+  return URL.createObjectURL(await r.blob())
 }
 
 export interface Language {
@@ -135,6 +349,8 @@ export interface Destination {
   id: number
   label: string
   path: string
+  /** Biblioteca a que o destino pertence (filmes e séries são separadas). */
+  media?: 'movie' | 'tv'
   is_default: boolean
   disk?: DiskInfo | null
 }
@@ -253,9 +469,20 @@ export interface Job {
   drift_confirm?: { video_file: string; audio_file: string; tau1_ms: number; tau2_ms: number } | null
   /** Conversão manual (mode 'files'): os dois arquivos locais de origem. */
   manual_files?: { video: string; audio: string } | null
+  // ---- campos de job de SÉRIE (media_type 'tv') ----
+  media_type?: JobMedia
+  request?: { seasons: number[]; episodes: Record<string, number[]> }
+  episodes?: Record<string, JobEpisode>
+  torrents?: SeriesTorrent[]
+  awaiting?: JobGate | null
+  report?: { attempted: number; succeeded: number; failed: string[]; skipped?: string[] } | null
 }
 
 // ---- shapes enxutos das rotas de polling granular ----
+
+/** Dimensão de mídia de um job. Jobs anteriores à feature de séries não têm o
+ *  campo — o backend preenche 'movie' por padrão. */
+export type JobMedia = 'movie' | 'tv'
 
 /** Item do dropdown de processos (/api/jobs/summary). Só o mínimo. */
 export interface JobSummary {
@@ -265,6 +492,7 @@ export interface JobSummary {
   status: string
   state: MovieState
   pct: number | null
+  media_type?: JobMedia
   /** Recompressão: reusa o tmdb_id de um filme já baixado, então não define o
    *  estado do card na tela de Filmes. */
   recompress?: boolean
@@ -292,6 +520,9 @@ export interface JobListItem {
   id: string
   tmdb_id: number
   language: string
+  media_type?: JobMedia
+  /** Resumo de série (contagens por estado + % agregado), só em media_type tv. */
+  series?: SeriesSummary
   mode: string
   kind: string
   download_only?: boolean
@@ -338,6 +569,8 @@ export interface CatalogItem {
   folder: string
   title: string
   year: string | null
+  /** 'series' = pasta com subpastas "Season NN" (layout Jellyfin). */
+  type?: 'movie' | 'series'
   size: number
   size_human: string
   file_count: number
@@ -405,11 +638,14 @@ export interface CatalogDetail {
   folder: string
   title: string
   year: string | null
+  type?: 'movie' | 'series'
   /** id do TMDB já marcado no nome da pasta ([tmdbid-N]); null = ainda não marcada. */
   tmdb_id: number | null
   size: number
   size_human: string
   files: CatalogFile[]
+  /** Série: arquivos agrupados por temporada (null = soltos na raiz). */
+  seasons?: { season: number | null; files: CatalogFile[] }[]
   tmdb: Movie | null
 }
 
