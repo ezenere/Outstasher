@@ -795,6 +795,12 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
                     f"capítulos podem ficar deslocados {tau_s:.1f}s "
                     f"(offset aplicado no container)")
         result.input_shifts = (shifts[0], shifts[1])
+    elif apply_offset:
+        # drift: o áudio do outro input é re-encodado com adelay/atrim (−tau);
+        # a timeline de referência não muda
+        shifts = [0.0, 0.0]
+        shifts[other_input] = -tau_s
+        result.input_shifts = (shifts[0], shifts[1])
 
     # vídeo: copy por padrão; re-encode quando as opções avançadas pedirem.
     # Planejado antes do comando porque o plano pode trazer args de ENTRADA

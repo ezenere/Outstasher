@@ -40,6 +40,22 @@ def test_find_torrent_de_um_video_leva_todas(tmp_path):
     assert sorted(p.name for p in found) == ["English.srt", "Portugues.ass"]
 
 
+def test_find_for_movie(tmp_path):
+    root = tmp_path / "Movie.2020.1080p"
+    (root / "Subs").mkdir(parents=True)
+    (root / "Featurettes").mkdir()
+    (root / "Movie.2020.1080p.mkv").write_bytes(b"x")
+    (root / "Movie.2020.1080p.pt-BR.srt").write_text("x")
+    (root / "Subs" / "English.srt").write_text("x")
+    single = subs.find_for_movie(root, str(root / "Movie.2020.1080p.mkv"))
+    assert sorted(p.name for p in single) == ["English.srt", "Movie.2020.1080p.pt-BR.srt"]
+    # com extras (outro vídeo): só prefixo do filme ou pasta Subs/
+    (root / "Featurettes" / "Making.of.mkv").write_bytes(b"x")
+    (root / "Featurettes" / "Making.of.srt").write_text("x")
+    multi = subs.find_for_movie(root, str(root / "Movie.2020.1080p.mkv"))
+    assert sorted(p.name for p in multi) == ["English.srt", "Movie.2020.1080p.pt-BR.srt"]
+
+
 # -------------------- idioma / sabor --------------------
 
 @pytest.mark.parametrize("name,lang", [
@@ -188,3 +204,18 @@ def test_attach_muxa_remapeia_e_deduplica(tmp_path):
     assert "00:00:14,000 --> 00:00:15,000" in p.stdout
     # vídeo/áudio continuam lá
     assert [s["codec_type"] for s in info["streams"]][:2] == ["video", "audio"]
+
+
+@pytest.mark.ffmpeg
+def test_attach_sidecar_nao_reescreve_o_arquivo(tmp_path):
+    out = _mkv(tmp_path / "Movie [pt+orig].mkv")
+    before = out.stat().st_mtime_ns
+    d_pt = _srt(tmp_path / "Dub.pt.srt", [(5.0, 6.0, "oi")])
+    d_pf = _srt(tmp_path / "Dub.pt.forced.srt", [(1.0, 2.0, "placa")])
+    n = subs.attach(str(out), [], [d_pt, d_pf], None, subs.shift_fn(-1.0),
+                    None, "Dub.mkv", log=lambda m: None, mode="sidecar")
+    assert n == 2
+    assert out.stat().st_mtime_ns == before
+    assert (tmp_path / "Movie [pt+orig].por.srt").exists()
+    forced = (tmp_path / "Movie [pt+orig].por.forced.srt").read_text()
+    assert "00:00:00,000 --> 00:00:01,000" in forced

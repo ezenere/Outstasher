@@ -106,6 +106,34 @@ def find_for_episode(root, season: int, episode: int,
     return out
 
 
+def find_for_movie(root, video_path: str | None = None) -> list[Path]:
+    """Legendas de texto de um torrent de FILME: todas quando há um vídeo só;
+    com extras no torrent, as com o prefixo do filme ou numa pasta Subs/."""
+    p = Path(root)
+    if p.is_file():
+        p = p.parent
+    if not p.is_dir():
+        return []
+    subs = sorted(f for f in p.rglob("*")
+                  if f.is_file() and f.suffix.lower() in TEXT_EXT
+                  and "sample" not in f.name.lower())
+    if not subs:
+        return []
+    vids = [f for f in p.rglob("*")
+            if f.is_file() and f.suffix.lower() in _video_ext()
+            and "sample" not in f.name.lower()]
+    if len(vids) <= 1:
+        return subs
+    vstem = Path(video_path).stem.lower() if video_path else None
+    out = []
+    for f in subs:
+        in_subs_dir = any(d.name.lower() in ("subs", "subtitles", "legendas")
+                          for d in f.relative_to(p).parents)
+        if (vstem and f.stem.lower().startswith(vstem)) or in_subs_dir:
+            out.append(f)
+    return out
+
+
 def _video_ext() -> set[str]:
     from services import jobs
     return jobs.VIDEO_EXTENSIONS
@@ -380,11 +408,35 @@ def mux(output: str, items: list[dict], log=print) -> int:
     return len(items)
 
 
+def sidecar(output: str, items: list[dict], log=print) -> int:
+    """Alternativa ao mux: grava as legendas AO LADO do arquivo entregue
+    (`Filme.por.srt`, `Filme.por.forced.srt`) — usado quando a saída é um
+    hardlink do torrent (muxar obrigaria a copiar o filme inteiro) ou não é
+    MKV. Jellyfin/Plex leem sidecars normalmente."""
+    out = Path(output)
+    n = 0
+    for it in items:
+        if not it.get("srt"):
+            continue
+        suffix = {"forced": ".forced", "sdh": ".sdh"}.get(it["flavor"], "")
+        dst = out.with_name(f"{out.stem}.{it['lang']}{suffix}.srt")
+        k = 2
+        while dst.exists():
+            dst = out.with_name(f"{out.stem}.{it['lang']}{suffix}.{k}.srt")
+            k += 1
+        dst.write_bytes(Path(it["srt"]).read_bytes())  # o srt está num temp dir
+        n += 1
+        log(f"Legenda externa gravada ao lado: {dst.name} (de {Path(it['path']).name})")
+    return n
+
+
 def attach(output: str, orig_subs: list, dub_subs: list, orig_fn, dub_fn,
            orig_video: str | None = None, dub_video: str | None = None,
-           orig_lang: str = "und", dub_lang: str = "und", log=print) -> int:
+           orig_lang: str = "und", dub_lang: str = "und", log=print,
+           mode: str = "mux") -> int:
     """Ponta a ponta: planeja, remapeia (orig_fn/dub_fn: tempo→tempo ou
-    None para 'lado indisponível') e muxa. Falha de UMA legenda só a pula."""
+    None para 'lado indisponível') e muxa (mode='mux') ou grava sidecars
+    (mode='sidecar'). Falha de UMA legenda só a pula."""
     if not orig_subs and not dub_subs:
         return 0
     probe = merger.ffprobe_json(output)
@@ -412,4 +464,6 @@ def attach(output: str, orig_subs: list, dub_subs: list, orig_fn, dub_fn,
             srt = Path(td) / f"sub{i}.srt"
             write_srt(cues, srt)
             ready.append({**it, "srt": str(srt)})
+        if mode == "sidecar":
+            return sidecar(output, ready, log)
         return mux(output, ready, log)

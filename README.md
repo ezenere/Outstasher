@@ -36,7 +36,13 @@ torrent para cada uma, e junta tudo em um único arquivo: **melhor imagem + todo
      no container via `-itsoffset`, **stream copy total** (trilha dublada intacta,
      sem re-encode). Com **drift** (janelas divergem): re-encode via
      `-filter_complex` (AAC mono/estéreo, AC3 multicanal para preservar o layout
-     surround).
+     surround);
+   - **legendas externas dos torrents** (`.srt/.ass/.ssa/.vtt` ao lado do vídeo
+     ou em `Subs/`) entram no MKV final com o mesmo deslocamento do áudio,
+     idioma detectado pelo nome/pasta/conteúdo e duplicatas descartadas
+     (mesma língua já embutida como texto, ou repetida nos dois torrents).
+     Quando a entrega é hardlink (ou não é MKV), viram sidecars
+     `Filme.por.srt` ao lado — muxar obrigaria a copiar o filme inteiro.
 
 ## Requisitos
 
