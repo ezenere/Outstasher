@@ -7,7 +7,7 @@ produção, sem cópia paralela.
 """
 import numpy as np
 
-from services.series.align import classify, dp
+from services.series.align import classify, dp, fingerprint
 from services.series.align.fingerprint import FPS, hamming_band
 
 
@@ -175,3 +175,31 @@ def test_plano_parado_ruidoso_nao_vira_substituicao():
     for s in segs:
         if s.kind == "match":
             assert abs(s.offset) < 0.3
+
+
+def test_coarse_offset_localiza_episodio_no_fundido():
+    """Episódio curto dentro de um arquivo longo (fundido): o localizador
+    grosseiro acha o offset dominante mesmo com um RECAP no começo do curto
+    (cenas de outro ponto do longo, que votam em outra diagonal)."""
+    ep = _hashes(1200, seed=1)                  # 5 min a 4 fps
+    other = _hashes(1000, seed=2)               # o outro episódio (antes)
+    tail = _hashes(200, seed=3)
+    fused = np.concatenate([other, ep, tail])
+    # curto = recap (60 frames do OUTRO episódio) + o episódio
+    short = np.concatenate([other[400:460], ep])
+    off, frac = fingerprint.coarse_offset(short, fused)
+    # o episódio começa em 1000 no fundido e em 60 no curto: offset ~940
+    assert abs(off - 940) <= fingerprint.COARSE_STEP * 2, (off, frac)
+    assert frac > 0.5
+
+
+def test_par_de_gaps_solto_na_ponta_nao_e_substituicao():
+    """Par gap_dub+gap_orig sem trecho casado de um dos lados (começo do
+    arquivo, rabo do outro episódio) fica como gaps — não vira 'replaced'
+    pedindo revisão."""
+    a = _hashes(200)
+    b = np.concatenate([_hashes(40, seed=7), a[40:]])   # começo diferente
+    segs = _classify(a, b)
+    kinds = [s.kind for s in segs]
+    assert "replaced" not in kinds, kinds
+    assert kinds[-1] == "match"

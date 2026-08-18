@@ -90,20 +90,27 @@ def dhash_stream(path: str, crop: str | None = None,
 
 
 def hamming_band(a: np.ndarray, b: np.ndarray,
-                 band: int = BAND) -> tuple[np.ndarray, np.ndarray]:
+                 band: int = BAND,
+                 offset: int | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Distância de Hamming numa banda de Sakoe-Chiba.
 
     Retorna (D, lo): D tem shape (len(a), 2*band+1) com a distância 0..64 na
     banda e 255 fora dela; lo[i] é a coluna de `b` correspondente à posição 0
     da banda na linha i. O centro da banda segue a diagonal esticada
-    (i * (M-1)/(N-1)) para sequências de tamanhos diferentes.
+    (i * (M-1)/(N-1)) para sequências de tamanhos diferentes — OU, com
+    `offset`, a diagonal de inclinação 1 deslocada (j = i + offset): é o caso
+    do episódio dentro de um arquivo FUNDIDO, onde esticar a diagonal joga a
+    posição real do episódio para fora da banda no fim (ou no começo).
     """
     n, m = len(a), len(b)
     width = 2 * band + 1
     D = np.full((n, width), 255, dtype=np.uint8)
     lo = np.zeros(n, dtype=np.int64)
-    centers = (np.arange(n) * (m - 1) / max(1, n - 1)).round().astype(np.int64) \
-        if n > 1 else np.zeros(n, dtype=np.int64)
+    if offset is not None:
+        centers = np.arange(n, dtype=np.int64) + int(offset)
+    else:
+        centers = (np.arange(n) * (m - 1) / max(1, n - 1)).round().astype(np.int64) \
+            if n > 1 else np.zeros(n, dtype=np.int64)
     for i in range(n):
         j0 = max(0, int(centers[i]) - band)
         j1 = min(m, int(centers[i]) + band + 1)
@@ -114,6 +121,41 @@ def hamming_band(a: np.ndarray, b: np.ndarray,
         view = x.view(np.uint8).reshape(-1, 8)
         D[i, :j1 - j0] = _POPCOUNT8[view].sum(axis=1)
     return D, lo
+
+
+COARSE_STEP = 4          # 1 amostra/s no localizador grosseiro
+COARSE_GOOD = 14         # distância até isto conta como "mesmo frame"
+
+
+def coarse_offset(a: np.ndarray, b: np.ndarray, step: int = COARSE_STEP,
+                  good: int = COARSE_GOOD) -> tuple[int, float]:
+    """Localizador grosseiro: em que offset (frames de b − frames de a) o lado
+    curto `a` está dentro do longo `b`?
+
+    Amostra 1 frame a cada `step` dos dois lados, mede a distância de TODOS os
+    pares (matriz cheia — pequena nesta resolução) e conta, por diagonal
+    j − i, quantos pares são "mesmo frame". A diagonal mais votada é o offset
+    dominante do episódio; recap/"nos próximos" (cenas de OUTRO ponto) votam
+    em diagonais espalhadas e não competem com 40 min de conteúdo contínuo.
+    Retorna (offset em frames de FPS, fração dos frames de `a` que votaram na
+    diagonal vencedora ±1 amostra)."""
+    sa, sb = a[::step], b[::step]
+    n, m = len(sa), len(sb)
+    if n == 0 or m == 0:
+        return 0, 0.0
+    votes = np.zeros(n + m, dtype=np.int64)  # índice = (j - i) + n
+    for i in range(n):
+        x = sa[i] ^ sb
+        d = _POPCOUNT8[x.view(np.uint8).reshape(-1, 8)].sum(axis=1)
+        js = np.nonzero(d <= good)[0]
+        if len(js):
+            np.add.at(votes, js - i + n, 1)
+    # suaviza ±1 amostra (o passo grosseiro pode cair um de cada lado)
+    sm = votes.copy()
+    sm[1:] += votes[:-1]
+    sm[:-1] += votes[1:]
+    k = int(np.argmax(sm))
+    return (k - n) * step, float(sm[k]) / n
 
 
 def dump_matrix_png(D: np.ndarray, path: str):

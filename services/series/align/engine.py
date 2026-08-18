@@ -35,6 +35,9 @@ MIN_MATCH_FRACTION = 0.10
 # sobreposição entre as "metades" candidatas — o episódio não começa
 # exatamente no meio (cold open, créditos, recap)
 HALF_OVERLAP = 0.10
+# fração mínima dos frames do curto votando na diagonal dominante para o
+# localizador grosseiro valer (senão: método das metades)
+COARSE_MIN_FRACTION = 0.15
 
 
 def align_pair(dub_path: str, orig_path: str, episode: str = "?",
@@ -79,26 +82,48 @@ def align_pair(dub_path: str, orig_path: str, episode: str = "?",
         return edl.build(segs, episode, dub_path, dur_a, orig_path, dur_b,
                          profile=profile)
 
-    # ---- fundido: alinha o curto contra cada metade do longo ----
+    # ---- fundido: localiza o episódio dentro do longo e alinha na diagonal
+    # de inclinação 1 (offset constante ± banda) ----
     long_is_b = dur_b > dur_a
     long_h = hb if long_is_b else ha
+    short_h = ha if long_is_b else hb
     fps = fingerprint.FPS
     n = len(long_h)
-    halves = [(0, int(n * (0.5 + HALF_OVERLAP))),
-              (int(n * (0.5 - HALF_OVERLAP)), n)]
-    best = None
-    for h0, h1 in halves:
-        piece = long_h[h0:h1]
+    # Esticar a diagonal (curto x metade) parece inocente, mas com 41 min
+    # contra 49 min a inclinação 1,2 leva o centro da banda 8 min longe da
+    # posição real no fim do episódio — o rabo do E01 e o começo do E02 saíam
+    # da banda e viravam lixo (caso real Mr Robot S02E01/E02). Localizador
+    # grosseiro primeiro: a diagonal mais votada é onde o episódio está; recap
+    # (cenas do OUTRO episódio) vota espalhado e não compete.
+    off0, frac = fingerprint.coarse_offset(short_h, long_h)
+    if frac >= COARSE_MIN_FRACTION:
+        h0, h1 = 0, n
         if long_is_b:
-            D, lo = fingerprint.hamming_band(ha, piece, band=band)
-            runs = dp.align_band(D, lo, len(piece))
+            D, lo = fingerprint.hamming_band(ha, hb, band=band, offset=off0)
+            runs = dp.align_band(D, lo, len(hb))
         else:
-            D, lo = fingerprint.hamming_band(piece, hb, band=band)
+            D, lo = fingerprint.hamming_band(ha, hb, band=band, offset=-off0)
             runs = dp.align_band(D, lo, len(hb))
         mf = sum(r[2] - r[1] for r in runs if r[0] == dp.MATCH)
-        if best is None or mf > best[0]:
-            best = (mf, h0, h1, D, lo, runs)
-    mf, h0, h1, D, lo, runs = best
+        locate_note = f"offset dominante {off0 / fps:+.0f}s ({frac:.0%} dos frames)"
+    else:
+        # localizador sem sinal claro: cai no método das metades
+        halves = [(0, int(n * (0.5 + HALF_OVERLAP))),
+                  (int(n * (0.5 - HALF_OVERLAP)), n)]
+        best = None
+        for h0, h1 in halves:
+            piece = long_h[h0:h1]
+            if long_is_b:
+                D, lo = fingerprint.hamming_band(ha, piece, band=band)
+                runs = dp.align_band(D, lo, len(piece))
+            else:
+                D, lo = fingerprint.hamming_band(piece, hb, band=band)
+                runs = dp.align_band(D, lo, len(hb))
+            mf = sum(r[2] - r[1] for r in runs if r[0] == dp.MATCH)
+            if best is None or mf > best[0]:
+                best = (mf, h0, h1, D, lo, runs)
+        mf, h0, h1, D, lo, runs = best
+        locate_note = f"{'1ª' if h0 == 0 else '2ª'} metade"
     short_len = min(len(ha), len(hb))
     if mf < MIN_MATCH_FRACTION * short_len:
         raise AlignConflict(
@@ -145,9 +170,8 @@ def align_pair(dub_path: str, orig_path: str, episode: str = "?",
     out["b_window" if long_is_b else "a_window"] = [round(window[0], 3),
                                                        round(window[1], 3)]
     out["note"] = (f"arquivo {'original' if long_is_b else 'dublado'} fundido "
-                   f"(razão {ratio:.2f}): episódio localizado na "
-                   f"{'1ª' if h0 == 0 else '2ª'} metade "
-                   f"({window[0]:.0f}s–{window[1]:.0f}s)")
+                   f"(razão {ratio:.2f}): episódio localizado em "
+                   f"{window[0]:.0f}s–{window[1]:.0f}s ({locate_note})")
     return out
 
 

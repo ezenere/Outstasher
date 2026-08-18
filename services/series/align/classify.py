@@ -24,6 +24,12 @@ from services.series.align.fingerprint import FPS
 
 RESIDUAL_MATCH = 12.0    # resíduo médio abaixo disto = mesmo conteúdo
 RESIDUAL_REPLACED = 20.0  # acima disto na diagonal = conteúdo divergente
+# "cena substituída" só existe ENTRE dois trechos casados na mesma diagonal
+# (offset depois = offset antes + diferença de duração, dentro disto). Par de
+# gaps solto na ponta, ou entre matches de offsets incoerentes, é ausência de
+# correspondência (rabo do outro episódio num arquivo fundido, créditos) —
+# ficam os gaps, sem pedir revisão de nada
+REPLACED_DIAGONAL_TOL_S = 2.0
 PAL_SLOPE = 25.0 / 23.976  # ~1.0427
 SLOPE_TOL = 0.005
 MIN_GAP_S = 0.5          # gap menor que isto é ruído de hash, não edição
@@ -164,6 +170,26 @@ def _postprocess(segs: list[Segment], fps: float,
 _REPLACED_RATIO = 1.4
 
 
+def _on_same_diagonal(segs: list[Segment], i: int, da: float, db: float) -> bool:
+    """O par de gaps em segs[i], segs[i+1] está entre dois trechos casados
+    cujos offsets são coerentes (a diagonal continua depois da substituição)?
+    Sem trecho casado de um dos lados, ou com salto de offset além do que a
+    diferença de duração explica, não é substituição."""
+    def anchor(rng):
+        for j in rng:
+            k = segs[j].kind
+            if k in ("match", "pal", "drift") and segs[j].offset is not None:
+                return segs[j].offset
+            if k in ("gap_dub", "gap_orig", "replaced"):
+                return None
+        return None
+    before = anchor(range(i - 1, -1, -1))
+    after = anchor(range(i + 2, len(segs)))
+    if before is None or after is None:
+        return False
+    return abs((after - before) - (db - da)) <= REPLACED_DIAGONAL_TOL_S
+
+
 def _diagonal_residual(a0: float, b0: float, n_frames: int, fps: float,
                        D: np.ndarray | None, lo: np.ndarray | None) -> float:
     """Hamming médio ao longo da diagonal (a0,b0)->(a0+n,b0+n), em frames.
@@ -255,6 +281,11 @@ def _fuse_replaced_pairs(segs: list[Segment], fps: float = FPS,
                     if b_end > b0 + dur + 1e-6:
                         out.append(Segment("gap_orig", a0 + dur, a0 + dur,
                                            b0 + dur, b_end))
+                    i += 2
+                    continue
+                if not _on_same_diagonal(segs, i, da, db):
+                    out.append(s)
+                    out.append(nxt)
                     i += 2
                     continue
                 out.append(Segment(
