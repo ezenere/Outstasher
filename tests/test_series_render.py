@@ -231,7 +231,9 @@ def test_render_corta_original_fundido_na_janela(tmp_path):
     info = _probe(out)
     dur = float(info["format"]["duration"])
     # keyframe anterior ao início pode adiantar alguns segundos: 30 ≤ dur ≤ 42
+    # — e NUNCA o arquivo inteiro (60 s): o corte da janela tem que valer
     assert 29.0 <= dur <= 42.0, dur
+    assert abs(dur - (60.0 - info_r["b_shift"])) < 1.0, (dur, info_r)
     audios = [s for s in info["streams"] if s["codec_type"] == "audio"]
     assert len(audios) == 2
     shift = info_r["b_shift"]
@@ -240,3 +242,26 @@ def test_render_corta_original_fundido_na_janela(tmp_path):
     assert "Ep2 A" in titles and "Ep2 B" in titles, titles
     ch = {c["tags"]["title"]: float(c["start_time"]) for c in info["chapters"]}
     assert abs(ch["Ep2 B"] - (45.0 - shift)) < 0.05, (ch, shift)
+
+
+@pytest.mark.ffmpeg
+def test_render_janela_no_comeco_corta_o_fim(tmp_path):
+    """Caso real S02E01: janela 0–30 de um original de 60 s. O -to de entrada
+    do ffmpeg NÃO era honrado (saía o arquivo inteiro); a saída tem que ter
+    ~30 s, e o vídeo do 2º episódio fica de fora."""
+    orig = _media(tmp_path / "orig.mkv", 60, seed=1,
+                  chapters=[(0, 30, "Ep1"), (30, 60, "Ep2")])
+    dub = _media(tmp_path / "dub.mkv", 30, seed=2)
+    segs = [Segment("match", 0.0, 30.0, 0.0, 30.0, offset=0.0)]
+    out = tmp_path / "out.mkv"
+    render_mod.render(segs, str(dub), str(orig), str(out), "pt",
+                      log=lambda m: None, b_window=(0.0, 30.0))
+    info = _probe(out)
+    dur = float(info["format"]["duration"])
+    assert 29.0 <= dur <= 31.5, dur
+    # capítulo do 2º episódio: some, ou fica vazio colado no fim (start == -t,
+    # que o ffmpeg mantém por "≤") — nunca com conteúdo dentro da saída
+    for c in info["chapters"]:
+        if c["tags"]["title"] == "Ep2":
+            assert float(c["start_time"]) >= 29.5, c
+    assert info["chapters"][0]["tags"]["title"] == "Ep1"

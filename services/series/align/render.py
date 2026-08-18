@@ -92,6 +92,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
     duration_b = float(probe_orig["format"]["duration"])
 
     in_opts: list[str] = []
+    out_opts: list[str] = []
     if b_window:
         w0, w1 = float(b_window[0]), float(b_window[1])
         kf = _keyframe_at_or_before(orig_path, w0)
@@ -99,7 +100,13 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
             kf = w0
             log(f"⚠️ não achei keyframe antes de {w0:.1f}s — cortando em {w0:.1f}s "
                 f"(o vídeo pode começar alguns frames adiantado)")
-        in_opts = ["-ss", f"{kf:.3f}", "-to", f"{w1:.3f}"]
+        # -ss de ENTRADA no keyframe (corte limpo em stream copy) e a duração
+        # como -t de SAÍDA. NÃO usar -to de entrada: o ffmpeg 7.1 ignorou
+        # (E01 fundido saiu com o arquivo inteiro, 81 min) e o 9.0 interpreta
+        # relativo ao -ss — semântica instável entre versões; -t na saída é
+        # determinístico
+        in_opts = ["-ss", f"{kf:.3f}"]
+        out_opts = ["-t", f"{w1 - kf:.3f}"]
         # o input passa a começar em 0 = kf: desloca os tempos b da EDL
         segs = [Segment(s.kind, s.a_start, s.a_end,
                         None if s.b_start is None else s.b_start - kf,
@@ -187,7 +194,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
                 *in_opts, "-i", orig_path, "-i", dub_path,
                 "-filter_complex", filter_complex,
                 "-map", "[dub_out]", "-c:a", codec, "-b:a", bitrate,
-                "-vn", "-sn", str(dub_mka)]
+                "-vn", "-sn", *out_opts, str(dub_mka)]
         merger._run_ffmpeg_progress(cmd1, duration_b, on_progress, on_start)
 
         # passo 2: mux com stream copy de tudo (rápido)
@@ -213,7 +220,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         # players travam a reprodução (caso real anterior). É seguro aqui
         # porque este passo é SÓ cópia (nenhum filtergraph disputando fila).
         cmd2 += ["-avoid_negative_ts", "make_zero", "-max_interleave_delta", "0",
-                 output]
+                 *out_opts, output]
         p2 = subprocess.run(cmd2, capture_output=True, text=True,
                             encoding="utf-8", errors="replace")
         if p2.returncode != 0:
