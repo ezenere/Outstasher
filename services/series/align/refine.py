@@ -421,6 +421,49 @@ def _merge_adjacent(segs: list[Segment]) -> list[Segment]:
     return out
 
 
+EXTRA_DUB_MAX_S = 3.0   # gap "só no dublado" até isto entre matches é junção
+EXTRA_DUB_TOL_S = 0.5   # ... quando a mudança de offset explica o gap
+
+
+def _tighten_extra_dub(segs: list[Segment], dub_path, dub_a, log) -> list[Segment]:
+    """[match A][gap_dub curto][match B] com A.offset - B.offset ~ tamanho do
+    gap = o DUBLADO tem material a mais (respiro/repetição numa junção); no
+    original a cena segue direto, sem buraco. Então: o corte no dublado vai
+    para o SILÊNCIO mais próximo, a fatia seguinte retoma exatamente onde a
+    anterior parou no original (b contínuo) e o excesso do dublado é pulado
+    dentro do silêncio. Antes, as fronteiras quantizadas do vídeo (0,25 s)
+    deixavam um buraco de ~100 ms no original que era preenchido com áudio
+    ORIGINAL no meio da fala — sem nenhum motivo."""
+    out: list[Segment] = []
+    i = 0
+    while i < len(segs):
+        s = segs[i]
+        if (s.kind == "match" and i + 2 < len(segs)
+                and segs[i + 1].kind == "gap_dub"
+                and segs[i + 2].kind == "match"
+                and s.offset is not None and segs[i + 2].offset is not None):
+            g, nxt = segs[i + 1], segs[i + 2]
+            gap = g.a_end - g.a_start
+            extra = s.offset - nxt.offset  # segundos a mais no dublado
+            if 0 < gap <= EXTRA_DUB_MAX_S and extra > 0 \
+                    and abs(extra - gap) <= EXTRA_DUB_TOL_S:
+                cut = _snap_to_silence(dub_path, dub_a, s.a_end, log)
+                cut = min(max(cut, s.a_start + 0.5), nxt.a_end - extra - 0.5)
+                s.a_end = cut
+                s.b_end = cut + s.offset
+                nxt.a_start = cut + extra
+                nxt.b_start = s.b_end
+                log(f"  junção com {extra * 1000:.0f} ms a mais no dublado em "
+                    f"{cut:.2f}s: corte no silêncio, original contínuo")
+                out.append(s)
+                out.append(nxt)
+                i += 3
+                continue
+        out.append(s)
+        i += 1
+    return out
+
+
 def refine_offsets(segs: list[Segment], dub_path: str, dub_a: int,
                    orig_path: str, orig_a: int, log=print) -> list[Segment]:
     """Refino por áudio: funde wobbles do vídeo, resolve 'substituídas' cujo
@@ -446,6 +489,7 @@ def refine_offsets(segs: list[Segment], dub_path: str, dub_a: int,
                                      orig_a, log))
     _inherit_short(out)
     out = _drop_stray_matches(out, log)
+    out = _tighten_extra_dub(out, dub_path, dub_a, log)
     return _merge_adjacent(out)
 
 

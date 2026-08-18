@@ -118,3 +118,23 @@ def test_scan_constant_offset(tmp_path):
     ok2, _ = refine.scan_constant_offset(str(same), 0, str(orig), 0, 700.0,
                                          step=120.0)
     assert ok2
+
+
+def test_juncao_com_dublado_a_mais_nao_puxa_original(tmp_path):
+    """Caso real (E03 21:00): o dublado tem ~0,6 s a mais numa junção; o
+    original segue direto. O corte tem que cair num silêncio do dublado e o
+    original ficar CONTÍNUO (sem buraco preenchido com áudio original)."""
+    dub = _audio(tmp_path / "dub.wav", 70, seed=7, gaps=[(29.8, 30.4)])
+    segs = [
+        Segment("match", 0.0, 30.0, 0.0, 30.0, offset=0.0),
+        Segment("gap_dub", 30.0, 30.6, 30.0, 30.0),      # 0,6 s só no dublado
+        Segment("match", 30.6, 60.0, 30.0, 59.4, offset=-0.6),
+    ]
+    logs = []
+    out = refine._tighten_extra_dub(segs, str(dub), 0, log=logs.append)
+    assert [s.kind for s in out] == ["match", "match"]
+    a, b = out
+    assert abs(a.a_end - 30.1) < 0.4          # corte no silêncio 29.8-30.4
+    assert abs(b.a_start - (a.a_end + 0.6)) < 1e-6  # pula o excesso do dublado
+    assert abs(b.b_start - a.b_end) < 1e-6    # original contínuo
+    assert any("junção" in l for l in logs)

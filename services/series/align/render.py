@@ -26,6 +26,9 @@ from services.series.align.classify import Segment
 
 # tolerância para "fatia colada na anterior" (evita micro-gaps de arredondamento)
 _EPS = 0.02
+# buraco entre duas fatias de dublagem até isto é arredondamento (grade de
+# 0,25 s do vídeo), não falta de dublagem: a fatia anterior estende
+SMALL_HOLE_S = 0.35
 
 
 @lru_cache(maxsize=1)
@@ -257,8 +260,18 @@ def _plan_slices(segs: list[Segment],
             continue
         b0 = max(b0, cursor)
         if b0 > cursor + _EPS:
-            # buraco não descrito pela EDL: preenche com o original
-            fill(cursor, b0, "orig", "trecho sem correspondência mapeada")
+            hole = b0 - cursor
+            if hole <= SMALL_HOLE_S and slices and slices[-1]["src"] == "dub" \
+                    and not slices[-1].get("tempo"):
+                # sobra de arredondamento entre duas fatias de dublagem
+                # (fronteiras do vídeo vêm quantizadas a 0,25 s): a dublagem
+                # anterior CONTINUA por esses ms — jamais áudio original no
+                # meio da fala
+                slices[-1]["src_end"] += hole
+                slices[-1]["b_end"] += hole
+            else:
+                # buraco de verdade não descrito pela EDL: preenche com o original
+                fill(cursor, b0, "orig", "trecho sem correspondência mapeada")
         action = seg.extra.get("action")
         if seg.kind in ("match", "drift"):
             slices.append({"src": "dub",
