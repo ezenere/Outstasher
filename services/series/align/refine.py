@@ -333,6 +333,7 @@ def _split_by_profile(seg: Segment, pts, dub_path, dub_a, orig_path, orig_a,
 
 REPLACED_AUDIO_TOL_S = 0.10   # áudio no mesmo offset dos vizinhos = mesma cena
 STRAY_MATCH_S = 3.0           # match isolado curto com offset longe dos vizinhos
+STRAY_AUDIO_MAX_S = 10.0      # até aqui, offset destoante precisa do aval do áudio
 STRAY_OFF_S = 1.0
 MERGE_OFF_TOL_S = 0.005       # matches vizinhos com offset igual (5 ms) fundem
 
@@ -423,24 +424,49 @@ def _neighbor_audio_offset(segs, i, dub_path, dub_a, orig_path, orig_a,
     return None
 
 
-def _drop_stray_matches(segs: list[Segment], log) -> list[Segment]:
+def _drop_stray_matches(segs: list[Segment], log, dub_path=None, dub_a=None,
+                        orig_path=None, orig_a=None) -> list[Segment]:
     """Match isolado, curto, com offset longe dos dois vizinhos = colisão de
-    hash (créditos, tela preta). Vira gap_orig (preenchido com o original) —
-    melhor do que 1,5 s de dublagem de outro ponto do episódio."""
+    hash (créditos, tela preta) ou MONTAGEM (recap / "nos próximos": a cena
+    existe mesmo, 30 s ou 20 min antes). Vira gap_orig (preenchido com o
+    original) — melhor do que segundos de dublagem de outro ponto.
+
+    Até STRAY_MATCH_S descarta direto. Entre isso e STRAY_AUDIO_MAX_S pergunta
+    ao ÁUDIO no offset do próprio match: montagem tem narração/música por
+    cima e não correlaciona (descarta); take reaproveitado com o mesmo áudio
+    correlaciona e fica (inofensivo — é o mesmo som)."""
     out = list(segs)
     for i, seg in enumerate(out):
-        if seg.kind != "match" or seg.a_end - seg.a_start >= STRAY_MATCH_S:
+        dur = seg.a_end - seg.a_start
+        if seg.kind != "match" or dur >= STRAY_AUDIO_MAX_S:
             continue
         neigh = [out[j].offset for j in (i - 1, i + 1)
                  if 0 <= j < len(out) and out[j].kind in ("match", "pal", "drift")
                  and out[j].offset is not None]
         if not neigh:
             neigh = [o for o in (_neighbor_offset(out, i),) if o is not None]
-        if neigh and all(abs(seg.offset - o) > STRAY_OFF_S for o in neigh):
-            log(f"  match espúrio {seg.a_start:.1f}-{seg.a_end:.1f}s (offset "
-                f"{seg.offset:+.2f}s vs vizinhos) — descartado")
-            out[i] = Segment("gap_orig", seg.a_start, seg.a_start,
-                             seg.b_start, seg.b_end)
+        if not (neigh and all(abs(seg.offset - o) > STRAY_OFF_S for o in neigh)):
+            continue
+        if dur >= STRAY_MATCH_S:
+            if dub_path is None:
+                continue
+            try:
+                tau, q = _measure(dub_path, dub_a, orig_path, orig_a,
+                                  seg.a_start, seg.a_start + seg.offset, dur)
+            except merger.MergeError:
+                continue
+            if q >= MIN_PEAK_QUALITY and abs(tau) <= REPLACED_AUDIO_TOL_S:
+                log(f"  match curto {seg.a_start:.1f}-{seg.a_end:.1f}s com offset "
+                    f"{seg.offset:+.2f}s (≠ vizinhos): áudio confirma (pico {q:.0f}) "
+                    f"— mantido")
+                continue
+            why = f"áudio não confirma (pico {q:.0f}, desvio {tau * 1000:+.0f} ms)"
+        else:
+            why = "curto demais"
+        log(f"  match espúrio {seg.a_start:.1f}-{seg.a_end:.1f}s (offset "
+            f"{seg.offset:+.2f}s vs vizinhos; {why}) — descartado")
+        out[i] = Segment("gap_orig", seg.a_start, seg.a_start,
+                         seg.b_start, seg.b_end)
     return out
 
 
@@ -528,7 +554,7 @@ def refine_offsets(segs: list[Segment], dub_path: str, dub_a: int,
         out.extend(_split_by_profile(seg, pts, dub_path, dub_a, orig_path,
                                      orig_a, log))
     _inherit_short(out)
-    out = _drop_stray_matches(out, log)
+    out = _drop_stray_matches(out, log, dub_path, dub_a, orig_path, orig_a)
     out = _tighten_extra_dub(out, dub_path, dub_a, log)
     return _merge_adjacent(out)
 

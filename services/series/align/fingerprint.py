@@ -155,7 +155,7 @@ def coarse_offset(a: np.ndarray, b: np.ndarray, step: int = COARSE_STEP,
     sm[1:] += votes[:-1]
     sm[:-1] += votes[1:]
     k = int(np.argmax(sm))
-    return (k - n) * step, float(sm[k]) / n
+    return (k - n) * step, min(1.0, float(sm[k]) / n)
 
 
 def dump_matrix_png(D: np.ndarray, path: str):
