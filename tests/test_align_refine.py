@@ -106,6 +106,29 @@ def test_substituida_com_audio_continuo_vira_match(tmp_path):
     assert any("vira match" in l for l in logs)
 
 
+def test_substituida_com_vizinho_na_grade_do_video(tmp_path):
+    """Caso real Mr Robot S01E03 14:20: o vizinho diz offset -5,00 (grade de
+    0,25 s do vídeo) mas o áudio real está em -5,14. A 'substituída' tem que
+    ser comparada com o offset REAL do vizinho, não com o da grade — senão os
+    41 ms de sobra estouram a tolerância e o falso positivo vai para revisão."""
+    orig = _audio(tmp_path / "orig.wav", 60, seed=5, gaps=[(20, 20.4), (40, 40.4)])
+    # dublado = original ATRASADO 140 ms (offset real = -0.14: b = a - 0.14)
+    dub = tmp_path / "dub.wav"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", str(orig), "-af", "adelay=140:all=1",
+                    "-c:a", "pcm_s16le", str(dub)], check=True)
+    segs = [
+        Segment("match", 0.14, 25.0, 0.0, 24.86, offset=0.0),      # vídeo: grade
+        Segment("replaced", 25.0, 30.0, 25.0, 30.0),
+        Segment("match", 30.0, 59.0, 30.0, 59.0, offset=0.0),
+    ]
+    logs = []
+    out = refine.refine_offsets(segs, str(dub), 0, str(orig), 0, log=logs.append)
+    assert all(s.kind == "match" for s in out), [(s.kind, s.a_start) for s in out]
+    assert any("vira match" in l for l in logs), logs
+    assert not any("fica para revisão" in l for l in logs), logs
+
+
 def test_scan_constant_offset(tmp_path):
     orig = _audio(tmp_path / "orig.wav", 700, seed=4)
     dub = _dub_with_edit(orig, tmp_path / "dub.wav", cut_at=350.0, drop=0.100)

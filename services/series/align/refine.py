@@ -362,13 +362,24 @@ def _resolve_replaced_by_audio(segs, dub_path, dub_a, orig_path, orig_a, log):
         dur = seg.a_end - seg.a_start
         if dur < 1.0:
             continue
+        # o offset do vizinho vem do VÍDEO (grade de 0,25 s: erro até 125 ms —
+        # maior que a tolerância). A referência tem que ser o offset REAL do
+        # vizinho, medido pelo áudio colado na fronteira (caso Mr Robot S01E03
+        # 14:20: vídeo -5,00, áudio -5,14 → recusado por 41 ms de folga)
+        ref = _neighbor_audio_offset(segs, i, dub_path, dub_a, orig_path, orig_a)
+        if ref is None:
+            ref = near
         try:
             tau, q = _measure(dub_path, dub_a, orig_path, orig_a,
-                              seg.a_start, seg.a_start + near, dur)
+                              seg.a_start, seg.a_start + ref, dur)
         except merger.MergeError:
             continue
-        off = near + tau
-        if q >= MIN_PEAK_QUALITY and abs(off - near) <= REPLACED_AUDIO_TOL_S:
+        off = ref + tau
+        if q < MIN_PEAK_QUALITY or abs(off - ref) > REPLACED_AUDIO_TOL_S:
+            log(f"  'cena substituída' {seg.a_start:.1f}-{seg.a_end:.1f}s: áudio "
+                f"NÃO confirma continuidade (offset {off * 1000:+.0f} ms vs "
+                f"vizinho {ref * 1000:+.0f} ms, pico {q:.0f}) — fica para revisão")
+        else:
             log(f"  'cena substituída' {seg.a_start:.1f}-{seg.a_end:.1f}s: áudio "
                 f"contínuo (offset {off * 1000:+.0f} ms, pico {q:.0f}) — vira match")
             seg.kind = "match"
@@ -381,6 +392,35 @@ def _resolve_replaced_by_audio(segs, dub_path, dub_a, orig_path, orig_a, log):
             seg.extra["refine"] = f"offset medido {off * 1000:+.1f} ms (áudio no lugar)"
             seg.extra["video_offset"] = near
     return segs
+
+
+def _neighbor_audio_offset(segs, i, dub_path, dub_a, orig_path, orig_a,
+                           win: float = 6.0) -> float | None:
+    """Offset REAL (áudio) do match vizinho, medido numa janela colada na
+    fronteira com segs[i] — antes, senão depois. None se nada confiável."""
+    cands = []
+    for j in range(i - 1, -1, -1):
+        if segs[j].kind in ("match", "pal", "drift") and segs[j].offset is not None:
+            a1 = min(segs[j].a_end, segs[i].a_start)
+            a0 = max(segs[j].a_start, a1 - win)
+            cands.append((a0, a1 - a0, segs[j].offset))
+            break
+    for j in range(i + 1, len(segs)):
+        if segs[j].kind in ("match", "pal", "drift") and segs[j].offset is not None:
+            a0 = max(segs[j].a_start, segs[i].a_end)
+            a1 = min(segs[j].a_end, a0 + win)
+            cands.append((a0, a1 - a0, segs[j].offset))
+            break
+    for a0, dur, guess in cands:
+        if dur < 1.0:
+            continue
+        try:
+            tau, q = _measure(dub_path, dub_a, orig_path, orig_a, a0, a0 + guess, dur)
+        except merger.MergeError:
+            continue
+        if q >= MIN_PEAK_QUALITY:
+            return guess + tau
+    return None
 
 
 def _drop_stray_matches(segs: list[Segment], log) -> list[Segment]:
