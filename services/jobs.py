@@ -28,6 +28,7 @@ import httpx
 import config
 from services import catalog, jackett, merger, selector, store, tmdb, transcode
 from services.qbittorrent import QbitClient, QbitError
+from services.series import subs as ext_subs
 
 # problemas de comunicação com o qBittorrent que NÃO devem falhar o job
 # durante o download: rede fora, sessão caída, restart do qBittorrent...
@@ -1467,6 +1468,9 @@ async def _run_from_download(job: dict):
         # o qBittorrent pode segurar o arquivo recém-concluído por um tempo)
         files = {kind: await _resolve_video_file(job, content, kind)
                  for kind, content in paths.items()}
+        # raiz do torrent por papel: as legendas externas (.srt/.ass) ficam
+        # ao lado do vídeo ou em Subs/ — procuradas na hora da entrega
+        job["src_roots"] = {kind: content for kind, content in paths.items()}
         # merge (ffmpeg) e entrega single (hardlink/cópia) entram na mesma fila:
         # só 1 por vez, para uma cópia grande não concorrer com uma conversão.
         lock = _get_merge_lock()
@@ -1815,6 +1819,9 @@ async def _deliver_single(job: dict, files: dict):
             _ffmpeg_procs.pop(job["id"], None)
         job["progress"]["merge"] = None
         job["output"] = result.output
+        await _attach_external_subs(job, result.output, {kind: src_file},
+                                    (0.0, 0.0) if kind == "video" else (None, 0.0), log,
+                                    linked=result.linked)
         done_label = "sem conversão necessária" if result.linked else "convertido"
         _set(job, "done", f"Concluído ({label}, {done_label}): {result.output}")
         await _cleanup_torrents(job)
@@ -1831,8 +1838,61 @@ async def _deliver_single(job: dict, files: dict):
         _event(job, "info", n)
 
     job["output"] = str(output)
+    await _attach_external_subs(job, str(output), {kind: src_file},
+                                (0.0, 0.0) if kind == "video" else (None, 0.0),
+                                lambda m: _event(job, "merge", m), linked=True)
     _set(job, "done", f"Concluído ({label}): {output}")
     await _cleanup_torrents(job)
+
+
+async def _attach_external_subs(job: dict, output: str, files: dict,
+                                shifts, log, linked: bool = False):
+    """Legendas externas dos torrents (.srt/.ass/.vtt) no arquivo entregue.
+
+    files: {"video": Path, "audio": Path} (os que existirem); shifts: (s_video,
+    s_audio) em segundos — tempo_saída = tempo_no_arquivo + shift; None = lado
+    sem referência de tempo (não entra). Saída MKV recém-criada → mux; saída
+    hardlinkada (ou não-MKV) → sidecars ao lado (muxar obrigaria a copiar o
+    filme inteiro). Nunca derruba o job."""
+    roots = job.get("src_roots") or {}
+
+    def _find(kind: str) -> list[str]:
+        f = files.get(kind)
+        if f is None:
+            return []
+        root = roots.get(kind)
+        try:
+            root_p = _map_qbit_path(job, root) if root else Path(f).parent
+        except Exception:  # noqa: BLE001
+            root_p = Path(f).parent
+        return [str(p) for p in ext_subs.find_for_movie(root_p, str(f))]
+
+    try:
+        v_subs, a_subs = await asyncio.gather(
+            asyncio.to_thread(_find, "video"), asyncio.to_thread(_find, "audio"))
+        if not v_subs and not a_subs:
+            return
+        movie = job.get("movie") or {}
+        orig_lang = merger.canonical_lang(merger.LANG_ISO.get(
+            movie.get("original_language") or "", movie.get("original_language") or "und"))
+        dub_lang = merger.canonical_lang(merger.LANG_ISO.get(job["language"], job["language"]))
+        # job de um torrent só: um "kind" pode ser dublado ou original
+        v_lang = dub_lang if job.get("kind") == "dubbed" and "audio" not in files else orig_lang
+        a_lang = dub_lang
+        mode = "sidecar" if (linked or Path(output).suffix.lower() != ".mkv") else "mux"
+        n = await asyncio.to_thread(
+            ext_subs.attach, output, v_subs, a_subs,
+            None if shifts[0] is None else ext_subs.shift_fn(shifts[0]),
+            None if shifts[1] is None else ext_subs.shift_fn(shifts[1]),
+            str(files.get("video") or ""), str(files.get("audio") or ""),
+            v_lang, a_lang, log, mode)
+        if n:
+            _event(job, "merge", f"{n} legenda(s) externa(s) do torrent "
+                                 f"{'gravada(s) ao lado' if mode == 'sidecar' else 'anexada(s)'}")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        _event(job, "merge", f"⚠️ legendas externas não anexadas ({e})")
 
 
 async def _merge(job: dict, video_file: Path, audio_file: Path,
@@ -1871,6 +1931,14 @@ async def _merge(job: dict, video_file: Path, audio_file: Path,
     job["progress"]["merge"] = None  # terminou (com sucesso): some a barra
 
     job["output"] = result.output
+    if result.linked:
+        ref = result.ref_input if result.ref_input is not None else 0
+        shifts = (0.0 if ref == 0 else None, 0.0 if ref == 1 else None)
+    else:
+        shifts = result.input_shifts
+    await _attach_external_subs(
+        job, result.output, {"video": video_file, "audio": audio_file}, shifts, log,
+        linked=result.linked)
     if result.linked:
         _set(job, "done", f"Áudio no idioma alvo já existia no melhor vídeo — hardlink criado: {result.output}")
     else:
