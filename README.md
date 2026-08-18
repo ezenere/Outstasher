@@ -279,11 +279,22 @@ cortadas/substituídas, speedup PAL) — entra o alinhador por conteúdo:
    `pal`, `drift`; refino do offset por áudio dentro de cada match;
 5. o resultado é uma **EDL** versionada gravada no job.
 
-A saída usa a timeline do original: vídeo/legendas/áudios originais em stream
-copy; só a faixa dublada é remontada fatia a fatia. Cena sem dublagem é
-preenchida com o **áudio original** (ou silêncio, se você decidir) e vira um
-**capítulo** `[preenchido]` no MKV. Speedup PAL é corrigido com `rubberband`
-(pitch + duração juntos; fallback `asetrate` sem ele).
+A saída usa a timeline do original: vídeo/legendas/áudios/**capítulos**
+originais em stream copy (nenhum capítulo de auditoria é criado — os
+preenchimentos ficam registrados na EDL do job); só a faixa dublada é
+remontada fatia a fatia. Cena sem dublagem é preenchida com o **áudio
+original** (ou silêncio, se você decidir). Speedup PAL é corrigido com
+`rubberband` (pitch + duração juntos; fallback `asetrate` sem ele).
+
+**Legendas externas do torrent** (`.srt/.ass/.ssa/.vtt`, no nome do
+episódio ou em `Subs/S01E02/…`) são baixadas junto e entram no MKV final
+com os tempos tratados: as do lado original só acompanham a janela; as do
+lado dublado seguem o mesmo offset (caminho rápido) ou a mesma EDL do áudio
+dublado (cue em trecho descartado some). Idioma vem do nome (`pt-BR`,
+`English`…), da pasta ou do conteúdo. Duplicatas são descartadas: mesma
+língua/forçada já embutida como **texto** no arquivo, ou repetida nos dois
+lados (a do original ganha). Legenda embutida só em bitmap (PGS/VobSub) não
+bloqueia a externa em texto.
 
 **Cena substituída nunca passa sozinha**: o job pausa em
 `alignment_review` com uma timeline de duas faixas e frames lado a lado das

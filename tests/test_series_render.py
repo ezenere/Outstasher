@@ -2,7 +2,8 @@
 
 Os testes de render constroem a EDL À MÃO (a detecção já é coberta por
 test_align_*) e conferem o RESULTADO de verdade: duração, faixas e capítulos
-de auditoria via ffprobe. O gate de revisão é exercitado no dict do job.
+(os do ORIGINAL, preservados) via ffprobe. O gate de revisão é exercitado no
+dict do job.
 """
 import json
 import subprocess
@@ -14,17 +15,26 @@ from services.series.align.classify import Segment
 from services.series.align import render as render_mod, rules as rules_mod
 
 
-def _media(path, dur, seed, size="320x180"):
+def _media(path, dur, seed, size="320x180", chapters=None):
     """Vídeo testsrc2 + áudio de RUÍDO (aperiódico: correlaciona de verdade,
-    ao contrário de senoide) — cada seed é uma 'dublagem' diferente."""
-    subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-         "-f", "lavfi", "-i", f"testsrc2=s={size}:d={dur}:r=24",
-         "-f", "lavfi", "-i", f"anoisesrc=color=pink:seed={seed}:duration={dur}",
-         "-map", "0:v", "-map", "1:a",
-         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-         "-c:a", "ac3", "-b:a", "128k", "-ac", "2",
-         "-metadata:s:a:0", "language=eng", str(path)], check=True)
+    ao contrário de senoide) — cada seed é uma 'dublagem' diferente.
+    chapters: lista de (início, fim, título) gravada no MKV."""
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+           "-f", "lavfi", "-i", f"testsrc2=s={size}:d={dur}:r=24",
+           "-f", "lavfi", "-i", f"anoisesrc=color=pink:seed={seed}:duration={dur}"]
+    if chapters:
+        meta = path.with_suffix(".ffmeta")
+        lines = [";FFMETADATA1"]
+        for a, b, t in chapters:
+            lines += ["[CHAPTER]", "TIMEBASE=1/1000", f"START={int(a * 1000)}",
+                      f"END={int(b * 1000)}", f"title={t}"]
+        meta.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        cmd += ["-i", str(meta), "-map_chapters", "2"]
+    cmd += ["-map", "0:v", "-map", "1:a",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "ac3", "-b:a", "128k", "-ac", "2",
+            "-metadata:s:a:0", "language=eng", str(path)]
+    subprocess.run(cmd, check=True)
     return path
 
 
@@ -37,10 +47,12 @@ def _probe(path):
 
 
 @pytest.mark.ffmpeg
-def test_render_gap_orig_preenche_e_marca_capitulo(tmp_path):
+def test_render_gap_orig_preenche_e_preserva_capitulos_do_original(tmp_path):
     """Original 60 s; dublado sem [20,30): o buraco é preenchido com o áudio
-    ORIGINAL e vira capítulo auditável no MKV."""
-    orig = _media(tmp_path / "orig.mkv", 60, seed=1)
+    ORIGINAL. Os capítulos do original passam intactos — e NENHUM capítulo
+    de auditoria ("preenchido") é criado (poluía a mídia)."""
+    orig = _media(tmp_path / "orig.mkv", 60, seed=1,
+                  chapters=[(0, 30, "Abertura"), (30, 60, "Ato 1")])
     dub = _media(tmp_path / "dub.mkv", 50, seed=2)
     segs = [
         Segment("match", 0.0, 20.0, 0.0, 20.0, offset=0.0),
@@ -57,9 +69,9 @@ def test_render_gap_orig_preenche_e_marca_capitulo(tmp_path):
     assert len(audios) == 2
     assert audios[1].get("tags", {}).get("language") in ("por", "pt")
     chapters = info.get("chapters", [])
-    assert len(chapters) == 1
-    assert "preenchido" in chapters[0].get("tags", {}).get("title", "")
-    assert abs(float(chapters[0]["start_time"]) - 20.0) < 0.5
+    titles = [c.get("tags", {}).get("title", "") for c in chapters]
+    assert titles == ["Abertura", "Ato 1"], titles
+    assert abs(float(chapters[1]["start_time"]) - 30.0) < 0.05
 
 
 @pytest.mark.ffmpeg
@@ -98,7 +110,7 @@ def test_render_replaced_com_acao(tmp_path):
     render_mod.render(segs, str(dub), str(orig), str(out), "pt", log=lambda m: None)
     info = _probe(out)
     assert abs(float(info["format"]["duration"]) - 40.0) < 1.0
-    assert not info.get("chapters")  # use_dub não é preenchimento
+    assert not info.get("chapters")  # original sem capítulos: saída sem capítulos
 
 
 # -------------------- regras de revisão --------------------
@@ -207,16 +219,24 @@ def test_apply_review_acao_invalida(temp_db):
 def test_render_corta_original_fundido_na_janela(tmp_path):
     """Original de 60 s = dois "episódios" de 30 s; a EDL cobre só o segundo
     (b_window 30–60). A saída tem ~30 s, o áudio dublado entra alinhado ao
-    trecho cortado e os capítulos do original não são copiados."""
-    orig = _media(tmp_path / "orig.mkv", 60, seed=1)
+    trecho cortado e os capítulos do original são deslocados/recortados
+    para a janela (o do 1º episódio some)."""
+    orig = _media(tmp_path / "orig.mkv", 60, seed=1,
+                  chapters=[(0, 30, "Ep1"), (30, 45, "Ep2 A"), (45, 60, "Ep2 B")])
     dub = _media(tmp_path / "dub.mkv", 30, seed=2)
     segs = [Segment("match", 0.0, 30.0, 30.0, 60.0, offset=30.0)]
     out = tmp_path / "out.mkv"
-    render_mod.render(segs, str(dub), str(orig), str(out), "pt",
-                      log=lambda m: None, b_window=(30.0, 60.0))
+    info_r = render_mod.render(segs, str(dub), str(orig), str(out), "pt",
+                               log=lambda m: None, b_window=(30.0, 60.0))
     info = _probe(out)
     dur = float(info["format"]["duration"])
     # keyframe anterior ao início pode adiantar alguns segundos: 30 ≤ dur ≤ 42
     assert 29.0 <= dur <= 42.0, dur
     audios = [s for s in info["streams"] if s["codec_type"] == "audio"]
     assert len(audios) == 2
+    shift = info_r["b_shift"]
+    assert 0.0 < shift <= 30.0
+    titles = [c.get("tags", {}).get("title", "") for c in info["chapters"]]
+    assert "Ep2 A" in titles and "Ep2 B" in titles, titles
+    ch = {c["tags"]["title"]: float(c["start_time"]) for c in info["chapters"]}
+    assert abs(ch["Ep2 B"] - (45.0 - shift)) < 0.05, (ch, shift)

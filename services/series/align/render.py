@@ -13,8 +13,10 @@ a fatia (atrim/asetpts/concat) seguindo a EDL:
 - replaced: a ação vem da revisão (fill_original / use_dub / silence);
 - gap_dub: descartado — o material não existe no vídeo final.
 
-Cada preenchimento vira um CAPÍTULO no MKV ("[preenchido] 12:34-12:52") —
-auditável depois, sem caçar de ouvido.
+Os CAPÍTULOS do original são preservados como estão (é a timeline dele);
+nenhum capítulo de auditoria é criado — os preenchimentos ficam registrados
+na EDL do job, não na mídia. Num original FUNDIDO (b_window) o ffmpeg desloca
+e recorta os capítulos junto com o -ss/-to.
 """
 import subprocess
 import tempfile
@@ -178,7 +180,6 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
     # condição por construção.
     tmp_dir = Path(tempfile.mkdtemp(prefix="edl_render_"))
     dub_mka = tmp_dir / "dub.mka"
-    chapters_file = None
     try:
         # passo 1: só a faixa dublada remontada (áudio, sem vídeo)
         cmd1 = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -193,9 +194,6 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         cmd2 = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                 "-fflags", "+genpts",
                 *in_opts, "-i", orig_path, "-i", str(dub_mka)]
-        if fills:
-            chapters_file = _chapters_metadata(fills)
-            cmd2 += ["-f", "ffmetadata", "-i", chapters_file]
         cmd2 += ["-map", "0:v:0", "-c:v", "copy"]
         # áudios do original (todas as línguas), depois o dublado
         n_orig_a = len(merger.get_streams(probe_orig, "audio"))
@@ -207,10 +205,9 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         # legendas do original intactas
         if merger.get_streams(probe_orig, "subtitle"):
             cmd2 += ["-map", "0:s?", "-c:s", "copy"]
-        # capítulos: com preenchimentos, os capítulos AUDITÁVEIS dos fills
-        # entram no lugar dos originais; num corte de arquivo fundido os do
-        # original não valem (tempos do episódio duplo)
-        cmd2 += ["-map_chapters", "2" if fills else ("-1" if b_window else "0")]
+        # capítulos do original, sempre (com -ss/-to o ffmpeg desloca e
+        # recorta os que caem fora da janela)
+        cmd2 += ["-map_chapters", "0"]
         # -max_interleave_delta 0: intercalação estrita do MKV — sem isso o
         # muxer "força saída" quando há stream esparsa (legenda) e alguns
         # players travam a reprodução (caso real anterior). É seguro aqui
@@ -223,13 +220,14 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
             raise merger.MergeError(
                 f"mux final falhou: {p2.stderr.strip()[-800:]}")
     finally:
-        if chapters_file:
-            Path(chapters_file).unlink(missing_ok=True)
         dub_mka.unlink(missing_ok=True)
         try:
             tmp_dir.rmdir()
         except OSError:
             pass
+    # deslocamento aplicado aos tempos b (0 sem b_window): quem for anexar
+    # legendas externas precisa dele
+    return {"b_shift": float(in_opts[1]) if in_opts else 0.0}
 
 
 def _plan_slices(segs: list[Segment],
@@ -298,18 +296,3 @@ def _plan_slices(segs: list[Segment],
     if cursor < duration_b - _EPS:
         fill(cursor, duration_b, "orig", "final sem correspondência mapeada")
     return slices, fills
-
-
-def _chapters_metadata(fills: list[dict]) -> str:
-    """Arquivo ffmetadata com um capítulo por preenchimento (auditoria)."""
-    lines = [";FFMETADATA1"]
-    for f in fills:
-        lines += ["[CHAPTER]", "TIMEBASE=1/1000",
-                  f"START={int(f['b_start'] * 1000)}",
-                  f"END={int(f['b_end'] * 1000)}",
-                  f"title=[preenchido] {f['why']}"]
-    fd = tempfile.NamedTemporaryFile("w", suffix=".ffmeta", delete=False,
-                                     encoding="utf-8")
-    fd.write("\n".join(lines) + "\n")
-    fd.close()
-    return fd.name

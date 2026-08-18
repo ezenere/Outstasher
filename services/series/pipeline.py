@@ -26,7 +26,7 @@ from pathlib import Path
 import config
 from services import jackett, jobs, store, tmdb, transcode
 from services import selector
-from services.series import parse, selector_tv
+from services.series import parse, selector_tv, subs
 
 ROLES = ("original", "dubbed")
 ROLE_LABEL = {"original": "original", "dubbed": "dublado"}
@@ -1228,8 +1228,12 @@ def _match_pack_files(job: dict, t: dict, files: list[dict]
     keep, drop = [], []
     found: set[str] = set()
     for f in files:
-        name = (f.get("name") or "").rsplit("/", 1)[-1]
-        refs = parse.parse_episode_refs(name)
+        full = f.get("name") or ""
+        name = full.rsplit("/", 1)[-1]
+        # SxxEyy no nome; legendas costumam vir em Subs/S01E01/2_English.srt
+        # (a referência está na PASTA) — vale para arquivos de legenda
+        refs = subs.refs_in_path(full) if Path(name).suffix.lower() in subs.TEXT_EXT \
+            else parse.parse_episode_refs(name)
         hit = [wanted[r] for r in refs if r in wanted]
         if hit and Path(name).suffix.lower() in jobs.VIDEO_EXTENSIONS:
             found.update(hit)
@@ -1423,6 +1427,15 @@ async def _resolve_episode_files(job: dict):
                 f = await asyncio.to_thread(
                     _find_episode_file, root, *_search_ref(job, key))
                 ep["src"][t["role"]] = str(f)
+                # legendas externas do episódio (srt/ass/vtt) — entram no
+                # MKV final, com os tempos tratados no merge
+                ext = await asyncio.to_thread(
+                    subs.find_for_episode, root, *_search_ref(job, key), str(f))
+                ep.setdefault("subs", {})[t["role"]] = [str(x) for x in ext]
+                if ext:
+                    jobs._event(job, "info",
+                                f"{key}: {len(ext)} legenda(s) externa(s) no "
+                                f"torrent {ROLE_LABEL[t['role']]}")
             except Exception as e:  # noqa: BLE001
                 jobs._event(job, "info",
                             f"⚠️ {key}: arquivo ({ROLE_LABEL[t['role']]}) não "

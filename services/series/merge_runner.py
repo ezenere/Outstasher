@@ -20,7 +20,7 @@ from pathlib import Path
 import config
 from services import merger, store, transcode
 from services import jobs
-from services.series import naming
+from services.series import naming, subs
 
 # abaixo desta fração de episódios bem-sucedidos, o job inteiro falha
 MIN_SUCCESS_RATIO = 0.75
@@ -217,7 +217,7 @@ async def _render_from_edl(job: dict, key: str, ep: dict):
     if ep["edl"].get("note"):
         log(ep["edl"]["note"])
     try:
-        await asyncio.to_thread(
+        info = await asyncio.to_thread(
             render_mod.render, segs, ep["src"]["dubbed"],
             ep["src"]["original"], str(output), job["language"],
             log, on_progress, jobs._register_proc(job["id"]),
@@ -225,6 +225,13 @@ async def _render_from_edl(job: dict, key: str, ep: dict):
     finally:
         jobs._ffmpeg_procs.pop(job["id"], None)
     ep["output"] = str(output)
+    # legendas externas: as do original só deslocam pela janela; as do
+    # dublado seguem a EDL (mesmos cortes que o áudio dublado)
+    b_shift = float((info or {}).get("b_shift") or 0.0)
+    await _attach_subs(
+        job, key, ep, str(output),
+        orig_fn=subs.shift_fn(-b_shift),
+        dub_fn=subs.edl_fn(ep["edl"].get("segments") or [], b_shift), log=log)
 
 
 class NeedsContentAlign(Exception):
@@ -285,6 +292,44 @@ async def _merge_episode(job: dict, key: str, ep: dict, convert_opts):
     finally:
         jobs._ffmpeg_procs.pop(job["id"], None)
     ep["output"] = result.output
+    # legendas externas: offset constante do container (por input); se o
+    # merge foi pulado (hardlink), só o lado que virou a saída tem tempo
+    # conhecido
+    if result.linked:
+        ref = result.ref_input if result.ref_input is not None else 0
+        orig_fn = subs.shift_fn(0.0) if ref == 0 else None
+        dub_fn = subs.shift_fn(0.0) if ref == 1 else None
+    else:
+        orig_fn = subs.shift_fn(result.input_shifts[0])
+        dub_fn = subs.shift_fn(result.input_shifts[1])
+    await _attach_subs(job, key, ep, result.output, orig_fn, dub_fn, log=log)
+
+
+async def _attach_subs(job: dict, key: str, ep: dict, output: str,
+                       orig_fn, dub_fn, log=print):
+    """Muxa as legendas externas do episódio no arquivo entregue. Nunca
+    derruba o episódio: legenda é acessório."""
+    ext = ep.get("subs") or {}
+    orig_subs = [p for p in ext.get("original") or [] if Path(p).exists()]
+    dub_subs = [p for p in ext.get("dubbed") or [] if Path(p).exists()]
+    if not orig_subs and not dub_subs:
+        return
+    m = job.get("movie") or {}
+    orig_lang = merger.canonical_lang(merger.LANG_ISO.get(
+        m.get("original_language") or "", m.get("original_language") or "und"))
+    dub_lang = merger.canonical_lang(merger.LANG_ISO.get(
+        job["language"], job["language"]))
+    try:
+        n = await asyncio.to_thread(
+            subs.attach, output, orig_subs, dub_subs, orig_fn, dub_fn,
+            ep["src"].get("original"), ep["src"].get("dubbed"),
+            orig_lang, dub_lang, log)
+        if n:
+            jobs._event(job, "merge", f"{key}: {n} legenda(s) externa(s) anexada(s)")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        jobs._event(job, "merge", f"⚠️ {key}: legendas externas não anexadas ({e})")
 
 
 def _finish(job: dict):
