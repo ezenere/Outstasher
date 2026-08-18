@@ -42,42 +42,108 @@ BISECT_WIN_S = 6.0      # janela nas iterações de bissecção
 SILENCE_SNAP_S = 5.0    # procura silêncio até isto do ponto estimado
 SILENCE_DB = -30.0
 SILENCE_MIN_S = 0.12
-WOBBLE_MAX_S = 8.0      # anomalia do vídeo até este tamanho é candidata a wobble
+WOBBLE_MAX_S = 8.0      # anomalia do vídeo até este tamanho funde SEM consulta
+WOBBLE_AUDIO_MAX_S = 90.0  # até isto funde SE o áudio confirmar continuidade
 WOBBLE_OFF_TOL_S = 0.35  # vizinhos com offset até isto de diferença = contínuo
 WOBBLE_ANCHOR_S = 5.0   # match menor que isto não serve de âncora
+WOBBLE_ANCHOR_RES = 12.0  # ... nem match com resíduo alto (plano preto/parado
+                          # casa qualquer coisa com qualquer coisa)
+WOBBLE_ANCHOR_LONG_S = 30.0  # match longo é estrutural, âncora mesmo ruidoso
+
+
+def _is_anchor(t: Segment) -> bool:
+    if t.kind != "match" or t.offset is None:
+        return False
+    dur = t.a_end - t.a_start
+    return dur >= WOBBLE_ANCHOR_LONG_S or (
+        dur >= WOBBLE_ANCHOR_S and t.residual <= WOBBLE_ANCHOR_RES)
+WOBBLE_AUDIO_TOL_S = 0.10  # áudio no span dentro disto do offset das âncoras
 
 
 # -------------------- 1. wobbles do vídeo --------------------
 
-def collapse_wobbles(segs: list[Segment]) -> list[Segment]:
-    """Funde [match A][gaps/matches curtos até 8 s][match B] quando A e B têm
-    (quase) o mesmo offset: o vídeo escorregou num plano parado; o áudio vai
-    medir o offset real dentro do trecho contínuo."""
+def _audio_continuous(dub_path, dub_a, orig_path, orig_a,
+                      a0: float, a1: float, offset: float, log) -> bool:
+    """O áudio dublado em [a0, a1] correlaciona com o original no `offset`
+    das âncoras? Mede 3 janelas espalhadas pelo span (ou o que couber)."""
+    span = a1 - a0
+    win = min(WIN_S, max(3.0, span / 3))
+    centers = [a0 + span * f for f in (0.2, 0.5, 0.8)] if span > 2 * win else [a0 + span / 2]
+    good = 0
+    for c in centers:
+        st = min(max(a0, c - win / 2), a1 - win)
+        try:
+            tau, q = _measure(dub_path, dub_a, orig_path, orig_a, st, st + offset, win)
+        except merger.MergeError:
+            return False
+        if q < MIN_PEAK_QUALITY or abs(tau) > WOBBLE_AUDIO_TOL_S:
+            log(f"  span {a0:.1f}-{a1:.1f}s: áudio NÃO contínuo em {st:.1f}s "
+                f"(desvio {tau * 1000:+.0f} ms, pico {q:.0f}) — estrutura mantida")
+            return False
+        good += 1
+    return good > 0
+
+
+def collapse_wobbles(segs: list[Segment], dub_path=None, dub_a=None,
+                     orig_path=None, orig_a=None, log=print) -> list[Segment]:
+    """Funde [match A][gaps/matches curtos][match B] quando A e B têm (quase)
+    o mesmo offset: o vídeo escorregou num plano parado/preto; o áudio vai
+    medir o offset real dentro do trecho contínuo.
+
+    Span até WOBBLE_MAX_S (8 s) funde direto. Até WOBBLE_AUDIO_MAX_S (90 s —
+    cena preta longa faz o DP passear por dezenas de segundos) funde SÓ se o
+    áudio confirmar continuidade no offset das âncoras: um wobble de 23 s
+    pode esconder um corte real de 3 s, e só o áudio distingue."""
     out: list[Segment] = []
     i = 0
     n = len(segs)
+    can_audio = dub_path is not None
     while i < n:
         s = segs[i]
-        if s.kind == "match" and s.a_end - s.a_start >= WOBBLE_ANCHOR_S:
-            # procura a próxima âncora dentro de WOBBLE_MAX_S
+        if _is_anchor(s):
+            # procura a próxima âncora dentro do teto
             j = i + 1
             span = 0.0
             ok = False
+            limit = WOBBLE_AUDIO_MAX_S if can_audio else WOBBLE_MAX_S
             while j < n:
                 t = segs[j]
-                if t.kind == "match" and t.a_end - t.a_start >= WOBBLE_ANCHOR_S:
-                    ok = (j > i + 1 and span <= WOBBLE_MAX_S
-                          and s.offset is not None and t.offset is not None
-                          and abs(s.offset - t.offset) <= WOBBLE_OFF_TOL_S)
+                if _is_anchor(t):
+                    same = abs(s.offset - t.offset) <= WOBBLE_OFF_TOL_S
+                    if not same and can_audio and t.a_end - t.a_start < WOBBLE_ANCHOR_LONG_S:
+                        # âncora candidata com OUTRO offset: só vale se o áudio
+                        # confirmar esse offset — numa cena preta o vídeo casa
+                        # qualquer coisa com qualquer coisa (resíduo baixo,
+                        # offset falso) e isso não pode barrar a fusão
+                        if not _audio_continuous(dub_path, dub_a, orig_path, orig_a,
+                                                 t.a_start, t.a_end, t.offset,
+                                                 lambda m: None):
+                            log(f"  match {t.a_start:.1f}-{t.a_end:.1f}s (offset "
+                                f"{t.offset:+.2f}s) sem confirmação de áudio — "
+                                f"não é âncora")
+                            span += t.a_end - t.a_start
+                            if span > limit:
+                                break
+                            j += 1
+                            continue
+                    if j > i + 1 and same and span <= WOBBLE_MAX_S:
+                        ok = True
+                    elif j > i + 1 and same and span <= limit and can_audio:
+                        ok = _audio_continuous(dub_path, dub_a, orig_path, orig_a,
+                                               s.a_end, t.a_start, s.offset, log)
+                        if ok:
+                            log(f"  wobble de {span:.0f}s em {s.a_end:.1f}-"
+                                f"{t.a_start:.1f}s: áudio contínuo — fundido")
                     break
-                if t.kind == "replaced" or (
-                        t.kind in ("gap_dub", "gap_orig")
+                if t.kind == "replaced":
+                    break  # tem checagem própria (_resolve_replaced_by_audio)
+                if (t.kind in ("gap_dub", "gap_orig")
                         and max(t.a_end - t.a_start,
-                                (t.b_end or 0) - (t.b_start or 0)) > WOBBLE_MAX_S):
+                                (t.b_end or 0) - (t.b_start or 0)) > limit):
                     break  # estrutura de verdade: não é wobble
                 span += max(t.a_end - t.a_start,
                             (t.b_end or 0) - (t.b_start or 0))
-                if span > WOBBLE_MAX_S:
+                if span > limit:
                     break
                 j += 1
             if ok:
@@ -361,9 +427,10 @@ def refine_offsets(segs: list[Segment], dub_path: str, dub_a: int,
     áudio é contínuo, mede o perfil de offset em cada match e divide onde há
     edição (corte em silêncio), descarta matches espúrios e funde vizinhos
     iguais. Retorna a lista NOVA de segmentos (a estrutura pode mudar)."""
-    segs = collapse_wobbles(segs)
+    segs = collapse_wobbles(segs, dub_path, dub_a, orig_path, orig_a, log)
     segs = _resolve_replaced_by_audio(segs, dub_path, dub_a, orig_path, orig_a, log)
-    segs = collapse_wobbles(segs)  # substituídas resolvidas podem abrir novos wobbles
+    # substituídas resolvidas podem abrir novos wobbles
+    segs = collapse_wobbles(segs, dub_path, dub_a, orig_path, orig_a, log)
     out: list[Segment] = []
     for seg in segs:
         if seg.kind not in ("match", "drift", "pal") or seg.offset is None:
@@ -383,9 +450,12 @@ def refine_offsets(segs: list[Segment], dub_path: str, dub_a: int,
 
 
 def _inherit_short(segs: list[Segment]):
-    """Match curto (sem refino próprio) herda o AJUSTE (medido - vídeo) do
-    vizinho refinado mais próximo."""
-    refined = [(s, s.offset - s.extra["video_offset"]) for s in segs
+    """Match curto (sem refino próprio) herda do vizinho refinado mais próximo:
+    o offset MEDIDO dele quando o vídeo não indica mudança real entre os dois
+    (|diferença de offsets do vídeo| <= WOBBLE_OFF_TOL_S — 6 s de plano
+    parado com o vídeo escorregando 70 ms), senão só o AJUSTE (medido -
+    vídeo), preservando a mudança que o vídeo viu."""
+    refined = [s for s in segs
                if s.kind in ("match", "drift", "pal")
                and str(s.extra.get("refine", "")).startswith("offset medido")]
     if not refined:
@@ -394,9 +464,12 @@ def _inherit_short(segs: list[Segment]):
         if seg.kind not in ("match", "drift", "pal"):
             continue
         if seg.extra.get("refine") == "curto demais — herda vizinho":
-            nearest = min(refined,
-                          key=lambda rs: abs(rs[0].a_start - seg.a_start))
-            seg.offset = seg.extra["video_offset"] + nearest[1]
+            near = min(refined, key=lambda r: abs(r.a_start - seg.a_start))
+            v_seg, v_near = seg.extra["video_offset"], near.extra["video_offset"]
+            if abs(v_seg - v_near) <= WOBBLE_OFF_TOL_S:
+                seg.offset = near.offset
+            else:
+                seg.offset = v_seg + (near.offset - v_near)
             if seg.b_start is not None:
                 seg.b_start = seg.a_start + seg.offset
                 seg.b_end = seg.a_end + seg.offset
