@@ -1,6 +1,6 @@
 """Orquestrador de jobs de SÉRIE: TMDB TV -> Jackett -> qBittorrent.
 
-Desacoplado do pipeline de filmes (services/jobs.py) — daqui só usamos o
+Desacoplado do pipeline de filmes (services/jobs/) — daqui só usamos o
 REGISTRO compartilhado de jobs (_jobs, _set, _event, _spawn, tags de limpeza)
 e utilitários folha. A regra central, decidida com o usuário: NADA é resolvido
 automaticamente em conflito. Todo ponto suspeito pausa o job num gate

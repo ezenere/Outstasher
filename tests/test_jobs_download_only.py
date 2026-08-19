@@ -31,10 +31,10 @@ def test_run_from_download_finishes_without_conversion(temp_db, monkeypatch):
         def __getattr__(self, name):
             raise AssertionError(f"qBittorrent chamado ({name}) após download-only!")
 
-    monkeypatch.setattr(jobs, "_wait_downloads", fake_wait)
-    monkeypatch.setattr(jobs, "_resolve_video_file", boom_resolve)
-    monkeypatch.setattr(jobs, "_merge", boom_merge)
-    monkeypatch.setattr(jobs, "_qbit", Boom())
+    monkeypatch.setattr(jobs.downloads, "_wait_downloads", fake_wait)
+    monkeypatch.setattr(jobs.downloads, "_resolve_video_file", boom_resolve)
+    monkeypatch.setattr(jobs.delivery, "_merge", boom_merge)
+    monkeypatch.setattr(jobs.runtime, "_qbit", Boom())
 
     job = mkjob()
     jobs._jobs["do1"] = job
@@ -51,7 +51,7 @@ def test_single_kind_output_is_just_the_path(temp_db, monkeypatch):
     async def fake_wait_a(job):
         return {"audio": "/dl/Filme.Dublado/f.mkv"}
 
-    monkeypatch.setattr(jobs, "_wait_downloads", fake_wait_a)
+    monkeypatch.setattr(jobs.downloads, "_wait_downloads", fake_wait_a)
     job = mkjob(id="do2", kind="dubbed", progress={"video": None, "audio": {"pct": 100.0}})
     jobs._jobs["do2"] = job
     asyncio.run(jobs._run_from_download(job))
@@ -66,7 +66,7 @@ def test_create_download_only_without_destination(temp_db, monkeypatch):
 
     async def fake_run(job):
         pass
-    monkeypatch.setattr(jobs, "_run", fake_run)
+    monkeypatch.setattr(jobs.movies, "_run", fake_run)
 
     async def go():
         out = await jobs.create(2, "pt", "auto", None, None, "both", download_only=True)
@@ -93,7 +93,7 @@ def test_retry_preserves_download_only(temp_db, monkeypatch):
                           convert=None):
         captured.update(kind=kind, download_only=download_only)
         return {"id": "novo"}
-    monkeypatch.setattr(jobs, "create", fake_create)
+    monkeypatch.setattr(jobs.movies, "create", fake_create)
 
     async def go():
         out = await jobs.retry("do3")

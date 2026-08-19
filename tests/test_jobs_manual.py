@@ -8,6 +8,7 @@ import asyncio
 import pytest
 
 from services import jobs, merger
+from services import tmdb
 
 
 @pytest.fixture
@@ -27,18 +28,18 @@ def manual_env(temp_db, monkeypatch, files):
 
     def fake_probe(path, role):
         state["probed"].append((path.name, role))
-    monkeypatch.setattr(jobs, "_probe_manual_file", fake_probe)
+    monkeypatch.setattr(jobs.movies, "_probe_manual_file", fake_probe)
 
     async def fake_details(tmdb_id, lang):
         return {"original_title": "Filme Exemplo", "localized_title": "Filme Exemplo",
                 "year": "2014", "poster": None}
-    monkeypatch.setattr(jobs.tmdb, "details", fake_details)
+    monkeypatch.setattr(tmdb, "details", fake_details)
 
     async def fake_merge(job, video_file, audio_file, allow_drift=False):
         state["merged"].append((str(video_file), str(audio_file), allow_drift))
         job["output"] = "/out/x.mkv"
         jobs._set(job, "done", "ok")
-    monkeypatch.setattr(jobs, "_merge", fake_merge)
+    monkeypatch.setattr(jobs.delivery, "_merge", fake_merge)
 
     return files[0], files[1], state
 
@@ -117,7 +118,7 @@ def test_drift_pauses_and_proceed_resumes(manual_env, monkeypatch):
             raise merger.VersionMismatch(-100.0, 700.0)
         state["merged"].append(("retomado", allow_drift))
         jobs._set(job, "done", "ok")
-    monkeypatch.setattr(jobs, "_merge", fake_merge_drift)
+    monkeypatch.setattr(jobs.delivery, "_merge", fake_merge_drift)
 
     async def go():
         out = await jobs.create_manual(3, "pt", str(vf), str(af))
@@ -138,7 +139,7 @@ def test_retry_recreates_manual(manual_env, monkeypatch):
 
     async def fail(job, video_file, audio_file, allow_drift=False):
         raise RuntimeError("boom")
-    monkeypatch.setattr(jobs, "_merge", fail)
+    monkeypatch.setattr(jobs.delivery, "_merge", fail)
 
     async def ok(job, video_file, audio_file, allow_drift=False):
         job["output"] = "/out/x.mkv"
@@ -150,7 +151,7 @@ def test_retry_recreates_manual(manual_env, monkeypatch):
         jid = out["id"]
         await jobs._tasks[jid]
         assert store.get_job(jid)["status"] == "error"
-        monkeypatch.setattr(jobs, "_merge", ok)  # volta a funcionar
+        monkeypatch.setattr(jobs.delivery, "_merge", ok)  # volta a funcionar
         new = await jobs.retry(jid)
         assert new is not None and new["manual_files"]["video"] == str(vf)
         assert new["mode"] == "files"
@@ -166,7 +167,7 @@ def test_resume_pending(manual_env, monkeypatch):
 
     async def fake_run_manual(job, v, a):
         spawned.append((job["id"], str(v), str(a)))
-    monkeypatch.setattr(jobs, "_run_manual", fake_run_manual)
+    monkeypatch.setattr(jobs.movies, "_run_manual", fake_run_manual)
 
     base = {"tmdb_id": 5, "language": "pt", "mode": "files", "kind": "both",
             "status": "merging", "detail": "", "movie": None,
@@ -201,7 +202,7 @@ def test_cancel_manual_job_ignores_qbittorrent(manual_env, monkeypatch):
     class Boom:
         def __getattr__(self, name):
             raise AssertionError(f"qBittorrent chamado ({name}) num job manual!")
-    monkeypatch.setattr(jobs, "_qbit", Boom())
+    monkeypatch.setattr(jobs.runtime, "_qbit", Boom())
 
     job = {"id": "mm9", "tmdb_id": 5, "language": "pt", "mode": "files", "kind": "both",
            "status": "awaiting", "detail": "", "movie": None,

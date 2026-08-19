@@ -100,7 +100,7 @@ transforma "corrompeu em silêncio" em "o job falhou e eu sei por quê".
 ### O que fazer
 
 Depois do ffmpeg terminar e **antes** de substituir o arquivo original
-(`services/jobs.py::_recompress`) ou de dar o merge por concluído, comparar a
+(`services/jobs/recompress.py`) ou de dar o merge por concluído, comparar a
 contagem de frames da saída com a da fonte e **falhar o job** se divergir.
 
 Duas formas de obter os números, em ordem de preferência:

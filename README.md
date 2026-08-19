@@ -181,7 +181,7 @@ segmentos com cortes de preto/silêncio), `--align-report` (triagem de séries).
 | `main.py` | API FastAPI + frontend |
 | `services/tmdb.py`, `jackett.py`, `qbittorrent.py` | clientes externos |
 | `services/selector.py` | escolha do melhor torrent (filmes) |
-| `services/jobs.py` | orquestração de filmes: busca → download → merge |
+| `services/jobs/` | jobs de filme em camadas: estado (`runtime.py`), leituras (`views.py`), busca (`search.py`), qBittorrent (`downloads.py`), entrega (`delivery.py`), alinhamento avançado (`advanced.py`), recompressão (`recompress.py`), pipeline (`movies.py`) e ações da UI (`actions.py`) |
 | `services/merger.py`, `transcode.py` | merge, GCC-PHAT, opções de conversão |
 | `services/store.py`, `catalog.py` | SQLite, catálogo |
 | `services/series/` | séries: `pipeline.py` (gates), `selector_tv.py`, `parse.py`, `merge_runner.py`, `subs.py` (legendas externas), `recompress.py`, `naming.py` |

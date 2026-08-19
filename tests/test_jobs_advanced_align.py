@@ -6,6 +6,7 @@ import asyncio
 import pytest
 
 from services import jobs, merger, store
+from services import tmdb
 
 
 @pytest.mark.parametrize("offs,expected", [
@@ -25,18 +26,18 @@ def drift_env(temp_db, monkeypatch, tmp_path):
     vf.write_bytes(b"x")
     af.write_bytes(b"x")
     temp_db.add_destination("Filmes", str(tmp_path / "out"), True)
-    monkeypatch.setattr(jobs, "_probe_manual_file", lambda p, r: None)
+    monkeypatch.setattr(jobs.movies, "_probe_manual_file", lambda p, r: None)
 
     async def fake_details(tmdb_id, lang):
         return {"original_title": "Filme Exemplo", "localized_title": "Filme Exemplo",
                 "year": "2014", "poster": None}
-    monkeypatch.setattr(jobs.tmdb, "details", fake_details)
+    monkeypatch.setattr(tmdb, "details", fake_details)
 
     async def merge_drift(job, video_file, audio_file, allow_drift=False):
         raise merger.VersionMismatch(-100.0, 700.0)
-    monkeypatch.setattr(jobs, "_merge", merge_drift)
+    monkeypatch.setattr(jobs.delivery, "_merge", merge_drift)
     # perfil: 5 janelas com salto no meio (corte)
-    monkeypatch.setattr(jobs, "_offset_profile", lambda v, a: (
+    monkeypatch.setattr(jobs.advanced, "_offset_profile", lambda v, a: (
         [{"t": 30 + 300 * i, "offset_ms": o, "quality": 50.0}
          for i, o in enumerate([-100, -100, -98, 700, 702])], "cut"))
     return vf, af
@@ -50,7 +51,7 @@ def test_drift_mede_perfil_e_oferece_avancado(drift_env, monkeypatch):
         ran["files"] = (str(video_file), str(audio_file))
         job["output"] = "/out/x.mkv"
         jobs._set(job, "done", "ok")
-    monkeypatch.setattr(jobs, "_run_advanced", fake_advanced)
+    monkeypatch.setattr(jobs.advanced, "_run_advanced", fake_advanced)
 
     async def go():
         out = await jobs.create_manual(3, "pt", str(vf), str(af))
@@ -109,7 +110,7 @@ def test_resolve_review_filme_renderiza(drift_env, monkeypatch):
     async def fake_render(j):
         rendered["edl"] = j["advanced"]["edl"]
         jobs._set(j, "done", "ok")
-    monkeypatch.setattr(jobs, "_render_advanced", fake_render)
+    monkeypatch.setattr(jobs.advanced, "_render_advanced", fake_render)
 
     async def go():
         # ação inválida é recusada

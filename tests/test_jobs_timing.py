@@ -13,7 +13,7 @@ def test_deliver_single_records_merge_started_at(temp_db, tmp_path, monkeypatch)
 
     async def no_cleanup(job):
         pass
-    monkeypatch.setattr(jobs, "_cleanup_torrents", no_cleanup)
+    monkeypatch.setattr(jobs.delivery, "_cleanup_torrents", no_cleanup)
 
     job = {
         "id": "t1", "tmdb_id": 1, "language": "pt", "mode": "auto", "kind": "original",

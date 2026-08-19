@@ -19,7 +19,7 @@ def no_pipeline(temp_db, monkeypatch):
     exercitam a criação/normalização/persistência do job."""
     async def _noop(job):
         return None
-    monkeypatch.setattr(jobs, "_run", _noop)
+    monkeypatch.setattr(jobs.movies, "_run", _noop)
     return temp_db
 
 
@@ -78,7 +78,7 @@ def test_retry_preserves_convert(no_pipeline, monkeypatch):
             captured["args"] = args
             return {"id": "fake"}
 
-        monkeypatch.setattr(jobs, "create", spy_create)
+        monkeypatch.setattr(jobs.movies, "create", spy_create)
         await jobs.retry(old["id"])
         # o convert (último posicional) é repassado ao create
         assert captured["args"][-1]["video_codec"] == "hevc", captured

@@ -32,7 +32,7 @@ class CatalogError(Exception):
 # -------------------- helpers de formatacao --------------------
 
 def human_size(n: int) -> str:
-    """Tamanho legível (B/KB/MB/GB/TB). Público: jobs.py também usa."""
+    """Tamanho legível (B/KB/MB/GB/TB). Público: os jobs também usam."""
     x = float(n)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if x < 1024 or unit == "TB":

@@ -13,6 +13,8 @@ import asyncio
 import pytest
 
 from services import catalog, jobs
+from services import store
+from services import transcode
 
 # h264 640x272 a 500k (o make_media) -> pedir 200k em HEVC é uma redução real
 CONV = {"video_codec": "hevc", "video_bitrate": 200}
@@ -59,7 +61,7 @@ def test_job_shape(library, monkeypatch):
     did, folder, src = library
     async def _noop(job, src, opts=None):
         return None
-    monkeypatch.setattr(jobs, "_run_recompress", _noop)
+    monkeypatch.setattr(jobs.recompress, "_run_recompress", _noop)
 
     async def go():
         job = await jobs.create_recompress(did, folder, "filme.mkv", CONV, replace=False)
@@ -82,7 +84,7 @@ def test_tmdb_id_from_folder(library, monkeypatch):
     src.parent.rename(tagged)
     async def _noop(job, src, opts=None):
         return None
-    monkeypatch.setattr(jobs, "_run_recompress", _noop)
+    monkeypatch.setattr(jobs.recompress, "_run_recompress", _noop)
 
     async def go():
         job = await jobs.create_recompress(did, tagged.name, "filme.mkv", CONV)
@@ -134,7 +136,7 @@ def test_failure_keeps_original(library, monkeypatch):
 
     def boom(*a, **k):
         raise RuntimeError("ffmpeg explodiu")
-    monkeypatch.setattr(jobs.transcode, "convert_single", boom)
+    monkeypatch.setattr(transcode, "convert_single", boom)
 
     async def go():
         job = await jobs.create_recompress(did, folder, "filme.mkv", CONV)
@@ -176,7 +178,7 @@ def test_discards_when_result_is_bigger(library, monkeypatch):
     original (recomprimir para inflar é o oposto do objetivo)."""
     did, folder, src = library
     before = src.read_bytes()
-    real = jobs.transcode.convert_single
+    real = transcode.convert_single
 
     def fake(src_p, out_p, opts, *a, **k):
         r = real(src_p, out_p, opts, *a, **k)
@@ -184,7 +186,7 @@ def test_discards_when_result_is_bigger(library, monkeypatch):
         from pathlib import Path as _P
         _P(r.output).write_bytes(b"x" * (len(before) + 1024))
         return r
-    monkeypatch.setattr(jobs.transcode, "convert_single", fake)
+    monkeypatch.setattr(transcode, "convert_single", fake)
 
     async def go():
         job = await jobs.create_recompress(did, folder, "filme.mkv", CONV)
@@ -204,13 +206,13 @@ def test_retry_recreates_recompress(library, monkeypatch):
     did, folder, _src = library
     async def _noop(job, src, opts=None):
         return None
-    monkeypatch.setattr(jobs, "_run_recompress", _noop)
+    monkeypatch.setattr(jobs.recompress, "_run_recompress", _noop)
 
     async def go():
         job = await jobs.create_recompress(did, folder, "filme.mkv", CONV, replace=False)
         old = dict(jobs._jobs[job["id"]])
         old["status"] = "error"
-        jobs.store.upsert_job(old)
+        store.upsert_job(old)
         jobs._jobs.pop(old["id"], None)
 
         novo = await jobs.retry(old["id"])
@@ -234,8 +236,8 @@ def test_resume_after_restart_uses_recompress_pipeline(library, monkeypatch):
     async def fake_download(job):
         routed["download"] = job["id"]  # nunca deve ser chamado
 
-    monkeypatch.setattr(jobs, "_run_recompress", fake_recompress)
-    monkeypatch.setattr(jobs, "_run_from_download", fake_download)
+    monkeypatch.setattr(jobs.recompress, "_run_recompress", fake_recompress)
+    monkeypatch.setattr(jobs.movies, "_run_from_download", fake_download)
 
     async def go():
         # job de recompressão como fica no banco após restart (status ativo,
@@ -260,7 +262,7 @@ def test_resume_missing_source_errors(library, monkeypatch):
     """Se o filme sumiu do disco entre o restart e o resume, o job vai a erro
     em vez de tentar rodar sobre um arquivo inexistente."""
     did, folder, _src = library
-    monkeypatch.setattr(jobs, "_run_recompress",
+    monkeypatch.setattr(jobs.recompress, "_run_recompress",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("não deveria rodar")))
 
     async def go():

@@ -10,7 +10,7 @@ from services import jobs
 
 
 def _reset():
-    jobs._last_progress_demand = None  # None = ninguém pediu ainda
+    jobs.runtime._last_progress_demand = None  # None = ninguém pediu ainda
 
 
 def test_ocioso_por_padrao():
@@ -34,7 +34,7 @@ def test_janela_expira(monkeypatch):
 
     # avança o relógio para além da janela (sem sleep de verdade)
     real = time.monotonic()
-    monkeypatch.setattr(jobs.time, "monotonic",
+    monkeypatch.setattr(time, "monotonic",
                         lambda: real + config.POLL_ACTIVE_WINDOW_SECONDS + 1)
     assert jobs.progress_demanded() is False
     assert jobs.poll_interval() == config.POLL_IDLE_INTERVAL_SECONDS
@@ -48,12 +48,12 @@ def test_janela_renova(monkeypatch):
 
     # quase no fim da janela, a UI pede de novo
     t = real + config.POLL_ACTIVE_WINDOW_SECONDS - 1
-    monkeypatch.setattr(jobs.time, "monotonic", lambda: t)
+    monkeypatch.setattr(time, "monotonic", lambda: t)
     jobs.touch_progress_demand()
 
     # o que seria o fim da janela original já passou, mas o touch a renovou
     t2 = real + config.POLL_ACTIVE_WINDOW_SECONDS + 1
-    monkeypatch.setattr(jobs.time, "monotonic", lambda: t2)
+    monkeypatch.setattr(time, "monotonic", lambda: t2)
     assert jobs.progress_demanded() is True
     assert jobs.poll_interval() == config.POLL_INTERVAL_SECONDS
 

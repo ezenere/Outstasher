@@ -25,11 +25,11 @@ def _run(temp_db, monkeypatch, result):
     async def fake_to_thread(fn, *a, **k):
         return result
 
-    monkeypatch.setattr(jobs.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
 
     async def noop(_job):
         return None
-    monkeypatch.setattr(jobs, "_cleanup_torrents", noop)
+    monkeypatch.setattr(jobs.delivery, "_cleanup_torrents", noop)
 
     asyncio.run(jobs._merge(job, Path("v.mkv"), Path("a.mkv")))
     return job
