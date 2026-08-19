@@ -209,9 +209,18 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         cmd2 += ["-map", "1:a:0", "-c:a", "copy",
                  f"-metadata:s:a:{n_orig_a}", f"language={iso}",
                  f"-disposition:a:{n_orig_a}", "default"]
-        # legendas do original intactas
-        if merger.get_streams(probe_orig, "subtitle"):
-            cmd2 += ["-map", "0:s?", "-c:s", "copy"]
+        # legendas SÓ das línguas que ficam na saída (o mesmo critério do
+        # merge de filmes). Levar todas era um problema de memória, não de
+        # espaço: um REMUX 4K traz 25+ faixas PGS, e cada faixa esparsa
+        # segura o muxer estrito (ver o comentário do -max_interleave_delta)
+        subs = _pick_subs(probe_orig, iso, orig_best)
+        for out_s, st in enumerate(subs):
+            cmd2 += ["-map", f"0:s:{int(st['_type_index'])}",
+                     f"-c:s:{out_s}", "copy"]
+        dropped = len(merger.get_streams(probe_orig, "subtitle")) - len(subs)
+        if dropped > 0:
+            log(f"Legendas: {len(subs)} mantida(s), {dropped} descartada(s) "
+                f"(línguas sem áudio na saída)")
         # capítulos do original, sempre (com -ss/-to o ffmpeg desloca e
         # recorta os que caem fora da janela)
         cmd2 += ["-map_chapters", "0"]
@@ -221,11 +230,22 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         # porque este passo é SÓ cópia (nenhum filtergraph disputando fila).
         cmd2 += ["-avoid_negative_ts", "make_zero", "-max_interleave_delta", "0",
                  *out_opts, output]
-        p2 = subprocess.run(cmd2, capture_output=True, text=True,
-                            encoding="utf-8", errors="replace")
+        p2 = _run_mux(cmd2)
+        if p2.returncode != 0 and _out_of_memory(p2):
+            # interleave estrito + faixa esparsa num arquivo de bitrate alto
+            # faz o muxer segurar TODO o A/V até a faixa andar (num REMUX 4K
+            # deu 31 GB e derrubou a máquina). Refaz com o interleave padrão:
+            # o arquivo sai válido, no pior caso com a intercalação frouxa que
+            # alguns players engasgam — e o log diz que foi isso.
+            log("⚠️ mux estrito estourou o teto de memória (faixa de legenda "
+                "esparsa num arquivo de bitrate alto) — refazendo com o "
+                "interleave padrão; se algum player engasgar, foi por isto")
+            relaxed = [c for c in cmd2 if c != "-max_interleave_delta"]
+            relaxed.remove("0")
+            p2 = _run_mux(relaxed, limit=False)
         if p2.returncode != 0:
             raise merger.MergeError(
-                f"mux final falhou: {p2.stderr.strip()[-800:]}")
+                f"mux final falhou: {_mux_error(p2)}")
     finally:
         dub_mka.unlink(missing_ok=True)
         try:
@@ -235,6 +255,64 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
     # deslocamento aplicado aos tempos b (0 sem b_window): quem for anexar
     # legendas externas precisa dele
     return {"b_shift": float(in_opts[1]) if in_opts else 0.0}
+
+
+# teto de memória do mux: cópia pura precisa de MBs — GBs só acontecem
+# quando o muxer estrito está segurando A/V por causa de uma faixa esparsa.
+# Com o teto, o ffmpeg falha reclamando de memória em vez de levar a máquina
+# junto (o container não tem limite de memória próprio).
+MUX_MEM_LIMIT_GB = 8
+
+
+def _mem_limiter():
+    """preexec_fn que limita o espaço de endereçamento do filho."""
+    import resource
+
+    def _apply():
+        lim = MUX_MEM_LIMIT_GB * 1024 ** 3
+        resource.setrlimit(resource.RLIMIT_AS, (lim, lim))
+    return _apply
+
+
+def _run_mux(cmd: list[str], limit: bool = True):
+    return subprocess.run(cmd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace",
+                          preexec_fn=_mem_limiter() if limit else None)
+
+
+def _out_of_memory(p) -> bool:
+    err = (p.stderr or "").lower()
+    return ("cannot allocate memory" in err or "out of memory" in err
+            or "memory allocation" in err or p.returncode == -9)
+
+
+def _mux_error(p) -> str:
+    err = (p.stderr or "").strip()
+    if err:
+        return err[-800:]
+    # morto por sinal (OOM killer, por exemplo): sem stderr nenhum
+    return (f"processo terminou com código {p.returncode} sem mensagem "
+            f"(morto de fora — sinal {-p.returncode} — provavelmente falta "
+            f"de memória)" if p.returncode < 0 else
+            f"código {p.returncode}, sem mensagem")
+
+
+def _pick_subs(probe_orig: dict, target_iso: str,
+               orig_best: dict) -> list[dict]:
+    """Legendas do original que entram: as das línguas com áudio na saída
+    (áudios do original + o idioma dublado), forçada e completa de cada uma —
+    igual ao merge de filmes. Sem nenhuma da língua, cai para as do idioma
+    alvo; nenhuma delas, nenhuma legenda."""
+    langs = {target_iso} | set(orig_best)
+    picked: list[dict] = []
+    seen: set[int] = set()
+    for lang in langs:
+        for _src, st in merger.pick_subs_for_lang([probe_orig], lang, 0):
+            idx = int(st["_type_index"])
+            if idx not in seen:
+                seen.add(idx)
+                picked.append(st)
+    return sorted(picked, key=lambda st: int(st["_type_index"]))
 
 
 def _plan_slices(segs: list[Segment],

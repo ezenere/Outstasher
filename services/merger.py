@@ -372,7 +372,9 @@ def pick_subs_for_lang(probes: list[dict], lang: str, video_src: int) -> list[tu
         return [s for s in get_streams(probes[i], "subtitle")
                 if canonical_lang(raw_lang_of(s)) == lang]
 
-    pref, other = collect(video_src), collect(1 - video_src)
+    # o render por EDL passa UM probe só (as legendas saem todas do original)
+    pref = collect(video_src)
+    other = collect(1 - video_src) if len(probes) > 1 else []
 
     def pick(cands: list[dict], forced: bool) -> dict | None:
         pool = [s for s in cands if is_forced(s) == forced]

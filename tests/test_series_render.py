@@ -265,3 +265,75 @@ def test_render_janela_no_comeco_corta_o_fim(tmp_path):
         if c["tags"]["title"] == "Ep2":
             assert float(c["start_time"]) >= 29.5, c
     assert info["chapters"][0]["tags"]["title"] == "Ep1"
+
+
+def _srt(path, cues):
+    path.write_text("\n".join(
+        f"{i}\n{a}\n{t}\n" for i, (a, t) in enumerate(cues, 1)), encoding="utf-8")
+    return path
+
+
+@pytest.mark.ffmpeg
+def test_render_leva_so_as_legendas_das_linguas_da_saida(tmp_path):
+    """Caso real: REMUX com 26 faixas de legenda. Levar TODAS fazia o muxer
+    estrito segurar todo o A/V por causa de uma faixa esparsa (31 GB de pico,
+    OOM). A saída leva só as línguas que têm áudio nela."""
+    orig = _media(tmp_path / "orig.mkv", 20, seed=1)
+    dub = _media(tmp_path / "dub.mkv", 20, seed=2)
+    subs = {
+        "eng": _srt(tmp_path / "eng.srt", [("00:00:01,000 --> 00:00:02,000", "hi")]),
+        "por": _srt(tmp_path / "por.srt", [("00:00:01,000 --> 00:00:02,000", "oi")]),
+        # esparsa e de língua sem áudio na saída: é o que tem que sair
+        "kor": _srt(tmp_path / "kor.srt", [("00:00:19,000 --> 00:00:19,500", "x")]),
+        "tha": _srt(tmp_path / "tha.srt", [("00:00:19,000 --> 00:00:19,500", "y")]),
+    }
+    with_subs = tmp_path / "orig_subs.mkv"
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(orig)]
+    for p in subs.values():
+        cmd += ["-i", str(p)]
+    cmd += ["-map", "0"]
+    for k in range(len(subs)):
+        cmd += ["-map", f"{k + 1}:0"]
+    cmd += ["-c", "copy"]
+    for k, lang in enumerate(subs):
+        cmd += [f"-metadata:s:s:{k}", f"language={lang}"]
+    cmd += [str(with_subs)]
+    subprocess.run(cmd, check=True)
+
+    out = tmp_path / "out.mkv"
+    segs = [Segment("match", 0.0, 20.0, 0.0, 20.0, offset=0.0)]
+    render_mod.render(segs, str(dub), str(with_subs), str(out), "pt",
+                      log=lambda m: None)
+    info = _probe(out)
+    langs = [s.get("tags", {}).get("language")
+             for s in info["streams"] if s["codec_type"] == "subtitle"]
+    # eng (áudio do original) e por (a dublagem) ficam; kor/tha saem
+    assert sorted(langs) == ["eng", "por"], langs
+
+
+def test_erro_de_mux_sem_stderr_diz_que_foi_sinal():
+    """Morto de fora (OOM killer) não deixa stderr: a mensagem tem que dizer
+    isso, em vez do 'mux final falhou:' vazio que apareceu em produção."""
+    class P:
+        returncode, stderr = -9, ""
+    msg = render_mod._mux_error(P())
+    assert "sinal 9" in msg and "memória" in msg
+    assert render_mod._out_of_memory(P())
+
+    class Q:
+        returncode, stderr = 1, "av_interleaved_write_frame: Cannot allocate memory"
+    assert render_mod._out_of_memory(Q())
+
+    class R:
+        returncode, stderr = 1, "Invalid data found"
+    assert not render_mod._out_of_memory(R())
+    assert "Invalid data" in render_mod._mux_error(R())
+
+
+def test_mux_aplica_o_teto_de_memoria_no_filho():
+    """O teto tem que chegar ao PROCESSO do ffmpeg (é ele que estoura, não o
+    servidor): o filho enxerga o limite; sem limite, fica ilimitado."""
+    p = render_mod._run_mux(["sh", "-c", "ulimit -v"])
+    assert p.stdout.strip() == str(int(render_mod.MUX_MEM_LIMIT_GB * 1024 ** 2))
+    livre = render_mod._run_mux(["sh", "-c", "ulimit -v"], limit=False)
+    assert livre.stdout.strip() == "unlimited"
