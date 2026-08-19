@@ -6,7 +6,7 @@ import {
 } from 'iconoir-react'
 import { convertSummary, post, prog, type Job, type JobEvent, type JobProgress } from '../api'
 import { api } from '../api'
-import { Badge, CandidatesTable, ClampText, Collapsible, Elapsed, Empty, KindTags, MergeBar, ProgressBar } from '../components/ui'
+import { Badge, CandidatesTable, ClampText, Collapsible, Elapsed, Empty, KindTags, MergeBar, ProgressBar, alignRole } from '../components/ui'
 import { useDialog } from '../components/Dialog'
 import { SeriesEpisodes, SeriesGate, SeriesReport, SeriesTorrents } from '../components/SeriesJobSections'
 import AlignmentReview from '../components/AlignmentReview'
@@ -379,7 +379,13 @@ export default function JobDetail() {
       {(job.merge_started_at || (job.status === 'merging' && job.progress?.merge)) && (
         <section className="mt-6">
           <div className="mb-2 flex items-center gap-2">
-            <h2 className="text-sm font-semibold text-zinc-400">Conversão</h2>
+            {/* enquanto o fingerprint roda não é conversão: é a leitura dos
+                dois arquivos para achar o alinhamento */}
+            <h2 className={`text-sm font-semibold ${alignRole(job.progress?.merge) ? 'text-amber-300' : 'text-zinc-400'}`}>
+              {alignRole(job.progress?.merge)
+                ? `Buscando alinhamento (${alignRole(job.progress?.merge)})`
+                : 'Conversão'}
+            </h2>
             {job.merge_started_at && (
               <Elapsed
                 since={job.merge_started_at}

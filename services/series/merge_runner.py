@@ -125,8 +125,10 @@ async def _align_episode(job: dict, key: str, ep: dict):
                     f"{key}: outro alinhamento em andamento — na fila")
 
     def on_fp(info):
-        job["detail"] = (f"{key}: fingerprint {info['step']}/2 "
-                         f"({info['label']}) — {info['pct']:.0f}%")
+        # o dublado traz o ÁUDIO, o original traz o VÍDEO que fica na saída
+        papel = "Áudio" if info["label"] == "dublado" else "Vídeo"
+        job["detail"] = (f"{key}: buscando alinhamento ({papel}) — "
+                         f"{info['pct']:.0f}%")
         on_progress(info)
 
     try:

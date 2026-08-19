@@ -115,7 +115,7 @@ async def _run_advanced(job: dict, video_file: Path, audio_file: Path):
     from services.series.align import edl as edl_mod, engine, refine, rules
     from services.series.merge_runner import _alignment_pair
     try:
-        _set(job, "merging", "Alinhamento avançado: fingerprint dos dois arquivos...")
+        _set(job, "merging", "Buscando alinhamento: lendo os dois arquivos...")
         job["merge_started_at"] = datetime.now().isoformat(timespec="seconds")
         dub, orig = str(audio_file), str(video_file)
 
@@ -126,8 +126,9 @@ async def _run_advanced(job: dict, video_file: Path, audio_file: Path):
             _event(job, "merge", "Outro alinhamento em andamento — na fila")
 
         def on_fp(info):
-            job["detail"] = (f"Alinhamento avançado: fingerprint "
-                             f"{info['step']}/2 ({info['label']}) — "
+            # o dublado traz o ÁUDIO, o original traz o VÍDEO da saída
+            papel = "Áudio" if info["label"] == "dublado" else "Vídeo"
+            job["detail"] = (f"Buscando alinhamento ({papel}) — "
                              f"{info['pct']:.0f}%")
             on_progress(info)
 

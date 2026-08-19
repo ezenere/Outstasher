@@ -116,12 +116,22 @@ export function ProgressBar({ label, p }: { label: string; p: Progress | null })
 }
 
 /** Barra de progresso da conversão (ffmpeg): tempo do filme, velocidade, tamanho... */
+/** Papel do arquivo lido no fingerprint: o dublado traz o ÁUDIO, o original
+ *  traz o VÍDEO que fica na saída. */
+export function alignRole(p?: MergeProgress | null): string | null {
+  if (!p || p.step == null) return null
+  return p.label === 'dublado' ? 'Áudio' : 'Vídeo'
+}
+
 export function MergeBar({ p }: { p?: MergeProgress | null }) {
   if (!p) return null
+  // fingerprint do alinhamento: é LEITURA dos dois arquivos, não conversão —
+  // sai em âmbar (a cor de "precisa de atenção/etapa extra" do resto da UI)
+  const align = p.step != null
   const write = p.pct || 0                      // barra da frente: já codificado (escrito)
   const read = Math.max(write, p.read_pct ?? write)  // barra de trás: já lido pelo encoder
   // gap visível = frames no buffer do encoder (grande em AV1, ~0 em H264/HEVC)
-  const buffering = read - write > 1
+  const buffering = !align && read - write > 1
   const extra = [
     p.duration_s ? `${fmtTime(p.out_s, true)} / ${fmtTime(p.duration_s, true)}` : fmtTime(p.out_s, true),
     p.speed ? `${p.speed.toFixed(2)}x` : null,
@@ -137,11 +147,13 @@ export function MergeBar({ p }: { p?: MergeProgress | null }) {
       {/* duas barras sobrepostas: lidos (claro, atrás) e escritos (forte, frente) */}
       <div className="relative h-2 overflow-hidden rounded bg-zinc-800">
         <div
-          className="absolute inset-y-0 left-0 bg-purple-500/30 transition-all duration-500"
+          className={`absolute inset-y-0 left-0 transition-all duration-500 ${
+            align ? 'bg-amber-500/30' : 'bg-purple-500/30'}`}
           style={{ width: `${read}%` }}
         />
         <div
-          className="absolute inset-y-0 left-0 bg-purple-500 transition-all duration-500"
+          className={`absolute inset-y-0 left-0 transition-all duration-500 ${
+            align ? 'bg-amber-500' : 'bg-purple-500'}`}
           style={{ width: `${write}%` }}
         />
       </div>

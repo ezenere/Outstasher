@@ -387,6 +387,10 @@ export interface MergeProgress {
   speed: number       // multiplicador (1.35 = 1.35x tempo real)
   fps: number
   eta: number | null  // segundos restantes
+  // presentes SÓ no fingerprint do alinhamento (não é conversão): qual dos
+  // dois arquivos está sendo lido
+  step?: number       // 1 = primeiro arquivo, 2 = segundo
+  label?: string      // 'dublado' (fonte do áudio) | 'original' (fonte do vídeo)
 }
 
 export interface TorrentInfo {
