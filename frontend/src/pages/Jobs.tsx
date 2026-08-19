@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { MediaVideo, Movie, Refresh, Search, SoundHigh, Trash, Xmark } from 'iconoir-react'
 import {
-  api, fmtSize, post,
+  api, fmtSize, mergePhase, post,
   type JobCounts, type JobListItem, type JobListPage, type SlimProgress,
 } from '../api'
 import { Badge, ClampText, Empty, KindTags, Tag, torrentComplete, torrentSize } from '../components/ui'
@@ -230,7 +230,7 @@ export default function Jobs() {
             <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <span className="flex-1 font-semibold">{jobTitle(j)}</span>
-              <Badge status={j.status} />
+              <Badge status={j.status} phase={j.progress.merge_phase} />
               {j.status === 'awaiting' && (
                 <button
                   onClick={() => navigate(`/jobs/${j.id}`)}
@@ -271,18 +271,12 @@ export default function Jobs() {
             {(j.video_torrent || j.audio_torrent) && (
               <div className="mt-2 space-y-0.5 text-xs text-zinc-500">
                 {j.video_torrent && (
-                  <div className="flex items-center gap-1 truncate">
-                    <MediaVideo width={12} height={12} className="shrink-0" />
-                    <span className="truncate">{j.video_torrent.title}</span>
-                    <span className="shrink-0">({j.video_torrent.seeders} seeds, {fmtSize(j.video_torrent.size)})</span>
-                  </div>
+                  <TorrentLine icon={MediaVideo} title={j.video_torrent.title}
+                    size={j.progress.video?.size} />
                 )}
                 {j.audio_torrent && (
-                  <div className="flex items-center gap-1 truncate">
-                    <SoundHigh width={12} height={12} className="shrink-0" />
-                    <span className="truncate">{j.audio_torrent.title}</span>
-                    <span className="shrink-0">({j.audio_torrent.seeders} seeds, {fmtSize(j.audio_torrent.size)})</span>
-                  </div>
+                  <TorrentLine icon={SoundHigh} title={j.audio_torrent.title}
+                    size={j.progress.audio?.size} />
                 )}
               </div>
             )}
@@ -297,7 +291,12 @@ export default function Jobs() {
               )
             )}
             {j.status === 'merging' && (
-              <MiniBar label="Conversão" pct={j.progress.merge} readPct={j.progress.merge_read} color="purple" />
+              <MiniBar
+                label={mergePhase(j.progress.merge_phase)?.label ?? 'Conversão'}
+                pct={j.progress.merge}
+                readPct={j.progress.merge_read}
+                color={mergePhase(j.progress.merge_phase)?.amber ? 'amber' : 'purple'}
+              />
             )}
             </div>
           </div>
@@ -356,15 +355,34 @@ function TorrentBar({ label, p }: { label: string; p: SlimProgress | null }) {
 // barra de progresso enxuta (só %) para os cards da lista. Velocidade/ETA/seeds
 // ficam no detalhe do job, não aqui. Na conversão, `readPct` (frames lidos pelo
 // encoder) vira uma barra clara sobreposta à de escrita (grande em AV1).
+/** Linha do torrent no card: título + tamanho REAL (o do qBittorrent, que é
+ *  o dos arquivos selecionados). O tamanho e os seeds do indexador quase nunca
+ *  batem com o que foi baixado, então não aparecem aqui. */
+function TorrentLine({ icon: Icon, title, size }: {
+  icon: typeof MediaVideo
+  title: string
+  size?: number | null
+}) {
+  return (
+    <div className="flex items-center gap-1 truncate">
+      <Icon width={12} height={12} className="shrink-0" />
+      <span className="truncate">{title}</span>
+      {size ? <span className="shrink-0">({fmtSize(size)})</span> : null}
+    </div>
+  )
+}
+
+
 function MiniBar({ label, pct, readPct, color = 'blue' }: {
   label: string
   pct: number | null
   readPct?: number | null
-  color?: 'blue' | 'purple'
+  color?: 'blue' | 'purple' | 'amber'
 }) {
   if (pct == null) return null
-  const bar = color === 'purple' ? 'bg-purple-500' : 'bg-blue-500'
-  const barSoft = color === 'purple' ? 'bg-purple-500/30' : 'bg-blue-500/30'
+  const bar = { blue: 'bg-blue-500', purple: 'bg-purple-500', amber: 'bg-amber-500' }[color]
+  const barSoft = { blue: 'bg-blue-500/30', purple: 'bg-purple-500/30',
+                    amber: 'bg-amber-500/30' }[color]
   const read = Math.max(pct, readPct ?? pct)
   const buffering = read - pct > 1
   return (

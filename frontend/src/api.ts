@@ -391,6 +391,24 @@ export interface MergeProgress {
   // dois arquivos está sendo lido
   step?: number       // 1 = primeiro arquivo, 2 = segundo
   label?: string      // 'dublado' (fonte do áudio) | 'original' (fonte do vídeo)
+  phase?: MergePhase  // etapa (o backend rotula; ver MERGE_PHASE)
+}
+
+/** Etapas de uma conversão. O backend rotula cada uma em progress.merge.phase
+ *  e as expõe em summary().phase / lista.progress.merge_phase — o dropdown, a
+ *  lista e o detalhe do job leem TODOS daqui, para dizerem a mesma coisa. */
+export type MergePhase = 'align' | 'edl' | 'convert'
+
+export const MERGE_PHASE: Record<MergePhase, { label: string; amber: boolean }> = {
+  // etapas intermediárias (âmbar): ainda não é o arquivo final saindo
+  align: { label: 'Buscando alinhamento', amber: true },
+  edl: { label: 'Gerando áudio da EDL', amber: true },
+  // conversão de verdade: juntando/convertendo o arquivo final
+  convert: { label: 'Convertendo', amber: false },
+}
+
+export function mergePhase(phase?: string | null) {
+  return MERGE_PHASE[(phase as MergePhase)] ?? null
 }
 
 export interface TorrentInfo {
@@ -500,6 +518,8 @@ export type JobMedia = 'movie' | 'tv'
 
 /** Item do dropdown de processos (/api/jobs/summary). Só o mínimo. */
 export interface JobSummary {
+  /** etapa da conversão (só com state 'converting'); ver MERGE_PHASE */
+  phase?: MergePhase | null
   id: string
   tmdb_id: number
   title: string
@@ -555,6 +575,8 @@ export interface JobListItem {
     audio: SlimProgress | null
     merge: number | null
     merge_read?: number | null
+    /** etapa da conversão (ver MERGE_PHASE) — o card usa nome e cor daqui */
+    merge_phase?: MergePhase | null
   }
 }
 

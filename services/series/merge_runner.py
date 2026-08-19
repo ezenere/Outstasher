@@ -117,7 +117,7 @@ async def _align_episode(job: dict, key: str, ep: dict):
 
     dub, orig = ep["src"]["dubbed"], ep["src"]["original"]
 
-    log, on_progress = jobs._ffmpeg_hooks(job)
+    log, on_progress = jobs._ffmpeg_hooks(job, jobs.runtime.PHASE_ALIGN)
 
     def on_wait():   # roda na thread do alinhador (como o log do ffmpeg)
         job["detail"] = f"{key}: na fila de alinhamento..."
@@ -229,7 +229,9 @@ async def _render_from_edl(job: dict, key: str, ep: dict):
     output = dest_dir / folder / naming.season_dir_name(ep["season"]) / f"{stem}.mkv"
     job["output"] = str(output)
     segs = edl_mod.segments(ep["edl"])
-    log, on_progress = jobs._ffmpeg_hooks(job)
+    # o passo 1 do render monta a faixa dublada (arquivo intermediário): é a
+    # etapa que a UI chama de "Gerando áudio da EDL", não de conversão
+    log, on_progress = jobs._ffmpeg_hooks(job, jobs.runtime.PHASE_EDL)
     if ep["edl"].get("note"):
         log(ep["edl"]["note"])
     try:

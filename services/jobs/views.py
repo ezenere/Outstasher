@@ -5,6 +5,7 @@ aquela tela renderiza, em vez da lista completa de jobs.
 """
 
 from services import store
+from services.jobs import runtime
 from services.jobs.runtime import (
     _TERMINAL_STATUSES, _is_recompress, _jobs, _lookup, _needed_torrents,
     _public)
@@ -132,7 +133,7 @@ def summary() -> list[dict]:
         # por tmdb_id (tela de Filmes) ignora; o dropdown mostra
         out.append({"id": j["id"], "tmdb_id": j.get("tmdb_id"),
                     "title": _movie_title(j), "status": j["status"],
-                    "state": state, "pct": pct,
+                    "state": state, "pct": pct, "phase": _merge_phase(j),
                     "media_type": _media_type(j),
                     "recompress": _is_recompress(j)})
     out.sort(key=lambda x: _STATE_RANK[x["state"]])
@@ -162,6 +163,16 @@ def counts(media: str | None = None) -> dict[str, int]:
     return c
 
 
+def _merge_phase(job: dict) -> str | None:
+    """Em que etapa da conversão o job está (None quando não está convertendo).
+
+    Sai do progresso do ffmpeg, que é quem sabe — assim o dropdown, a lista e
+    o detalhe dizem todos a mesma coisa."""
+    if job["status"] != "merging":
+        return None
+    return (job["progress"].get("merge") or {}).get("phase") or runtime.PHASE_CONVERT
+
+
 def _slim_job(job: dict) -> dict:
     """Job enxuto para os cards da lista de Downloads: sem search/eventos/
     candidatos. Nos torrents vai % + baixado/total; velocidade, ETA e seeds
@@ -183,6 +194,7 @@ def _slim_job(job: dict) -> dict:
             "audio": _slim_progress(job["progress"].get("audio")),
             "merge": (job["progress"].get("merge") or {}).get("pct")
             if job["progress"].get("merge") else None,
+            "merge_phase": _merge_phase(job),
             # leitura (frames lidos pelo encoder) para a barra sobreposta do card
             "merge_read": (job["progress"].get("merge") or {}).get("read_pct")
             if job["progress"].get("merge") else None,

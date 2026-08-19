@@ -114,7 +114,15 @@ def _register_proc(job_id: str):
     return _on_start
 
 
-def _ffmpeg_hooks(job: dict):
+# Etapas de uma conversão, como a UI as nomeia (uma fonte só para o
+# dropdown, a lista e o detalhe). As intermediárias saem em âmbar; só
+# `convert` é "conversão" de verdade — juntar/converter o arquivo final.
+PHASE_ALIGN = "align"      # fingerprint dos dois arquivos: buscando alinhamento
+PHASE_EDL = "edl"          # remontando a faixa dublada (arquivo intermediário)
+PHASE_CONVERT = "convert"  # merge/render/recompressão de fato
+
+
+def _ffmpeg_hooks(job: dict, phase: str = PHASE_CONVERT):
     """(log, on_progress) para as conversões de ffmpeg. log escreve no detalhe
     + evento 'merge'; on_progress guarda o progresso em memória (a UI lê via
     polling) e persiste no banco no máximo a cada 15s (não martela o SQLite a
@@ -126,7 +134,7 @@ def _ffmpeg_hooks(job: dict):
     last_persist = [0.0]
 
     def on_progress(info: dict):
-        job["progress"]["merge"] = info
+        job["progress"]["merge"] = {**info, "phase": info.get("phase", phase)}
         now = time.monotonic()
         # 15s: mais apertado que o PROGRESS_PERSIST_SECONDS do download, porque
         # a barra de merge muda depressa e vale persistir para retomar após crash

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from services import merger, store
 from services.series import subs as ext_subs
-from services.jobs import delivery
+from services.jobs import delivery, runtime
 from services.jobs.runtime import (
     _event, _fail, _ffmpeg_hooks, _ffmpeg_procs, _get_merge_lock, _jobs,
     _map_qbit_path, _public, _register_proc, _set, _spawn)
@@ -119,7 +119,7 @@ async def _run_advanced(job: dict, video_file: Path, audio_file: Path):
         job["merge_started_at"] = datetime.now().isoformat(timespec="seconds")
         dub, orig = str(audio_file), str(video_file)
 
-        log, on_progress = _ffmpeg_hooks(job)
+        log, on_progress = _ffmpeg_hooks(job, runtime.PHASE_ALIGN)
 
         def on_wait():   # roda na thread do alinhador (como o log do ffmpeg)
             job["detail"] = "Alinhamento avançado: na fila..."
@@ -180,7 +180,8 @@ async def _render_advanced(job: dict):
     async with lock:
         _set(job, "merging", "Renderizando a EDL...")
         segs = edl_mod.segments(adv["edl"])
-        log, on_progress = _ffmpeg_hooks(job)
+        # passo 1 do render: faixa dublada remontada (arquivo intermediário)
+        log, on_progress = _ffmpeg_hooks(job, runtime.PHASE_EDL)
         if adv["edl"].get("note"):
             log(adv["edl"]["note"])
         try:

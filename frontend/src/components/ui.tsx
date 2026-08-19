@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { Candidate, ConvertOptions, DiskInfo, MergeProgress, MovieState, Progress, QbitTone } from '../api'
 import {
   convertSummary, fmtDisk, fmtEta, fmtSize, fmtSpeed, fmtTime, langName,
-  MOVIE_STATE_LABEL, STATUS_LABEL, qbitIsComplete, qbitState,
+  MOVIE_STATE_LABEL, STATUS_LABEL, mergePhase, qbitIsComplete, qbitState,
 } from '../api'
 import { BookmarkSolid, Check, MediaVideoList, Download, Search, Timer, WarningTriangle, CheckCircle, XmarkCircle } from 'iconoir-react'
 
@@ -42,10 +42,15 @@ const BADGE_STYLES: Record<string, string> = {
   cancelled: 'bg-zinc-800 text-zinc-400',
 }
 
-export function Badge({ status }: { status: string }) {
+export function Badge({ status, phase }: { status: string; phase?: string | null }) {
+  // convertendo: o badge diz a ETAPA (as intermediárias em âmbar), não só
+  // "Convertendo" — é o mesmo texto do dropdown e do card da lista
+  const ph = status === 'merging' ? mergePhase(phase) : null
+  const style = ph?.amber ? 'bg-amber-950 text-amber-400'
+    : (BADGE_STYLES[status] ?? 'bg-zinc-800 text-zinc-300')
   return (
-    <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold whitespace-nowrap ${BADGE_STYLES[status] ?? 'bg-zinc-800 text-zinc-300'}`}>
-      {STATUS_LABEL[status] ?? status}
+    <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold whitespace-nowrap ${style}`}>
+      {ph?.label ?? STATUS_LABEL[status] ?? status}
     </span>
   )
 }
@@ -125,9 +130,9 @@ export function alignRole(p?: MergeProgress | null): string | null {
 
 export function MergeBar({ p }: { p?: MergeProgress | null }) {
   if (!p) return null
-  // fingerprint do alinhamento: é LEITURA dos dois arquivos, não conversão —
-  // sai em âmbar (a cor de "precisa de atenção/etapa extra" do resto da UI)
-  const align = p.step != null
+  // etapa intermediária (fingerprint, faixa de áudio da EDL): âmbar — só a
+  // conversão de verdade sai na cor de conversão
+  const align = mergePhase(p.phase)?.amber ?? p.step != null
   const write = p.pct || 0                      // barra da frente: já codificado (escrito)
   const read = Math.max(write, p.read_pct ?? write)  // barra de trás: já lido pelo encoder
   // gap visível = frames no buffer do encoder (grande em AV1, ~0 em H264/HEVC)
@@ -361,9 +366,15 @@ const STATE_STYLE: Record<MovieState, { icon: typeof Download; cls: string; badg
 }
 
 /** Ícone do estado do filme (para sobrepor no poster). */
-export function MovieStateIcon({ state, className }: { state: MovieState; className?: string }) {
+export function MovieStateIcon({ state, phase, className }: {
+  state: MovieState
+  phase?: string | null
+  className?: string
+}) {
   const { icon: Icon, cls } = STATE_STYLE[state]
-  return <Icon width={16} height={16} className={`${cls} ${className ?? ''}`} />
+  // etapa intermediária da conversão: âmbar, como o rótulo ao lado
+  const tone = mergePhase(phase)?.amber ? 'text-amber-300' : cls
+  return <Icon width={16} height={16} className={`${tone} ${className ?? ''}`} />
 }
 
 /** Badge de estado com ícone + rótulo. */

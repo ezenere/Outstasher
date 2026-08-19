@@ -4,7 +4,7 @@ import {
   Check, Download, Folder, Magnet, MediaVideo, NavArrowLeft, Play, Refresh,
   Settings as SettingsIcon, SkipNext, SoundHigh, Trash, WarningTriangle,
 } from 'iconoir-react'
-import { convertSummary, post, prog, type Job, type JobEvent, type JobProgress } from '../api'
+import { convertSummary, mergePhase, post, prog, type Job, type JobEvent, type JobProgress } from '../api'
 import { api } from '../api'
 import { Badge, CandidatesTable, ClampText, Collapsible, Elapsed, Empty, KindTags, MergeBar, ProgressBar, alignRole } from '../components/ui'
 import { useDialog } from '../components/Dialog'
@@ -302,7 +302,7 @@ export default function JobDetail() {
           <NavArrowLeft width={16} height={16} />
         </Link>
         <h1 className="flex-1 text-lg font-semibold">{jobTitle(job)}</h1>
-        <Badge status={job.status} />
+        <Badge status={job.status} phase={job.progress?.merge?.phase} />
         {(job.status === 'error' || job.status === 'cancelled') && (
           <button
             onClick={() => post(`/api/jobs/${job.id}/retry`)
@@ -459,12 +459,12 @@ export default function JobDetail() {
       {(job.merge_started_at || (job.status === 'merging' && job.progress?.merge)) && (
         <section className="mt-6">
           <div className="mb-2 flex items-center gap-2">
-            {/* enquanto o fingerprint roda não é conversão: é a leitura dos
-                dois arquivos para achar o alinhamento */}
-            <h2 className={`text-sm font-semibold ${alignRole(job.progress?.merge) ? 'text-amber-300' : 'text-zinc-400'}`}>
-              {alignRole(job.progress?.merge)
-                ? `Buscando alinhamento (${alignRole(job.progress?.merge)})`
-                : 'Conversão'}
+            {/* etapa intermediária (fingerprint, áudio da EDL) não é
+                conversão — mesmo nome/cor do dropdown e da lista */}
+            <h2 className={`text-sm font-semibold ${
+              mergePhase(job.progress?.merge?.phase)?.amber ? 'text-amber-300' : 'text-zinc-400'}`}>
+              {mergePhase(job.progress?.merge?.phase)?.label ?? 'Conversão'}
+              {alignRole(job.progress?.merge) && ` (${alignRole(job.progress?.merge)})`}
             </h2>
             {job.merge_started_at && (
               <Elapsed

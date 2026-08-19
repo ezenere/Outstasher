@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { NavArrowDown } from 'iconoir-react'
-import { MOVIE_STATE_LABEL, type JobSummary, type MovieState } from '../api'
+import { MOVIE_STATE_LABEL, mergePhase, type JobSummary, type MovieState } from '../api'
 import { MEDIA_FILTERS, type MediaFilter } from '../pages/Jobs'
 import { MovieStateIcon } from './ui'
 
@@ -86,11 +86,15 @@ export default function ProcessMenu({
                     onClick={() => setOpen(false)}
                     className="flex items-start gap-2 px-3 py-2.5 hover:bg-zinc-800/50"
                   >
-                    <MovieStateIcon state={j.state as MovieState} className="mt-0.5 shrink-0" />
+                    <MovieStateIcon state={j.state as MovieState}
+                      phase={j.phase} className="mt-0.5 shrink-0" />
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-medium text-zinc-200">{j.title}</div>
                       <div className="flex items-center gap-1.5 text-xs text-zinc-400">
-                        {j.recompress ? 'Recomprimindo' : MOVIE_STATE_LABEL[j.state as MovieState]}
+                        {j.recompress
+                          ? 'Recomprimindo'
+                          : (mergePhase(j.phase)?.label
+                             ?? MOVIE_STATE_LABEL[j.state as MovieState])}
                         {j.pct != null && <span className="tabular-nums">· {Math.round(j.pct)}%</span>}
                         {j.state === 'awaiting' && (
                           <span className="font-semibold text-red-400">· precisa de resposta</span>
