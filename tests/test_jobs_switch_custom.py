@@ -106,3 +106,56 @@ def test_switch_custom_valida_url_e_estado(temp_db, monkeypatch):
         assert job["search"]["video"] == []
         assert job["video_torrent"]["title"] == "antigo"
     asyncio.run(go())
+
+
+def test_troca_limpa_torrent_antigo_que_ficou_com_a_tag(temp_db, monkeypatch):
+    """Bug de campo: sobrou torrent ANTIGO com a tag do job, então o watchdog
+    lia o progresso dele e a UI nunca mostrava o novo. A troca tem que limpar
+    todos os torrents da tag — e já deixar o novo no lugar, em 0%."""
+    job = _job()
+    job["progress"]["audio"] = {"pct": 88.0, "name": "torrent antigo",
+                                "state": "downloading"}
+    job["kind"] = "dubbed"                      # só áudio: nada é compartilhado
+    jobs._jobs["sw1"] = job
+
+    class DoisNaTag(FakeQbit):
+        def __init__(self):
+            super().__init__()
+            self.tagged = [{"hash": "velho1"}, {"hash": "velho2"}]
+
+        async def info_by_tag(self, tag):
+            return self.tagged if tag.endswith("audio") else []
+
+    qbit = DoisNaTag()
+    monkeypatch.setattr(jobs.runtime, "_qbit", qbit)
+
+    async def go():
+        await jobs.switch("sw1", "audio", custom={
+            "url": "magnet:?xt=urn:btih:novo", "title": "Filme Exemplo Dublado"})
+        assert sorted(h for h, _ in qbit.untagged) == ["velho1", "velho2"]
+        assert sorted(qbit.deleted) == ["velho1", "velho2"]
+        # a UI já mostra o novo (0%, obtendo metadados), não o antigo em 88%
+        p = job["progress"]["audio"]
+        assert p["name"] == "Filme Exemplo Dublado" and p["pct"] == 0.0
+        assert p["state"] == "metaDL"
+    asyncio.run(go())
+
+
+def test_troca_preserva_torrent_compartilhado_com_o_outro_papel(temp_db, monkeypatch):
+    """Dual áudio: o mesmo torrent serve vídeo e áudio. Trocar o áudio tira a
+    tag de áudio dele, mas NÃO o apaga — ele ainda é o vídeo."""
+    job = _job()
+    jobs._jobs["sw1"] = job
+
+    class Compartilhado(FakeQbit):
+        async def info_by_tag(self, tag):
+            return [{"hash": "dual"}]           # o mesmo nos dois papéis
+
+    qbit = Compartilhado()
+    monkeypatch.setattr(jobs.runtime, "_qbit", qbit)
+
+    async def go():
+        await jobs.switch("sw1", "audio", custom={"url": "magnet:?xt=urn:btih:novo"})
+        assert qbit.untagged == [("dual", "dl-sw1-audio")]
+        assert qbit.deleted == []               # continua sendo o vídeo
+    asyncio.run(go())

@@ -155,7 +155,10 @@ async def _wait_downloads(job: dict) -> dict:
                         miss["since"] = time.monotonic()
                     continue
                 missing[kind]["since"] = None
-                t = torrents[0]
+                # normalmente só há um; se um torrent antigo sobreviveu com a
+                # tag (troca que falhou pela metade), o que vale é o mais
+                # recente — é sempre ele o que a troca acabou de adicionar
+                t = max(torrents, key=lambda x: x.get("added_on") or 0)
                 pct = t.get("progress", 0)
                 # size = tamanho dos arquivos SELECIONADOS do torrent (o que vai
                 # baixar de fato); total_size inclui os desmarcados. completed =
@@ -261,16 +264,24 @@ async def _replace_torrent(job: dict, kind: str, current: dict | None, nxt: dict
         job["fallbacks"][kind].append(cur_cand)
 
     tag = _tag(job, kind)
-    if current:
-        # se o mesmo torrent serve para os dois papéis (dual audio), só tira a tag
+    # tira a tag de TUDO que ainda a carrega, não só do `current` que o
+    # chamador viu: se sobrar um torrent antigo com a tag, o watchdog pode
+    # continuar lendo o progresso dele e a UI nunca mostra o novo
+    stale = {t["hash"]: t for t in await runtime._qbit.info_by_tag(tag)}
+    if current and current.get("hash"):
+        stale.setdefault(current["hash"], current)
+    if stale:
+        # torrent que serve aos DOIS papéis (dual áudio) não é apagado: só
+        # perde esta tag e continua valendo para o outro papel
         other = "audio" if kind == "video" else "video"
-        shared = False
+        shared: set[str] = set()
         if other in _needed_torrents(job):
-            other_torrents = await runtime._qbit.info_by_tag(_tag(job, other))
-            shared = bool(other_torrents) and other_torrents[0].get("hash") == current.get("hash")
-        await runtime._qbit.remove_tag(current["hash"], tag)
-        if not shared:
-            await runtime._qbit.delete(current["hash"], delete_files=True)
+            shared = {t.get("hash") for t in
+                      await runtime._qbit.info_by_tag(_tag(job, other))}
+        for h in stale:
+            await runtime._qbit.remove_tag(h, tag)
+            if h not in shared:
+                await runtime._qbit.delete(h, delete_files=True)
     save_path = job.get("torrent_save_path") or config.QBIT_SAVE_PATH or None
     await runtime._qbit.add(nxt.get("magnet") or nxt["link"], tag, save_path)
 
@@ -280,6 +291,13 @@ async def _replace_torrent(job: dict, kind: str, current: dict | None, nxt: dict
     if not job.get("current"):
         job["current"] = {}
     job["current"][kind] = nxt
+    # o progresso do torrent que saiu não vale mais: mostra JÁ o novo em 0%
+    # ("Obtendo metadados") em vez de deixar na tela o nome/percentual antigo
+    # até o watchdog passar
+    job["progress"][kind] = {"pct": 0.0, "speed": 0, "eta": None,
+                             "state": "metaDL", "seeds": 0,
+                             "name": nxt["title"], "size": nxt.get("size") or 0,
+                             "downloaded": 0}
     seeds = (f"{nxt['seeders']} seeds" if nxt.get("seeders") is not None
              else "informado manualmente")
     _event(job, "qbit", f"{reason}: {nxt['title']} ({seeds})")

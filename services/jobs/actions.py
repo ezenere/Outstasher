@@ -127,9 +127,9 @@ async def switch(job_id: str, kind: str, candidate_id: str | None = None,
     cur = (job.get("current") or {}).get(kind)
     if cur and cur.get("id") == nxt["id"]:
         raise ValueError("Este já é o torrent atual")
-    torrents = await runtime._qbit.info_by_tag(_tag(job, kind))
-    current = torrents[0] if torrents else None
-    await downloads._replace_torrent(job, kind, current, nxt, "🔁 Troca manual pelo usuário")
+    # quem está no ar sai dentro do _replace_torrent (ele limpa a tag inteira)
+    await downloads._replace_torrent(job, kind, None, nxt,
+                                     "🔁 Troca manual pelo usuário")
     return _public(job)
 
 
