@@ -141,7 +141,11 @@ pulado dentro do silêncio, sem buraco preenchido com inglês no meio da fala.
 
 - A saída usa a timeline do original (vídeo, áudios, legendas e capítulos em
   stream copy); só a faixa dublada é remontada. Cena sem dublagem recebe o áudio
-  original (ou silêncio); PAL corrigido com `rubberband`.
+  original (ou silêncio); PAL corrigido com `rubberband`. O mux final usa o
+  `mkvmerge` quando disponível (intercala por blocos: legenda esparsa nunca
+  segura memória nem sai do lugar); sem ele, ffmpeg com a intercalação
+  dimensionada por um orçamento de memória — e o job avisa se o muxer chegou a
+  forçar saída (arquivo com intercalação frouxa engasga players).
 - **Arquivo fundido** (dois episódios num só, razão de duração ~2): o episódio
   é localizado pelo offset dominante e o vídeo é cortado na janela dele; recap
   e prévia são descartados.

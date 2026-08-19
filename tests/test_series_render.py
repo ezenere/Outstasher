@@ -274,66 +274,129 @@ def _srt(path, cues):
 
 
 @pytest.mark.ffmpeg
-def test_render_leva_so_as_legendas_das_linguas_da_saida(tmp_path):
-    """Caso real: REMUX com 26 faixas de legenda. Levar TODAS fazia o muxer
-    estrito segurar todo o A/V por causa de uma faixa esparsa (31 GB de pico,
-    OOM). A saída leva só as línguas que têm áudio nela."""
+def test_render_leva_todas_as_legendas(tmp_path):
+    """Legenda comum é o motivo de existir legenda: a saída leva TODAS as
+    faixas do original, inclusive as de línguas sem áudio na saída."""
     orig = _media(tmp_path / "orig.mkv", 20, seed=1)
     dub = _media(tmp_path / "dub.mkv", 20, seed=2)
-    subs = {
-        "eng": _srt(tmp_path / "eng.srt", [("00:00:01,000 --> 00:00:02,000", "hi")]),
-        "por": _srt(tmp_path / "por.srt", [("00:00:01,000 --> 00:00:02,000", "oi")]),
-        # esparsa e de língua sem áudio na saída: é o que tem que sair
-        "kor": _srt(tmp_path / "kor.srt", [("00:00:19,000 --> 00:00:19,500", "x")]),
-        "tha": _srt(tmp_path / "tha.srt", [("00:00:19,000 --> 00:00:19,500", "y")]),
-    }
+    langs = ("eng", "por", "kor", "tha")
+    files = {lg: _srt(tmp_path / f"{lg}.srt",
+                      [("00:00:01,000 --> 00:00:02,000", lg)]) for lg in langs}
     with_subs = tmp_path / "orig_subs.mkv"
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(orig)]
-    for p in subs.values():
-        cmd += ["-i", str(p)]
+    for f in files.values():
+        cmd += ["-i", str(f)]
     cmd += ["-map", "0"]
-    for k in range(len(subs)):
+    for k in range(len(files)):
         cmd += ["-map", f"{k + 1}:0"]
     cmd += ["-c", "copy"]
-    for k, lang in enumerate(subs):
-        cmd += [f"-metadata:s:s:{k}", f"language={lang}"]
+    for k, lg in enumerate(langs):
+        cmd += [f"-metadata:s:s:{k}", f"language={lg}"]
     cmd += [str(with_subs)]
     subprocess.run(cmd, check=True)
 
     out = tmp_path / "out.mkv"
-    segs = [Segment("match", 0.0, 20.0, 0.0, 20.0, offset=0.0)]
-    render_mod.render(segs, str(dub), str(with_subs), str(out), "pt",
-                      log=lambda m: None)
-    info = _probe(out)
-    langs = [s.get("tags", {}).get("language")
-             for s in info["streams"] if s["codec_type"] == "subtitle"]
-    # eng (áudio do original) e por (a dublagem) ficam; kor/tha saem
-    assert sorted(langs) == ["eng", "por"], langs
+    render_mod.render([Segment("match", 0.0, 20.0, 0.0, 20.0, offset=0.0)],
+                      str(dub), str(with_subs), str(out), "pt", log=lambda m: None)
+    got = [s.get("tags", {}).get("language")
+           for s in _probe(out)["streams"] if s["codec_type"] == "subtitle"]
+    assert sorted(got) == sorted(langs), got
+
+
+def test_intercalacao_dimensionada_pelo_orcamento():
+    """O delta de intercalação vem de um ORÇAMENTO de bytes: num 1080p sai
+    enorme (na prática, estrito); num REMUX 4K limita a memória do muxer por
+    construção — em vez do 'estrito até estourar' que derrubou o servidor."""
+    from services import merger as m
+    # REMUX 4K: 85,6 Mb/s = 10,7 MB/s -> 1 GB segura ~100 s
+    quatro_k = m.sized_interleave_delta(85.6e6 / 8)
+    assert 60 <= quatro_k / 1e6 <= 180, quatro_k
+    # o buffer implícito nunca passa do orçamento
+    assert quatro_k / 1e6 * 85.6e6 / 8 <= m.MUX_BUFFER_GB * 1024 ** 3 * 1.01
+    # 1080p a 10 Mb/s: ~14 min de tolerância (estrito, na prática)
+    assert m.sized_interleave_delta(10e6 / 8) / 1e6 > 600
+    # sem bitrate conhecido = arquivo pequeno: estrito
+    assert m.sized_interleave_delta(0) == int(m.INTERLEAVE_MAX_S * 1e6)
+    # e nunca abaixo do piso do ffmpeg
+    assert m.sized_interleave_delta(1e12) == int(m.INTERLEAVE_MIN_S * 1e6)
+
+
+def test_aviso_quando_o_muxer_forcou_saida():
+    """'forcing output' no stderr = o arquivo saiu com intercalação frouxa —
+    é isso que engasga players, então o usuário TEM que ficar sabendo."""
+    from services import merger as m
+    err = ("[matroska @ 0x1] Delay between the first packet and last packet "
+           "in the muxing queue is 101000000 > 100000000: forcing output")
+    warn = m.interleave_warning(err + "\n" + err)
+    assert warn and "INTERCALAÇÃO FROUXA" in warn and "2x" in warn
+    assert m.interleave_warning("") is None
+    assert m.interleave_warning("tudo certo") is None
+
+
+def test_mkvmerge_cmd_marca_dublagem_como_padrao():
+    """O comando do mkvmerge: tudo do original entra como está, os áudios dele
+    perdem a flag de padrão e a faixa dublada entra com o idioma alvo como
+    padrão (ids de faixa = index do ffprobe)."""
+    probe = {"streams": [
+        {"index": 0, "codec_type": "video"},
+        {"index": 1, "codec_type": "audio"},
+        {"index": 2, "codec_type": "audio"},
+        {"index": 3, "codec_type": "subtitle"},
+    ]}
+    cmd = render_mod._mkvmerge_cmd("out.mkv", "orig.mkv", "dub.mka", "por", probe)
+    assert cmd[:3] == ["mkvmerge", "-o", "out.mkv"]
+    assert cmd.count("--default-track-flag") == 3
+    assert "1:no" in cmd and "2:no" in cmd and "0:yes" in cmd
+    assert cmd[cmd.index("--language") + 1] == "0:por"
+    # ordem: flags do original antes dele; as da dublada entre os dois inputs
+    assert cmd.index("orig.mkv") < cmd.index("--language") < cmd.index("dub.mka")
+
+
+def test_truncamento_silencioso_e_detectado(tmp_path):
+    """Sob pressão de memória o ffmpeg JÁ saiu com código 0 e um arquivo pela
+    metade: a duração da saída é conferida contra a esperada."""
+    curto = _media(tmp_path / "curto.mkv", 5, seed=1)
+    render_mod._check_mux_duration(str(curto), 5.0)          # ok
+    with pytest.raises(render_mod.merger.MergeError, match="TRUNCADO"):
+        render_mod._check_mux_duration(str(curto), 300.0)
+    with pytest.raises(render_mod.merger.MergeError, match="ilegível"):
+        render_mod._check_mux_duration(str(tmp_path / "nao_existe.mkv"), 5.0)
 
 
 def test_erro_de_mux_sem_stderr_diz_que_foi_sinal():
     """Morto de fora (OOM killer) não deixa stderr: a mensagem tem que dizer
     isso, em vez do 'mux final falhou:' vazio que apareceu em produção."""
-    class P:
-        returncode, stderr = -9, ""
-    msg = render_mod._mux_error(P())
-    assert "sinal 9" in msg and "memória" in msg
-    assert render_mod._out_of_memory(P())
-
-    class Q:
-        returncode, stderr = 1, "av_interleaved_write_frame: Cannot allocate memory"
-    assert render_mod._out_of_memory(Q())
-
-    class R:
-        returncode, stderr = 1, "Invalid data found"
-    assert not render_mod._out_of_memory(R())
-    assert "Invalid data" in render_mod._mux_error(R())
+    from services import merger as m
+    assert "sinal 9" in m.describe_exit(-9, "") and "memória" in m.describe_exit(-9, "")
+    assert m.out_of_memory(-9, "")
+    assert m.out_of_memory(1, "av_interleaved_write_frame: Cannot allocate memory")
+    assert not m.out_of_memory(1, "Invalid data found")
+    assert "Invalid data" in m.describe_exit(1, "Invalid data found")
 
 
 def test_mux_aplica_o_teto_de_memoria_no_filho():
     """O teto tem que chegar ao PROCESSO do ffmpeg (é ele que estoura, não o
     servidor): o filho enxerga o limite; sem limite, fica ilimitado."""
+    from services import merger as m
     p = render_mod._run_mux(["sh", "-c", "ulimit -v"])
-    assert p.stdout.strip() == str(int(render_mod.MUX_MEM_LIMIT_GB * 1024 ** 2))
-    livre = render_mod._run_mux(["sh", "-c", "ulimit -v"], limit=False)
-    assert livre.stdout.strip() == "unlimited"
+    assert p.stdout.strip() == str(int(m.MUX_MEM_LIMIT_GB * 1024 ** 2))
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.skipif(not render_mod.has_mkvmerge(), reason="sem mkvmerge no PATH")
+def test_render_com_mkvmerge_de_verdade(tmp_path):
+    """Com mkvmerge no PATH o mux final é dele: dublada como padrão no idioma
+    alvo, áudios do original sem a flag, legendas e capítulos intactos."""
+    orig = _media(tmp_path / "orig.mkv", 20, seed=1,
+                  chapters=[(0, 10, "A"), (10, 20, "B")])
+    dub = _media(tmp_path / "dub.mkv", 20, seed=2)
+    out = tmp_path / "out.mkv"
+    render_mod.render([Segment("match", 0.0, 20.0, 0.0, 20.0, offset=0.0)],
+                      str(dub), str(orig), str(out), "pt", log=lambda m: None)
+    info = _probe(out)
+    audios = [s for s in info["streams"] if s["codec_type"] == "audio"]
+    assert len(audios) == 2
+    assert audios[1]["tags"]["language"] in ("por", "pt")
+    assert audios[1]["disposition"]["default"] == 1
+    assert audios[0]["disposition"]["default"] == 0
+    assert [c["tags"]["title"] for c in info["chapters"]] == ["A", "B"]

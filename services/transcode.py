@@ -1023,7 +1023,9 @@ def convert_single(src: str, output: str, opts: ConvertOptions,
     # anexos (fontes de legendas ASS etc.) sobrevivem no MKV de saída
     cmd += ["-map", "0:t?", "-c:t", "copy",
             "-map_chapters", "0", "-map_metadata", "0",
-            "-avoid_negative_ts", "make_zero", "-max_interleave_delta", "0", output]
+            "-avoid_negative_ts", "make_zero", "-max_interleave_delta",
+            str(merger.sized_interleave_delta(merger.byte_rate_of(probe))),
+            output]
 
     Path(output).parent.mkdir(parents=True, exist_ok=True)
     for n in result.notes:

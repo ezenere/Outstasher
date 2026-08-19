@@ -15,8 +15,8 @@ Fluxo:
    TEXTO embutido no MKV é redundante; entre os dois lados, o do ORIGINAL
    ganha (não precisa de remapeamento). Legenda embutida só em BITMAP
    (PGS/VobSub) não conta como duplicata — texto é outra coisa.
-6. `mux` reescreve o MKV com as faixas novas (stream copy total, mesmo
-   -max_interleave_delta 0 do resto do projeto).
+6. `mux` reescreve o MKV com as faixas novas (stream copy total, com a
+   intercalação dimensionada do resto do projeto — merger.sized_interleave_delta).
 """
 from __future__ import annotations
 
@@ -394,7 +394,9 @@ def mux(output: str, items: list[dict], log=print) -> int:
         title = {"forced": "Forçada", "sdh": "SDH"}.get(it["flavor"], "")
         cmd += [f"-metadata:s:s:{idx}", f"title={title}",
                 f"-disposition:s:{idx}", "forced" if it["flavor"] == "forced" else "0"]
-    cmd += ["-avoid_negative_ts", "make_zero", "-max_interleave_delta", "0", str(tmp)]
+    cmd += ["-avoid_negative_ts", "make_zero", "-max_interleave_delta",
+            str(merger.sized_interleave_delta(merger.byte_rate_of(probe))),
+            str(tmp)]
     p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                        errors="replace")
     if p.returncode != 0:

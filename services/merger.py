@@ -19,9 +19,11 @@
   e re-encoda (AAC p/ mono-estereo; AC3 p/ multicanal, que preserva a ordem
   dos canais — o AAC nativo do ffmpeg embaralha layouts surround)
 - flags plex-friendly: -fflags +genpts, -avoid_negative_ts make_zero,
-  -max_interleave_delta 0 (intercalação estrita: sem ele, stream esparsa
-  de legenda faz o muxer 'forçar saída' e alguns players travam a
-  reprodução); legendas mov_text/tx3g viram subrip no MKV
+  -max_interleave_delta DIMENSIONADO por um orçamento de memória (na prática
+  estrito — sem limite nenhum, stream esparsa de legenda faz o muxer 'forçar
+  saída' e players travam; estrito de verdade já segurou 31 GB num REMUX 4K
+  e derrubou o servidor — ver sized_interleave_delta); legendas
+  mov_text/tx3g viram subrip no MKV
 
 Requer ffmpeg + ffprobe no PATH e numpy.
 """
@@ -93,6 +95,12 @@ class MergeResult:
 
 class MergeError(RuntimeError):
     pass
+
+
+class MuxOutOfMemory(MergeError):
+    """O ffmpeg morreu por memória. Num comando de CÓPIA isso é o muxer
+    segurando A/V à espera de uma faixa esparsa (legenda forçada), não um
+    encode pesado — o chamador pode refazer com a intercalação dimensionada."""
 
 
 class VersionMismatch(MergeError):
@@ -372,9 +380,7 @@ def pick_subs_for_lang(probes: list[dict], lang: str, video_src: int) -> list[tu
         return [s for s in get_streams(probes[i], "subtitle")
                 if canonical_lang(raw_lang_of(s)) == lang]
 
-    # o render por EDL passa UM probe só (as legendas saem todas do original)
-    pref = collect(video_src)
-    other = collect(1 - video_src) if len(probes) > 1 else []
+    pref, other = collect(video_src), collect(1 - video_src)
 
     def pick(cands: list[dict], forced: bool) -> dict | None:
         pool = [s for s in cands if is_forced(s) == forced]
@@ -580,8 +586,106 @@ def _parse_progress_block(raw: dict, duration_s: float, total_frames: int = 0) -
             "eta": round(eta) if eta is not None else None}
 
 
+# -------------------- intercalação e memória do mux --------------------
+# Intercalação estrita (-max_interleave_delta 0) era o padrão do projeto: sem
+# nenhum limite o muxer escreve pacotes fora da ordem de intercalação quando
+# uma faixa esparsa (legenda FORÇADA é o caso clássico: uma linha aqui, outra
+# dez minutos depois) demora a entregar — e arquivo assim trava players.
+#
+# Mas estrito de verdade tem um preço sem teto: o muxer segura na RAM todo o
+# A/V entre um evento e o próximo da faixa mais esparsa (bitrate x intervalo).
+# Num REMUX 4K de 85 Mb/s isso chegou a 31 GB e derrubou o servidor inteiro.
+#
+# A política, então, é um ORÇAMENTO de bytes: delta = orçamento / bitrate.
+# Num 1080p o delta sai em dezenas de minutos (na prática, estrito — arquivo
+# idêntico); num REMUX 4K sai ~1,5 min, e a memória fica limitada POR
+# CONSTRUÇÃO. Se o muxer chegar a forçar saída ("forcing output" no stderr),
+# o chamador avisa o usuário: o arquivo saiu com intercalação frouxa.
+MUX_BUFFER_GB = 1.0          # o quanto o muxer pode segurar esperando faixa
+MUX_MEM_LIMIT_GB = 8.0       # pára-quedas do processo (bem acima do orçamento)
+INTERLEAVE_MIN_S = 10.0      # piso: o padrão do ffmpeg
+INTERLEAVE_MAX_S = 7200.0    # teto: nenhum filme passa disto — é "estrito"
+
+
+def mem_limiter(limit_gb: float | None = None):
+    """preexec_fn que limita o espaço de endereçamento do ffmpeg — um
+    PÁRA-QUEDAS da máquina, não o mecanismo (o orçamento de intercalação já
+    limita a memória por construção; e sob RLIMIT apertado o ffmpeg pode sair
+    com código 0 e arquivo TRUNCADO, então ele fica bem largo). Só para
+    comandos de CÓPIA: encode de vídeo precisa de GBs por direito.
+
+    O teto é lido na HORA da chamada (não no import), senão MUX_MEM_LIMIT_GB
+    ficaria congelado no valor do arranque."""
+    def _apply():
+        import resource
+        lim = int((limit_gb or MUX_MEM_LIMIT_GB) * 1024 ** 3)
+        resource.setrlimit(resource.RLIMIT_AS, (lim, lim))
+    return _apply
+
+
+def byte_rate_of(probe: dict) -> float:
+    """Bytes/s do arquivo (para dimensionar o quanto o muxer pode segurar)."""
+    fmt = probe.get("format") or {}
+    try:
+        dur = float(fmt.get("duration") or 0)
+        size = float(fmt.get("size") or 0)
+        if dur > 0 and size > 0:
+            return size / dur
+        return float(fmt.get("bit_rate") or 0) / 8
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def sized_interleave_delta(byte_rate: float,
+                           budget_gb: float | None = None) -> int:
+    """Maior atraso tolerado (µs) que cabe no orçamento de memória do muxer:
+    delta = orçamento / (bytes por segundo). É o valor do
+    -max_interleave_delta de todo mux do projeto."""
+    if byte_rate <= 0:
+        return int(INTERLEAVE_MAX_S * 1e6)   # sem bitrate = arquivo pequeno
+    seconds = ((budget_gb or MUX_BUFFER_GB) * 1024 ** 3) / byte_rate
+    seconds = max(INTERLEAVE_MIN_S, min(INTERLEAVE_MAX_S, seconds))
+    return int(seconds * 1e6)
+
+
+def interleave_warning(stderr: str) -> str | None:
+    """Aviso para o usuário quando o muxer FORÇOU saída (o arquivo ficou com
+    intercalação frouxa — é isso que engasga players). None = saiu limpo."""
+    if "forcing output" not in (stderr or ""):
+        return None
+    n = (stderr or "").count("forcing output")
+    return (f"⚠️ INTERCALAÇÃO FROUXA neste arquivo: uma faixa esparsa (legenda "
+            f"forçada, quase sempre) atrasou além do orçamento de "
+            f"{MUX_BUFFER_GB:.0f} GB e o muxer forçou a saída {n}x. Alguns "
+            f"players podem engasgar; se acontecer, remova as legendas "
+            f"forçadas do original e refaça.")
+
+
+def out_of_memory(returncode: int, stderr: str) -> bool:
+    """O ffmpeg morreu por memória? (alocação recusada pelo teto, ou morto de
+    fora pelo OOM killer — que não deixa stderr nenhum)"""
+    err = (stderr or "").lower()
+    return (returncode in (-9, 137)
+            or "cannot allocate memory" in err
+            or "out of memory" in err
+            or "memory allocation" in err)
+
+
+def describe_exit(returncode: int, stderr: str) -> str:
+    """Mensagem de erro do ffmpeg — dizendo o que houve quando não há stderr
+    (morto por sinal: OOM killer, kill externo)."""
+    err = (stderr or "").strip()
+    if err:
+        return err[-800:]
+    if returncode < 0:
+        return (f"morto de fora (sinal {-returncode}), sem mensagem — quase "
+                f"sempre falta de memória")
+    return f"código {returncode}, sem mensagem"
+
+
 def _run_ffmpeg_progress(cmd: list[str], duration_s: float,
-                         on_progress=None, on_start=None, total_frames: int = 0) -> None:
+                         on_progress=None, on_start=None, total_frames: int = 0,
+                         mem_limit_gb: float | None = None) -> str:
     """Roda o ffmpeg lendo o stream do -progress pipe:1 e reportando via callback.
 
     stderr é drenado numa thread (para não travar o pipe) e usado na mensagem
@@ -594,7 +698,9 @@ def _run_ffmpeg_progress(cmd: list[str], duration_s: float,
     (barra secundária "lidos"); 0 desliga essa barra.
     """
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", errors="replace", bufsize=1)
+                            text=True, encoding="utf-8", errors="replace", bufsize=1,
+                            preexec_fn=(mem_limiter(mem_limit_gb)
+                                        if mem_limit_gb else None))
     if on_start:
         on_start(proc)
     stderr_lines: list[str] = []
@@ -628,14 +734,15 @@ def _run_ffmpeg_progress(cmd: list[str], duration_s: float,
         # O cancelamento pela UI também usa SIGKILL, mas esse caminho é tratado
         # antes (jobs._cancelling); um -9 que chega aqui é morte externa — quase
         # sempre o OOM killer do kernel (encode grande demais para a RAM).
-        if proc.returncode == -9:
-            raise MergeError(
-                "ffmpeg foi morto (SIGKILL, código -9) — quase sempre falta de "
-                "memória: o kernel (OOM killer) mata o encoder quando ele passa "
-                "da RAM disponível. Encodes AV1 em 4K são os mais pesados; tente "
-                "HEVC, uma resolução menor, ou mais RAM na máquina.\n"
+        if out_of_memory(proc.returncode, tail):
+            raise MuxOutOfMemory(
+                "ffmpeg ficou sem memória — morto pelo OOM killer (código -9) "
+                "ou barrado pelo teto do processo. Num encode (AV1 4K é o pior "
+                "caso) tente HEVC, resolução menor ou mais RAM; numa CÓPIA é o "
+                "muxer segurando A/V por causa de uma faixa esparsa.\n"
                 "Saída do ffmpeg:\n" + tail)
         raise MergeError(f"ffmpeg falhou (código {proc.returncode}):\n{tail}")
+    return "".join(stderr_lines)[-4000:]
 
 
 # -------------------- merge principal --------------------
@@ -916,7 +1023,9 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
 
     cmd += ["-map_chapters", "-1" if chapters_src is None else str(0 if chapters_src == ref_input else 1)]
     cmd += ["-map_metadata", "0",
-            "-avoid_negative_ts", "make_zero", "-max_interleave_delta", "0",
+            "-avoid_negative_ts", "make_zero",
+            "-max_interleave_delta",
+            str(sized_interleave_delta(byte_rate_of(probes[ref_input]))),
             output]
 
     Path(output).parent.mkdir(parents=True, exist_ok=True)
@@ -925,7 +1034,16 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
     # duracao esperada da saida = duracao do arquivo de referencia (video em copy)
     out_duration = _duration_of(probes[ref_input]) or duration
     total_frames = _total_frames(probes[ref_input], out_duration)
-    _run_ffmpeg_progress(cmd, out_duration, on_progress, on_start, total_frames)
+    # pára-quedas de memória só quando NÃO há encode de vídeo: aí o comando é
+    # cópia (mais, no máximo, áudio filtrado) e GBs de RAM significariam o
+    # muxer preso numa faixa esparsa — o que o delta dimensionado já impede.
+    mem_cap = None if (vplan and vplan.encode) else MUX_MEM_LIMIT_GB
+    tail = _run_ffmpeg_progress(cmd, out_duration, on_progress, on_start,
+                                total_frames, mem_limit_gb=mem_cap)
+    warn = interleave_warning(tail)
+    if warn:
+        result.notes.append(warn)
+        log(warn)
 
     if vplan and vplan.encode:
         for n in transcode.preserve_hdr_metadata(ref_path, output,
