@@ -15,24 +15,24 @@ def library(temp_db, tmp_path):
     root2.mkdir()
     temp_db.add_destination("A", str(root1), True)
     temp_db.add_destination("B", str(root2), False)
-    (root1 / "Ex Machina (2014)").mkdir()
+    (root1 / "Filme Exemplo (2014)").mkdir()
     (root1 / "Tóquio Proibida (1999)").mkdir()
-    (root2 / "WALL-E (2008)").mkdir()
+    (root2 / "ROBO-X (2008)").mkdir()
     (root2 / "Sem Ano").mkdir()
     (root2 / "arquivo_solto.txt").write_bytes(b"x")  # não é pasta: fica de fora
     return root1, root2
 
 
 def test_norm_title(temp_db):
-    assert catalog._norm_title("WALL·E") == "walle"
+    assert catalog._norm_title("ROBO·X") == "robox"
     assert catalog._norm_title("Tóquio Proibida") == "toquioproibida"
-    assert catalog._norm_title("Ex_Machina: Instinto!") == "exmachinainstinto"
+    assert catalog._norm_title("Filme_Exemplo: Instinto!") == "filmeexemploinstinto"
 
 
 def test_cache_holds_until_invalidated(library):
     root1, _ = library
     keys = catalog.library_keys()
-    assert ("exmachina", "2014") in keys and ("walle", "2008") in keys
+    assert ("filmeexemplo", "2014") in keys and ("robox", "2008") in keys
     assert ("semano", None) in keys
     assert len(keys) == 4, keys
     # mudança no disco NÃO aparece até invalidar
@@ -53,11 +53,11 @@ def test_ttl_triggers_rescan(library):
 
 def test_in_library_matching(library):
     keys = catalog.library_keys()
-    assert catalog.in_library({"original_title": "Ex Machina", "title": "Ex Machina: Instinto Artificial", "year": "2014"}, keys)
+    assert catalog.in_library({"original_title": "Filme Exemplo", "title": "Filme Exemplo: Instinto Artificial", "year": "2014"}, keys)
     assert catalog.in_library({"original_title": "Original X", "title": "Tóquio Proibida", "year": "1999"}, keys)  # pelo localizado
-    assert catalog.in_library({"original_title": "WALL·E", "title": "WALL·E", "year": "2008"}, keys)  # pontuação difere
+    assert catalog.in_library({"original_title": "ROBO·X", "title": "ROBO·X", "year": "2008"}, keys)  # pontuação difere
     assert catalog.in_library({"original_title": "Sem Ano", "title": None, "year": "1987"}, keys)     # pasta sem ano
-    assert not catalog.in_library({"original_title": "Ex Machina", "title": None, "year": "2033"}, keys)  # ano errado
+    assert not catalog.in_library({"original_title": "Filme Exemplo", "title": None, "year": "2033"}, keys)  # ano errado
     assert not catalog.in_library({"original_title": "Inexistente", "title": None, "year": "2014"}, keys)
 
 
@@ -89,4 +89,4 @@ def test_unmounted_destination_does_not_break_scan(library, temp_db, tmp_path):
     # destino apontando para um caminho inexistente não pode derrubar o scan
     temp_db.add_destination("C", str(tmp_path / "nao" / "existe"), False)
     catalog.invalidate_library()
-    assert ("exmachina", "2014") in catalog.library_keys()
+    assert ("filmeexemplo", "2014") in catalog.library_keys()

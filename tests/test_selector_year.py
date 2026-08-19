@@ -1,6 +1,6 @@
 """Ano no modo áudio: release com o ano do filme tem preferência ABSOLUTA.
 
-Título sem ano é ambíguo ("Guardiões da Galáxia" casa com Vol. 2 e Vol. 3),
+Título sem ano é ambíguo (um título de franquia casa com todas as sequências),
 então todo release com o ano vem antes de qualquer um sem ano — o score só
 ordena dentro de cada grupo.
 """
@@ -13,34 +13,34 @@ def cand(title, seeders=50, size=8_000_000_000):
 
 
 def test_has_year_matches_common_formats():
-    assert selector.has_year("Ex Machina (2014) Dublado 1080p", "2014")
-    assert selector.has_year("Ex.Machina.2014.DUAL.1080p", "2014")
-    assert selector.has_year("Ex Machina 2014 Dublado", "2014")
+    assert selector.has_year("Filme Exemplo (2014) Dublado 1080p", "2014")
+    assert selector.has_year("Filme.Exemplo.2014.DUAL.1080p", "2014")
+    assert selector.has_year("Filme Exemplo 2014 Dublado", "2014")
 
 
 def test_has_year_ignores_embedded_digits():
-    assert not selector.has_year("Ex Machina Dublado 1080p", "2014")
-    assert not selector.has_year("Ex Machina 32014 Dublado", "2014")  # 2014 dentro de 32014
-    assert not selector.has_year("Ex Machina 20145 Dublado", "2014")  # prefixo de outro número
-    assert not selector.has_year("Ex Machina Dublado", "")            # sem ano de referência
+    assert not selector.has_year("Filme Exemplo Dublado 1080p", "2014")
+    assert not selector.has_year("Filme Exemplo 32014 Dublado", "2014")  # 2014 dentro de 32014
+    assert not selector.has_year("Filme Exemplo 20145 Dublado", "2014")  # prefixo de outro número
+    assert not selector.has_year("Filme Exemplo Dublado", "")            # sem ano de referência
 
 
 def test_audio_year_ranks_first(temp_db):
-    results = [cand("Ex Machina Dublado 1080p WEB-DL"),
-               cand("Ex Machina (2014) Dublado 1080p WEB-DL")]
-    ranked, _ = selector.rank(results, "audio", "Ex Machina", "2014", language="pt")
-    assert ranked[0]["title"] == "Ex Machina (2014) Dublado 1080p WEB-DL"
+    results = [cand("Filme Exemplo Dublado 1080p WEB-DL"),
+               cand("Filme Exemplo (2014) Dublado 1080p WEB-DL")]
+    ranked, _ = selector.rank(results, "audio", "Filme Exemplo", "2014", language="pt")
+    assert ranked[0]["title"] == "Filme Exemplo (2014) Dublado 1080p WEB-DL"
     assert ranked[0]["year_match"] and not ranked[1]["year_match"]
 
 
 def test_year_beats_higher_score(temp_db):
     # preferência ABSOLUTA: o release com ano vence mesmo com score bem menor
-    # (sem o ano, "Guardiões da Galáxia" pode ser o Vol. 2 ou o Vol. 3)
-    results = [cand("Guardioes da Galaxia (2014) Dublado HDTV 480p", seeders=5),
-               cand("Guardioes da Galaxia Dublado BluRay 1080p TrueHD", seeders=200)]
-    ranked, _ = selector.rank(results, "audio", "Guardioes da Galaxia", "2014",
+    # (sem o ano, um título de franquia pode ser qualquer sequência)
+    results = [cand("Herois da Franquia (2014) Dublado HDTV 480p", seeders=5),
+               cand("Herois da Franquia Dublado BluRay 1080p TrueHD", seeders=200)]
+    ranked, _ = selector.rank(results, "audio", "Herois da Franquia", "2014",
                               language="pt")
-    assert ranked[0]["title"].startswith("Guardioes da Galaxia (2014)")
+    assert ranked[0]["title"].startswith("Herois da Franquia (2014)")
     assert ranked[0]["score"] < ranked[1]["score"]  # o ano venceu apesar do score
 
 
@@ -55,30 +55,30 @@ def test_score_orders_within_year_group(temp_db):
 def test_video_mode_ignores_year(temp_db):
     # a busca do original já vai com o ano na query, então vídeo ordena só por
     # score — o release melhor vence mesmo sem o ano no nome
-    results = [cand("Ex Machina 2014 HDTV 480p", seeders=5),
-               cand("Ex Machina 1080p BluRay x264", seeders=200)]
-    ranked, _ = selector.rank(results, "video", "Ex Machina", "2014")
-    assert ranked[0]["title"] == "Ex Machina 1080p BluRay x264"
+    results = [cand("Filme Exemplo 2014 HDTV 480p", seeders=5),
+               cand("Filme Exemplo 1080p BluRay x264", seeders=200)]
+    ranked, _ = selector.rank(results, "video", "Filme Exemplo", "2014")
+    assert ranked[0]["title"] == "Filme Exemplo 1080p BluRay x264"
 
 
 def test_rank_matches_any_alternative_title(temp_db):
     # filme estrangeiro: releases vêm com o nome original OU o nome em inglês —
     # rank aceita uma lista e casa QUALQUER um dos dois
-    results = [cand("Spirited Away 2001 1080p BluRay x264"),
-               cand("Sen to Chihiro no Kamikakushi 2001 2160p BluRay REMUX"),
+    results = [cand("Tale of the Wind 2001 1080p BluRay x264"),
+               cand("Kaze no Monogatari 2001 2160p BluRay REMUX"),
                cand("Filme Aleatorio 2001 1080p")]
-    titles = ["Sen to Chihiro no Kamikakushi", "Spirited Away"]
+    titles = ["Kaze no Monogatari", "Tale of the Wind"]
     ranked, _ = selector.rank(results, "video", titles, "2001")
     got = {r["title"] for r in ranked}
-    assert "Spirited Away 2001 1080p BluRay x264" in got          # nome inglês
-    assert "Sen to Chihiro no Kamikakushi 2001 2160p BluRay REMUX" in got  # nome original
+    assert "Tale of the Wind 2001 1080p BluRay x264" in got          # nome inglês
+    assert "Kaze no Monogatari 2001 2160p BluRay REMUX" in got  # nome original
     assert "Filme Aleatorio 2001 1080p" not in got               # nenhum dos dois
 
 
 def test_rank_single_title_still_works(temp_db):
     # retrocompat: passar uma STRING (não lista) continua casando normalmente
-    results = [cand("Ex Machina 2014 1080p BluRay")]
-    ranked, _ = selector.rank(results, "video", "Ex Machina", "2014")
+    results = [cand("Filme Exemplo 2014 1080p BluRay")]
+    ranked, _ = selector.rank(results, "video", "Filme Exemplo", "2014")
     assert len(ranked) == 1
 
 

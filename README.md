@@ -66,8 +66,11 @@ Busque, clique, escolha idioma e destino. Modos: **Baixar e fazer merge**,
   candidatos (score, corte, motivo de rejeição).
 - **Watchdog**: download parado por `STALL_TIMEOUT_MINUTES` é trocado pelo
   próximo candidato do mesmo corte.
-- **Drift**: offset medido em duas janelas; se divergirem, o job pausa e você
-  decide continuar, trocar de torrent ou cancelar.
+- **Drift**: se as duas janelas de offset divergirem, o job mede o offset a
+  cada 5 min (drift × corte), pausa e você decide: **alinhamento avançado**
+  (o alinhador das séries, com EDL e revisão — resolve cena/junção diferente
+  no mesmo corte), continuar com o offset do início, trocar de torrent ou
+  cancelar.
 - **Limpeza** (`QBIT_CLEANUP`): `keep` | `remove` | `remove_data`.
 - **Cancelar / repetir** em cada card; detalhes ao vivo (downloads, candidatos,
   eventos, progresso do ffmpeg) na lupa.

@@ -141,7 +141,7 @@ export function ExtraSearchSection() {
       </div>
       <p className="mt-1 text-sm text-zinc-400">
         Alguns trackers BR não retornam nada para o título com numeral romano ou com o ano
-        (ex.: buscar <i>De Volta para o Futuro II 1989</i> falha, mas <i>De Volta para o Futuro 2</i> funciona).
+        (ex.: buscar <i>Filme Exemplo II 1989</i> falha, mas <i>Filme Exemplo 2</i> funciona).
         Aqui você diz, por idioma e variante do título, em quais indexers rodar uma busca extra.
         Cada variante só dispara quando faz sentido para o filme (só tem efeito se o título tiver
         numeral romano, ou se tiver ano a remover). As buscas extras rodam em paralelo e só afetam

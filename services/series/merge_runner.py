@@ -254,7 +254,7 @@ async def _merge_episode(job: dict, key: str, ep: dict, convert_opts):
             f"durações {d_a:.0f}s vs {d_b:.0f}s — caminho rápido não se aplica")
     # o merge de filmes valida o offset em DUAS janelas (0:30 e ~60%); em série
     # isso deixa passar junções de intervalo comercial (2 frames = 68 ms) e
-    # cenas cortadas no meio — caso real Mr Robot S01E01. Aqui: uma janela a
+    # cenas cortadas no meio — caso real de campo (S01E01). Aqui: uma janela a
     # cada 5 min, tolerância de lip sync (50 ms); qualquer desvio -> alinhador
     # por conteúdo, que corta no silêncio certo em vez de aplicar um offset só
     from services.series.align import refine as _ref

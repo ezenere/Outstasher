@@ -449,7 +449,7 @@ _library_cache: dict = {"at": None, "keys": frozenset()}
 
 def _norm_title(text: str) -> str:
     """Título normalizado para casar pasta com TMDB: minúsculo, sem acentos,
-    só letras/números ('WALL·E' == 'WALLE', 'Tóquio' == 'toquio')."""
+    só letras/números ('ROBO·X' == 'ROBOX', 'Tóquio' == 'toquio')."""
     nfkd = unicodedata.normalize("NFKD", (text or "").lower())
     stripped = "".join(c for c in nfkd if not unicodedata.combining(c))
     return re.sub(r"[^a-z0-9]+", "", stripped)

@@ -78,7 +78,7 @@ def test_job_shape(library, monkeypatch):
 def test_tmdb_id_from_folder(library, monkeypatch):
     """Pasta marcada com [tmdbid-N]: o job herda o id sem precisar do frontend."""
     did, _folder, src = library
-    tagged = src.parent.with_name("Filme (2020) [tmdbid-603]")
+    tagged = src.parent.with_name("Filme (2020) [tmdbid-4444]")
     src.parent.rename(tagged)
     async def _noop(job, src, opts=None):
         return None
@@ -86,7 +86,7 @@ def test_tmdb_id_from_folder(library, monkeypatch):
 
     async def go():
         job = await jobs.create_recompress(did, tagged.name, "filme.mkv", CONV)
-        assert jobs._jobs[job["id"]]["tmdb_id"] == 603
+        assert jobs._jobs[job["id"]]["tmdb_id"] == 4444
     asyncio.run(go())
 
 

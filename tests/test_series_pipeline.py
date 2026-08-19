@@ -16,15 +16,15 @@ def _job(dest: str) -> dict:
     return {
         "id": "serietest1",
         "media_type": "tv",
-        "tmdb_id": 1396,
+        "tmdb_id": 4242,
         "language": "pt",
         "mode": "auto",
         "status": "downloading",
         "detail": "",
         "convert": None,
-        "movie": {"original_title": "Breaking Bad", "localized_title": "Breaking Bad",
+        "movie": {"original_title": "Serie Exemplo", "localized_title": "Serie Exemplo",
                   "english_title": None, "year": "2008", "poster": None,
-                  "overview": None, "original_language": "en", "id": 1396},
+                  "overview": None, "original_language": "en", "id": 4242},
         "episodes": {},
         "torrents": [],
         "awaiting": None,
@@ -45,11 +45,11 @@ def _ep(season, episode, state="downloaded", src=None):
 # -------------------- naming --------------------
 
 def test_naming_layout_jellyfin():
-    assert naming.series_folder_name("Breaking Bad", "2008", 1396) == \
-        "Breaking Bad (2008) [tmdbid-1396]"
+    assert naming.series_folder_name("Serie Exemplo", "2008", 4242) == \
+        "Serie Exemplo (2008) [tmdbid-4242]"
     assert naming.season_dir_name(1) == "Season 01"
-    assert naming.episode_file_name("Breaking Bad", "2008", 1, 2, "pt") == \
-        "Breaking Bad (2008) S01E02 [pt+orig]"
+    assert naming.episode_file_name("Serie Exemplo", "2008", 1, 2, "pt") == \
+        "Serie Exemplo (2008) S01E02 [pt+orig]"
 
 
 # -------------------- relatório / regra dos 75% --------------------
@@ -121,9 +121,9 @@ def test_merge_all_entrega_layout_jellyfin(temp_db, tmp_path, make_media):
     asyncio.run(merge_runner.merge_all(job))
 
     assert job["status"] == "done", job["detail"]
-    season = dest / "Breaking Bad (2008) [tmdbid-1396]" / "Season 01"
+    season = dest / "Serie Exemplo (2008) [tmdbid-4242]" / "Season 01"
     for e in (1, 2):
-        out = season / f"Breaking Bad (2008) S01E0{e} [pt+orig].mkv"
+        out = season / f"Serie Exemplo (2008) S01E0{e} [pt+orig].mkv"
         assert out.is_file(), f"faltou {out}"
         assert job["episodes"][f"S01E0{e}"]["state"] == "done"
     assert job["report"]["succeeded"] == 2

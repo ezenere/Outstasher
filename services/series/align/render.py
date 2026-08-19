@@ -181,7 +181,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
     # DOIS PASSOS de propósito. Num único ffmpeg, o áudio original entrava no
     # filter_complex (preenchimentos) E saía em stream copy — o mesmo stream
     # decodificado para 20+ buffersrc e copiado para o muxer engasga as filas
-    # do ffmpeg (deadlock com 0% para sempre; caso real Mr Robot S01E06, os
+    # do ffmpeg (deadlock com 0% para sempre; caso real de campo (S01E06), os
     # episódios anteriores só passaram por sorte de escalonamento). Separar
     # o áudio dublado remontado num .mka e depois só MUXAR cópias elimina a
     # condição por construção.

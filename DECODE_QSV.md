@@ -154,7 +154,7 @@ return subprocess.run(cmd, capture_output=True, timeout=60).returncode == 0
 ```
 
 No incidente, o decoder QSV passava nesse teste com folga: o primeiro frame
-decodifica bem, a perda começa depois de milhares de frames (nos dois Shrek a
+decodifica bem, a perda começa depois de milhares de frames (nos dois filmes de teste a
 densidade era perfeita nos primeiros ~1200s e degradava a partir daí). O teste
 dá uma **falsa sensação de validação** — prova que a GPU abre o arquivo, não que
 ela decodifica o arquivo inteiro.

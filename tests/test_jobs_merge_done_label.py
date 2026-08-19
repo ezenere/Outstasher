@@ -17,7 +17,7 @@ def _run(temp_db, monkeypatch, result):
         "id": "j1", "tmdb_id": 62, "language": "pt", "kind": "both",
         "status": "merging", "created_at": "2026-07-29T21:55:00",
         "detail": "", "progress": {}, "convert": None,
-        "movie": {"original_title": "2001 A Space Odyssey", "year": "1968"},
+        "movie": {"original_title": "3000 Um Filme", "year": "1968"},
         "destination_path": str(Path(temp_db.__file__).parent),  # qualquer dir
     }
     jobs._jobs[job["id"]] = job

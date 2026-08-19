@@ -11,7 +11,7 @@ import main
 from services import catalog
 
 
-def _detail(tmdb_id, title="Dune", year="2021"):
+def _detail(tmdb_id, title="Filme Exemplo", year="2021"):
     return {"tmdb_id": tmdb_id, "title": title, "year": year,
             "destination": {}, "folder": "x", "files": []}
 
@@ -43,7 +43,7 @@ def test_usa_o_id_quando_a_pasta_esta_marcada(monkeypatch):
 
 def test_cai_para_o_titulo_sem_id(monkeypatch):
     result, calls = _route(monkeypatch, _detail(None))
-    assert calls == {"match": ("Dune", "2021")}
+    assert calls == {"match": ("Filme Exemplo", "2021")}
     assert result["tmdb"]["title"] == "pelo titulo"
 
 

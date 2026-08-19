@@ -10,7 +10,7 @@ from services.series import parse
 # -------------------- parse_episode_refs --------------------
 
 def test_sxxeyy_basico():
-    assert parse.parse_episode_refs("Breaking.Bad.S01E02.720p.HDTV") == [(1, 2)]
+    assert parse.parse_episode_refs("Serie.Exemplo.S01E02.720p.HDTV") == [(1, 2)]
     assert parse.parse_episode_refs("show s1e2") == [(1, 2)]
     assert parse.parse_episode_refs("Show S01.E02.mkv") == [(1, 2)]
     assert parse.parse_episode_refs("Show S01_E02") == [(1, 2)]
@@ -18,11 +18,11 @@ def test_sxxeyy_basico():
 
 
 def test_txxeyy_convencao_brasileira():
-    # caso real: pack "By Lucas Firmo" com arquivos "T01E01 - olámigo.mov.mkv"
-    assert parse.parse_episode_refs("T01E01 - olámigo.mov.mkv") == [(1, 1)]
+    # caso real: pack BR com arquivos "T01E01 - piloto.mov.mkv"
+    assert parse.parse_episode_refs("T01E01 - piloto.mov.mkv") == [(1, 1)]
     assert parse.parse_episode_refs("Show t02e11 720p") == [(2, 11)]
-    # "T2" solto NÃO vira temporada (poderia ser "Terminator 2")
-    assert parse.parse_coverage("Terminator T2 1080p").kind == "unknown"
+    # "T2" solto NÃO vira temporada (poderia ser "Robo 2")
+    assert parse.parse_coverage("Robo T2 1080p").kind == "unknown"
 
 
 def test_sxxeyy_range():
@@ -53,7 +53,7 @@ def test_1x02_nao_casa_codec_nem_resolucao():
 
 
 def test_sem_referencia():
-    assert parse.parse_episode_refs("Breaking Bad 1080p BluRay") == []
+    assert parse.parse_episode_refs("Serie Exemplo 1080p BluRay") == []
 
 
 # -------------------- parse_coverage --------------------
@@ -110,10 +110,10 @@ def test_coverage_unknown():
 # -------------------- strip_episode_tokens --------------------
 
 def test_strip_tokens():
-    assert "S01E02" not in parse.strip_episode_tokens("Breaking Bad S01E02 720p")
+    assert "S01E02" not in parse.strip_episode_tokens("Serie Exemplo S01E02 720p")
     assert "Temporada" not in parse.strip_episode_tokens("Show 1ª Temporada 720p")
-    stripped = parse.strip_episode_tokens("Breaking Bad S01E02 720p HDTV")
-    assert "Breaking Bad" in stripped and "720p" in stripped
+    stripped = parse.strip_episode_tokens("Serie Exemplo S01E02 720p HDTV")
+    assert "Serie Exemplo" in stripped and "720p" in stripped
 
 
 # -------------------- pack_resolution_tier --------------------
@@ -151,10 +151,10 @@ def test_identity_prioriza_hash():
 # -------------------- suspicious_signals --------------------
 
 def test_sinal_numeracao_absoluta():
-    sigs = parse.suspicious_signals("One Piece - 1042 [1080p]")
+    sigs = parse.suspicious_signals("Anime Longo - 1042 [1080p]")
     assert any("absoluta" in s for s in sigs)
     # com SxxEyy no nome não há ambiguidade
-    assert not parse.suspicious_signals("One Piece S20E12 1080p")
+    assert not parse.suspicious_signals("Anime Longo S20E12 1080p")
 
 
 def test_sinal_data():
@@ -183,5 +183,5 @@ def test_sinal_ordens_alternativas():
 
 
 def test_release_normal_sem_sinais():
-    assert parse.suspicious_signals("Breaking.Bad.S01E02.1080p.BluRay") == []
+    assert parse.suspicious_signals("Serie.Exemplo.S01E02.1080p.BluRay") == []
     assert parse.suspicious_signals("Show S01 Completa 1080p Dual Áudio") == []

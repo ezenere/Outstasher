@@ -16,14 +16,14 @@ def _job(tmp_path: Path | None = None) -> dict:
     return {
         "id": "testjob01",
         "media_type": "tv",
-        "tmdb_id": 1396,
+        "tmdb_id": 4242,
         "language": "pt",
         "mode": "auto",
         "status": "searching",
         "detail": "",
-        "movie": {"original_title": "Breaking Bad", "localized_title": "Breaking Bad",
+        "movie": {"original_title": "Serie Exemplo", "localized_title": "Serie Exemplo",
                   "english_title": None, "year": "2008", "poster": None,
-                  "overview": None, "original_language": "en", "id": 1396},
+                  "overview": None, "original_language": "en", "id": 4242},
         "request": {"seasons": [1], "episodes": {}},
         "known_seasons": [1, 2],
         "episodes": {
@@ -45,7 +45,7 @@ def _job(tmp_path: Path | None = None) -> dict:
     }
 
 
-def _torrent(n, role, coverage, title="Breaking Bad S01 1080p WEB-DL"):
+def _torrent(n, role, coverage, title="Serie Exemplo S01 1080p WEB-DL"):
     return {"n": n, "role": role, "tag": f"dl-testjob01-t{n}", "title": title,
             "tracker": "t", "seeders": 10, "size": 1000, "quality": "1080p WEB-DL",
             "coverage_label": "S01 completa", "magnet": f"magnet:?xt=urn:btih:{'a' * 40}",
@@ -61,7 +61,7 @@ def test_collect_gaps_por_papel(temp_db):
     # original cobre os dois; dublado só o E01 -> E02 é lacuna do dublado
     job["torrents"] = [
         _torrent(0, "original", ["S01E01", "S01E02"]),
-        _torrent(1, "dubbed", ["S01E01"], "Breaking Bad S01E01 Dublado"),
+        _torrent(1, "dubbed", ["S01E01"], "Serie Exemplo S01E01 Dublado"),
     ]
     gaps = pipeline._collect_gaps(job)
     assert gaps == [{"episode": "S01E02", "name": "Cat's in the Bag...",
@@ -72,9 +72,9 @@ def test_apply_gaps_pula_e_enxuga_plano(temp_db):
     job = _job()
     job["torrents"] = [
         _torrent(0, "original", ["S01E01", "S01E02"]),
-        _torrent(1, "dubbed", ["S01E01"], "Breaking Bad S01E01 Dublado"),
+        _torrent(1, "dubbed", ["S01E01"], "Serie Exemplo S01E01 Dublado"),
         # torrent que SÓ existia pelo episódio que virou lacuna
-        _torrent(2, "original", ["S01E02"], "Breaking Bad S01E02 720p"),
+        _torrent(2, "original", ["S01E02"], "Serie Exemplo S01E02 720p"),
     ]
     pipeline._apply_gaps(job)
     assert job["episodes"]["S01E02"]["state"] == "skipped_missing"
@@ -91,7 +91,7 @@ def test_skipped_future_fica_fora_das_lacunas(temp_db):
     job["episodes"]["S01E02"]["state"] = "skipped_future"
     job["torrents"] = [
         _torrent(0, "original", ["S01E01"]),
-        _torrent(1, "dubbed", ["S01E01"], "Breaking Bad S01E01 Dublado"),
+        _torrent(1, "dubbed", ["S01E01"], "Serie Exemplo S01E01 Dublado"),
     ]
     assert pipeline._collect_gaps(job) == []
 
@@ -106,8 +106,8 @@ def test_force_continue_abandona_e_pula(temp_db, tmp_path):
     stuck = _torrent(1, "dubbed", ["S01E01", "S01E02"], "BB S01 Dublado")
     stuck["state"] = "downloading"
     job["torrents"] = [done, stuck]
-    (tmp_path / "Breaking.Bad.S01E01.1080p.mkv").write_bytes(b"x" * 10)
-    (tmp_path / "Breaking.Bad.S01E02.1080p.mkv").write_bytes(b"x" * 10)
+    (tmp_path / "Serie.Exemplo.S01E01.1080p.mkv").write_bytes(b"x" * 10)
+    (tmp_path / "Serie.Exemplo.S01E02.1080p.mkv").write_bytes(b"x" * 10)
 
     pipeline._apply_force_continue(job)
     assert stuck["state"] == "abandoned"
@@ -126,8 +126,8 @@ def test_resolve_episode_files_completo(temp_db, tmp_path):
     orig_dir.mkdir()
     dub_dir.mkdir()
     for d in (orig_dir, dub_dir):
-        (d / "Breaking.Bad.S01E01.mkv").write_bytes(b"x" * 10)
-        (d / "Breaking.Bad.S01E02.mkv").write_bytes(b"x" * 10)
+        (d / "Serie.Exemplo.S01E01.mkv").write_bytes(b"x" * 10)
+        (d / "Serie.Exemplo.S01E02.mkv").write_bytes(b"x" * 10)
     t0 = _torrent(0, "original", ["S01E01", "S01E02"])
     t0.update(state="done", content_path=str(orig_dir))
     t1 = _torrent(1, "dubbed", ["S01E01", "S01E02"], "BB S01 Dublado")
@@ -175,7 +175,7 @@ def test_apply_manual_agrupa_pack(temp_db):
         _torrent(0, "original", ["S01E01", "S01E02"]),
         _torrent(1, "dubbed", ["S01E01", "S01E02"], "BB S01 Dublado WEB-DL"),
     ]
-    pack = {"id": "S01E01:d0", "title": "Breaking Bad S01 BluRay Dublado",
+    pack = {"id": "S01E01:d0", "title": "Serie Exemplo S01 BluRay Dublado",
             "tracker": "x", "seeders": 5, "size": 900, "quality": "1080p BluRay",
             "coverage": "S01 completa", "score": 1.0, "tier": 29,
             "magnet": "magnet:?xt=urn:btih:" + "b" * 40, "link": None,
@@ -190,7 +190,7 @@ def test_apply_manual_agrupa_pack(temp_db):
     dubbed = [t for t in job["torrents"] if t["role"] == "dubbed"]
     # o mesmo pack escolhido para os 2 episódios vira UM torrent; o antigo saiu
     assert len(dubbed) == 1
-    assert dubbed[0]["title"] == "Breaking Bad S01 BluRay Dublado"
+    assert dubbed[0]["title"] == "Serie Exemplo S01 BluRay Dublado"
     assert dubbed[0]["coverage"] == ["S01E01", "S01E02"]
     # o lado original não foi tocado
     orig = [t for t in job["torrents"] if t["role"] == "original"]
@@ -221,7 +221,7 @@ def test_manual_torrents_auto_atribui_pelo_titulo(temp_db):
         _torrent(0, "original", ["S01E01", "S01E02"]),
         _torrent(1, "dubbed", ["S01E01", "S01E02"], "BB S01 Dublado"),
     ]
-    pack = _pack_cand("S01E01:d0", "Breaking Bad S01 BluRay Dublado")
+    pack = _pack_cand("S01E01:d0", "Serie Exemplo S01 BluRay Dublado")
     job["search_tv"]["dubbed"] = {"S01E01": [pack]}
     pipeline._apply_manual(job, {"torrents": [
         {"candidate_id": "S01E01:d0", "role": "dubbed", "episodes": "auto"},
@@ -230,7 +230,7 @@ def test_manual_torrents_auto_atribui_pelo_titulo(temp_db):
     # o papel marcado foi SUBSTITUÍDO pela seleção; "auto" cobriu S01E01+02
     # (o título "S01" cobre a temporada); o original ficou intocado
     assert len(dubbed) == 1
-    assert dubbed[0]["title"] == "Breaking Bad S01 BluRay Dublado"
+    assert dubbed[0]["title"] == "Serie Exemplo S01 BluRay Dublado"
     assert dubbed[0]["coverage"] == ["S01E01", "S01E02"]
     orig = [t for t in job["torrents"] if t["role"] == "original"]
     assert orig[0]["coverage"] == ["S01E01", "S01E02"]
@@ -239,8 +239,8 @@ def test_manual_torrents_auto_atribui_pelo_titulo(temp_db):
 def test_manual_torrents_explicito_vence_auto(temp_db):
     job = _job()
     job["torrents"] = [_torrent(0, "dubbed", ["S01E01", "S01E02"], "auto plano")]
-    pack = _pack_cand("a", "Breaking Bad S01 WEB-DL Dublado")
-    avulso = _pack_cand("b", "Breaking Bad S01E02 BluRay Dublado")
+    pack = _pack_cand("a", "Serie Exemplo S01 WEB-DL Dublado")
+    avulso = _pack_cand("b", "Serie Exemplo S01E02 BluRay Dublado")
     job["search_tv"]["dubbed"] = {"S01E01": [pack, avulso]}
     pipeline._apply_manual(job, {"torrents": [
         {"candidate_id": "a", "role": "dubbed", "episodes": "auto"},
@@ -249,15 +249,15 @@ def test_manual_torrents_explicito_vence_auto(temp_db):
     ]})
     by_title = {t["title"]: t["coverage"] for t in job["torrents"]
                 if t["role"] == "dubbed"}
-    assert by_title["Breaking Bad S01 WEB-DL Dublado"] == ["S01E01"]
-    assert by_title["Breaking Bad S01E02 BluRay Dublado"] == ["S01E02"]
+    assert by_title["Serie Exemplo S01 WEB-DL Dublado"] == ["S01E01"]
+    assert by_title["Serie Exemplo S01E02 BluRay Dublado"] == ["S01E02"]
 
 
 def test_manual_torrents_titulo_sem_match_e_aceito(temp_db):
     # atribuição que o TÍTULO não indica é decisão explícita do usuário
     job = _job()
     job["torrents"] = []
-    cand = _pack_cand("a", "Breaking Bad 1080p Coletânea Dublado")
+    cand = _pack_cand("a", "Serie Exemplo 1080p Coletânea Dublado")
     job["search_tv"]["dubbed"] = {"S01E01": [cand]}
     pipeline._apply_manual(job, {"torrents": [
         {"candidate_id": "a", "role": "dubbed", "episodes": ["S01E01", "S01E02"]},
@@ -268,7 +268,7 @@ def test_manual_torrents_titulo_sem_match_e_aceito(temp_db):
 
 def test_manual_torrents_episodio_fora_do_pedido(temp_db):
     job = _job()
-    cand = _pack_cand("a", "Breaking Bad S01 Dublado")
+    cand = _pack_cand("a", "Serie Exemplo S01 Dublado")
     job["search_tv"]["dubbed"] = {"S01E01": [cand]}
     with pytest.raises(ValueError, match="fora do pedido"):
         pipeline._apply_manual(job, {"torrents": [
@@ -282,8 +282,8 @@ def test_find_replacement_mesma_cobertura(temp_db):
     job = _job()
     stalled = _torrent(0, "original", ["S01E01", "S01E02"])
     job["torrents"] = [stalled]
-    reserva_boa = _pack_cand("r1", "Breaking Bad S01 720p WEB-DL")
-    reserva_parcial = _pack_cand("r2", "Breaking Bad S01E01 1080p")
+    reserva_boa = _pack_cand("r1", "Serie Exemplo S01 720p WEB-DL")
+    reserva_parcial = _pack_cand("r2", "Serie Exemplo S01E01 1080p")
     # a parcial vem primeiro no rank, mas não cobre S01E02 -> pula
     job["search_tv"]["original"] = {"S01E01": [reserva_parcial, reserva_boa]}
     nxt = pipeline._find_replacement(job, stalled)
@@ -297,7 +297,7 @@ def test_switch_torrent_valida_estado_e_cobertura(temp_db):
     t = _torrent(0, "original", ["S01E01", "S01E02"])
     t["state"] = "downloading"
     job["torrents"] = [t]
-    parcial = _pack_cand("p", "Breaking Bad S01E01 1080p")
+    parcial = _pack_cand("p", "Serie Exemplo S01E01 1080p")
     job["search_tv"]["original"] = {"S01E01": [parcial]}
     import services.jobs as jobs_mod
     jobs_mod._jobs[job["id"]] = job
@@ -381,11 +381,11 @@ def test_match_pack_files_revela_o_que_o_pack_tem(temp_db):
     job = _job()
     job["episodes"]["S02E01"] = dict(job["episodes"]["S01E01"], season=2, episode=1)
     t = _torrent(0, "dubbed", ["S01E01", "S01E02", "S02E01"],
-                 "Mr Robot 2016   1�� Temporada Completa [WEB DL] BLUDV")
+                 "Serie Exemplo 2016   1�� Temporada Completa [WEB DL] GRP")
     files = [
-        {"index": 0, "name": "Pack/EP01/Mr.Robot.S01E01.720p.DUAL.mkv"},
-        {"index": 1, "name": "Pack/EP01/Mr.Robot.S01E01.720p.DUAL.srt"},
-        {"index": 2, "name": "Pack/EP02/Mr.Robot.S01E02.720p.DUAL.mkv"},
+        {"index": 0, "name": "Pack/EP01/Serie.Exemplo.S01E01.720p.DUAL.mkv"},
+        {"index": 1, "name": "Pack/EP01/Serie.Exemplo.S01E01.720p.DUAL.srt"},
+        {"index": 2, "name": "Pack/EP02/Serie.Exemplo.S01E02.720p.DUAL.mkv"},
         {"index": 3, "name": "Pack/extras/making-of.mkv"},
     ]
     keep, drop, found = pipeline._match_pack_files(job, t, files)
@@ -396,9 +396,9 @@ def test_match_pack_files_revela_o_que_o_pack_tem(temp_db):
 
 def test_parse_ordinal_corrompido_e_temporada_nao_serie_completa():
     from services.series import parse
-    c = parse.parse_coverage("Mr Robot 2016   1���� Temporada Completa [WEB DL] BLUDV")
+    c = parse.parse_coverage("Serie Exemplo 2016   1���� Temporada Completa [WEB DL] GRP")
     assert c.kind == "season_pack" and c.seasons == {1}
-    c = parse.parse_coverage("Mr Robot 2016 1ª Temporada Completa [WEB-DL] BLUDV")
+    c = parse.parse_coverage("Serie Exemplo 2016 1ª Temporada Completa [WEB-DL] GRP")
     assert c.kind == "season_pack" and c.seasons == {1}
 
 
@@ -419,7 +419,7 @@ def test_manual_torrents_mid_download_preserva_o_que_ja_baixou(temp_db):
     done = _torrent(0, "dubbed", ["S01E01"], "BB S01E01 Dublado")
     done["state"] = "done"
     job["torrents"] = [done]
-    cand = _pack_cand("x", "Breaking Bad S01E02 WEB-DL Dublado")
+    cand = _pack_cand("x", "Serie Exemplo S01E02 WEB-DL Dublado")
     job["search_tv"]["dubbed"] = {"S01E02": [cand]}
     pipeline._apply_manual(job, {"torrents": [
         {"candidate_id": "x", "role": "dubbed", "episodes": ["S01E02"]},
@@ -436,7 +436,7 @@ def test_manual_magnet_proprio_auto_pelo_dn(temp_db):
     job = _job()
     job["torrents"] = []
     magnet = ("magnet:?xt=urn:btih:" + "c" * 40
-              + "&dn=Breaking.Bad.S01.1080p.BluRay.DUAL-GRP")
+              + "&dn=Serie.Exemplo.S01.1080p.BluRay.DUAL-GRP")
     pipeline._apply_manual(job, {"torrents": [
         {"magnet": magnet, "role": "dubbed", "episodes": "auto"},
     ]})

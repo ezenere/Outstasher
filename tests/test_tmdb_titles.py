@@ -16,21 +16,21 @@ def _tr(lang, title):
 
 
 def test_english_title_for_foreign_film():
-    d = _data("Sen to Chihiro no Kamikakushi", "ja",
-              [_tr("en", "Spirited Away"), _tr("pt", "A Viagem de Chihiro")])
-    assert tmdb._english_title(d) == "Spirited Away"
+    d = _data("Kaze no Monogatari", "ja",
+              [_tr("en", "Tale of the Wind"), _tr("pt", "A História do Vento")])
+    assert tmdb._english_title(d) == "Tale of the Wind"
 
 
 def test_none_when_original_is_english():
     # filme já em inglês: não há nada a ganhar buscando "o inglês"
-    d = _data("Inception", "en", [_tr("en", "Inception")])
+    d = _data("Example", "en", [_tr("en", "Example")])
     assert tmdb._english_title(d) is None
 
 
 def test_none_when_english_equals_original():
     # original não-inglês mas o "título inglês" coincide (ex.: nome próprio):
     # buscar de novo seria redundante
-    d = _data("Amelie", "fr", [_tr("en", "Amelie")])
+    d = _data("Exemple", "fr", [_tr("en", "Exemple")])
     assert tmdb._english_title(d) is None
 
 

@@ -30,7 +30,7 @@ def manual_env(temp_db, monkeypatch, files):
     monkeypatch.setattr(jobs, "_probe_manual_file", fake_probe)
 
     async def fake_details(tmdb_id, lang):
-        return {"original_title": "Ex Machina", "localized_title": "Ex Machina",
+        return {"original_title": "Filme Exemplo", "localized_title": "Filme Exemplo",
                 "year": "2014", "poster": None}
     monkeypatch.setattr(jobs.tmdb, "details", fake_details)
 
@@ -103,7 +103,7 @@ def test_happy_path(manual_env):
         from services import store
         db = store.get_job(jid)
         assert db["status"] == "done"
-        assert db["movie"]["original_title"] == "Ex Machina"
+        assert db["movie"]["original_title"] == "Filme Exemplo"
         assert state["merged"] == [(str(vf), str(af), False)]
         assert jid not in jobs._jobs  # terminal: sai da memória
     asyncio.run(go())

@@ -8,16 +8,16 @@ from services import catalog
 
 @pytest.fixture
 def catalog_item(temp_db, tmp_path):
-    """Um destino com um item (Ex Machina) contendo um .mkv na raiz e um .srt
+    """Um destino com um item (Filme Exemplo) contendo um .mkv na raiz e um .srt
     numa subpasta. Devolve (destination_id, folder, pasta_do_item)."""
     root = tmp_path / "colecao"
     root.mkdir()
     dest = temp_db.add_destination("T", str(root), True)
-    item = root / "Ex Machina (2014)"
+    item = root / "Filme Exemplo (2014)"
     (item / "subs").mkdir(parents=True)
-    (item / "Ex Machina (2014) [pt+orig].mkv").write_bytes(b"v")
+    (item / "Filme Exemplo (2014) [pt+orig].mkv").write_bytes(b"v")
     (item / "subs" / "pt.srt").write_bytes(b"s")
-    return dest["id"], "Ex Machina (2014)", item
+    return dest["id"], "Filme Exemplo (2014)", item
 
 
 def _names(item: Path):
@@ -26,17 +26,17 @@ def _names(item: Path):
 
 def test_rename_simple(catalog_item):
     did, folder, item = catalog_item
-    new_rel = catalog.rename_file(did, folder, "Ex Machina (2014) [pt+orig].mkv", "Filme.mkv")
+    new_rel = catalog.rename_file(did, folder, "Filme Exemplo (2014) [pt+orig].mkv", "Filme.mkv")
     assert new_rel == "Filme.mkv"
     assert "Filme.mkv" in _names(item)
-    assert "Ex Machina (2014) [pt+orig].mkv" not in _names(item)
+    assert "Filme Exemplo (2014) [pt+orig].mkv" not in _names(item)
 
 
 def test_rename_inherits_extension(catalog_item):
     did, folder, item = catalog_item
-    new_rel = catalog.rename_file(did, folder, "Ex Machina (2014) [pt+orig].mkv", "Ex Machina PT")
-    assert new_rel == "Ex Machina PT.mkv"
-    assert "Ex Machina PT.mkv" in _names(item)
+    new_rel = catalog.rename_file(did, folder, "Filme Exemplo (2014) [pt+orig].mkv", "Filme Exemplo PT")
+    assert new_rel == "Filme Exemplo PT.mkv"
+    assert "Filme Exemplo PT.mkv" in _names(item)
 
 
 def test_rename_keeps_subfolder(catalog_item):
@@ -51,7 +51,7 @@ def test_rename_rejects_unsafe_names(catalog_item, bad):
     did, folder, item = catalog_item
     before = _names(item)
     with pytest.raises(catalog.CatalogError):
-        catalog.rename_file(did, folder, "Ex Machina (2014) [pt+orig].mkv", bad)
+        catalog.rename_file(did, folder, "Filme Exemplo (2014) [pt+orig].mkv", bad)
     assert _names(item) == before  # nenhum rename inválido pode ter mexido nos arquivos
 
 
@@ -59,7 +59,7 @@ def test_rename_collision(catalog_item):
     did, folder, item = catalog_item
     (item / "outro.mkv").write_bytes(b"x")
     with pytest.raises(catalog.CatalogError, match="Já existe"):
-        catalog.rename_file(did, folder, "Ex Machina (2014) [pt+orig].mkv", "outro.mkv")
+        catalog.rename_file(did, folder, "Filme Exemplo (2014) [pt+orig].mkv", "outro.mkv")
 
 
 def test_rename_missing_source(catalog_item):

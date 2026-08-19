@@ -1,6 +1,6 @@
 """Estágio 4: refino por ÁUDIO — o offset fino e os pontos de corte vêm daqui.
 
-Lição do caso real (Mr Robot S01E01, WEB-DL BR vs BluRay):
+Lição de um caso real de campo (S01E01, WEB-DL BR vs BluRay):
 - o vídeo a 4 fps NÃO enxerga edições pequenas (2 frames cortados numa junção
   de intervalo comercial = 68 ms; 1,7 s numa outra), então o EDL do vídeo
   vira um match gigante com UM offset e o áudio fica fora dali em diante;
@@ -365,7 +365,7 @@ def _resolve_replaced_by_audio(segs, dub_path, dub_a, orig_path, orig_a, log):
             continue
         # o offset do vizinho vem do VÍDEO (grade de 0,25 s: erro até 125 ms —
         # maior que a tolerância). A referência tem que ser o offset REAL do
-        # vizinho, medido pelo áudio colado na fronteira (caso Mr Robot S01E03
+        # vizinho, medido pelo áudio colado na fronteira (caso real de campo, S01E03
         # 14:20: vídeo -5,00, áudio -5,14 → recusado por 41 ms de folga)
         ref = _neighbor_audio_offset(segs, i, dub_path, dub_a, orig_path, orig_a)
         if ref is None:

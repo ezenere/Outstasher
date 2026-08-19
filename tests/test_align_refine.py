@@ -1,7 +1,7 @@
 """Refino por ÁUDIO: perfil de offset, corte em silêncio, wobbles e
 'substituída' resolvida pelo áudio — com áudio REAL (ffmpeg).
 
-Reproduz o caso Mr Robot S01E01: o dublado tem uma edição de 2 frames numa
+Reproduz um caso real de campo (S01E01, WEB-DL BR vs BluRay): o dublado tem uma edição de 2 frames numa
 junção de intervalo comercial (offset muda ~70 ms no meio do episódio) que o
 vídeo a 4 fps não enxerga; o corte tem que ser detectado e cair num silêncio.
 """
@@ -107,7 +107,7 @@ def test_substituida_com_audio_continuo_vira_match(tmp_path):
 
 
 def test_substituida_com_vizinho_na_grade_do_video(tmp_path):
-    """Caso real Mr Robot S01E03 14:20: o vizinho diz offset -5,00 (grade de
+    """Caso real de campo (S01E03 aos 14:20): o vizinho diz offset -5,00 (grade de
     0,25 s do vídeo) mas o áudio real está em -5,14. A 'substituída' tem que
     ser comparada com o offset REAL do vizinho, não com o da grade — senão os
     41 ms de sobra estouram a tolerância e o falso positivo vai para revisão."""

@@ -92,7 +92,7 @@ def align_pair(dub_path: str, orig_path: str, episode: str = "?",
     # Esticar a diagonal (curto x metade) parece inocente, mas com 41 min
     # contra 49 min a inclinação 1,2 leva o centro da banda 8 min longe da
     # posição real no fim do episódio — o rabo do E01 e o começo do E02 saíam
-    # da banda e viravam lixo (caso real Mr Robot S02E01/E02). Localizador
+    # da banda e viravam lixo (caso real de campo, S02E01/E02 fundidos). Localizador
     # grosseiro primeiro: a diagonal mais votada é onde o episódio está; recap
     # (cenas do OUTRO episódio) vota espalhado e não compete.
     off0, frac = fingerprint.coarse_offset(short_h, long_h)

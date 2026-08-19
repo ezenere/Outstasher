@@ -214,7 +214,7 @@ def _fold(text: str) -> str:
     """_clean + sem acentos, para comparar títulos ('Tóquio' == 'Toquio').
 
     O "_" vira espaço: para o Python ele é caractere de PALAVRA, então `\\W+`
-    não separa por ele e 'Ex_Machina' (grafia que o TMDB usa) viraria um token
+    não separa por ele e 'Filme_Exemplo' (grafia com sublinhado que o TMDB às vezes usa) viraria um token
     único que nenhum torrent contém. Trackers e TMDB trocam "_", "." e "-" por
     espaço livremente — aqui todos viram separador.
     """
@@ -223,8 +223,8 @@ def _fold(text: str) -> str:
     return stripped.replace("_", " ")
 
 
-# sequências de franquia: TMDB costuma usar romano ("De Volta para o Futuro II")
-# e os releases BR usam arábico ("De Volta para o Futuro 2"). Estas funções
+# sequências de franquia: TMDB costuma usar romano ("Filme Exemplo II")
+# e os releases BR usam arábico ("Filme Exemplo 2"). Estas funções
 # alimentam tanto o matching (equiparar II==2) quanto as buscas extras.
 _ROMAN = {"i": "1", "ii": "2", "iii": "3", "iv": "4", "v": "5", "vi": "6",
           "vii": "7", "viii": "8", "ix": "9", "x": "10", "xi": "11",
@@ -247,18 +247,18 @@ def _matches_movie(title: str, movie_title: str, year: str) -> bool:
     """Confere se o resultado parece ser do filme certo (todas as palavras do titulo).
 
     - Numerais romanos e arábicos são equiparados (II == 2), então
-      'De Volta para o Futuro 2' casa com 'De Volta para o Futuro II'.
-    - Números do título CONTAM (o '9' de 'Velozes & Furiosos 9' é obrigatório,
+      'Filme Exemplo 2' casa com 'Filme Exemplo II'.
+    - Números do título CONTAM (o '9' de 'Franquia & Exemplo 9' é obrigatório,
       senão a franquia inteira casa) e são comparados como PALAVRA inteira —
       substring casaria o '9' de '2019'/'x265', e o 'f9' do hash 'F98D9609'.
-    - Palavras só de letras seguem por substring ('spider' casa 'spiderman').
+    - Palavras só de letras seguem por substring ('super' casa 'superstar').
     """
     folded = _roman_to_arabic(_fold(title))
     words = [w for w in re.split(r"\W+", _roman_to_arabic(_fold(movie_title)))
              if len(w) > 1 or w.isdigit()]
     for w in words:
         if any(ch.isdigit() for ch in w):
-            # numero (9, 007) ou palavra com digito (f9, u2): palavra inteira
+            # numero (9, 42) ou palavra com digito (f9, u2): palavra inteira
             if not re.search(rf"(?<![0-9a-z]){re.escape(w)}(?![0-9a-z])", folded):
                 return False
         elif w not in folded:
@@ -274,8 +274,8 @@ def matches_title(title: str, movie_title: str) -> bool:
 def title_variants(title: str, include_and: bool = True) -> list[str]:
     """Variantes de grafia de caracteres especiais para buscas adicionais.
 
-    Trackers grafam o mesmo filme de formas diferentes: "Velozes & Furiosos"
-    vs "Velozes e Furiosos", "M*A*S*H" vs "MASH", "WALL·E" vs "WALL-E".
+    Trackers grafam o mesmo filme de formas diferentes: "Franquia & Exemplo"
+    vs "Franquia Exemplo", "A*B*C" vs "ABC", "ROBO·X" vs "ROBO-X".
     Gera as variações trocando/removendo esses caracteres. Retorna só as
     variantes DIFERENTES do título original, sem duplicatas.
 
@@ -329,7 +329,7 @@ STRONG_MARKER_BONUS = 25
 
 # Modo audio: o ANO do filme no nome do release tem preferência ABSOLUTA.
 # Releases dublados muitas vezes vêm sem o ano, e título sem ano é ambíguo:
-# pode ser outro filme da franquia ("Guardiões da Galáxia" casa com Vol. 2 e 3)
+# pode ser outro filme da franquia (título de franquia casa com todas as sequências)
 # ou remake com o mesmo nome — o _matches_movie não distingue. Com o ano a
 # identificação é confiável, então TODOS os releases com ano vêm antes de
 # qualquer um sem ano; o score só ordena dentro de cada grupo.

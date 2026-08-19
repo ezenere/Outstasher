@@ -708,13 +708,18 @@ async def series_torrent_candidates(job_id: str, n: int):
 
 @app.post("/api/jobs/{job_id}/resolve")
 async def resolve_job_gate(job_id: str, req: ResolveRequest):
-    """Resolve o gate ativo de um job de série (decisões sempre do usuário)."""
+    """Resolve o gate ativo de um job (decisões sempre do usuário). Séries:
+    todos os gates; filmes: só a revisão do alinhamento avançado."""
     try:
-        job = await series_pipeline.resolve(job_id, req.reason, req.decision)
+        cur = jobs.get_job(job_id)
+        if cur and cur.get("media_type") != "tv":
+            job = await jobs.resolve_review(job_id, req.reason, req.decision)
+        else:
+            job = await series_pipeline.resolve(job_id, req.reason, req.decision)
     except ValueError as e:
         raise HTTPException(409, str(e))
     if not job:
-        raise HTTPException(404, "Job não encontrado (ou não é de série)")
+        raise HTTPException(404, "Job não encontrado")
     return job
 
 
@@ -771,12 +776,17 @@ async def job_frame(job_id: str, episode: str, side: str = "a", t: float = 0.0):
     side: "a" = dublado, "b" = original. `t` em segundos NO ARQUIVO pedido.
     """
     job = jobs.get_job(job_id)
-    if not job or job.get("media_type") != "tv":
-        raise HTTPException(404, "Job de série não encontrado")
-    ep = (job.get("episodes") or {}).get(episode)
-    if not ep:
-        raise HTTPException(404, f"Episódio {episode} não existe neste job")
-    src = (ep.get("src") or {}).get("dubbed" if side == "a" else "original")
+    if not job:
+        raise HTTPException(404, "Job não encontrado")
+    if job.get("media_type") == "tv":
+        ep = (job.get("episodes") or {}).get(episode)
+        if not ep:
+            raise HTTPException(404, f"Episódio {episode} não existe neste job")
+        src = (ep.get("src") or {}).get("dubbed" if side == "a" else "original")
+    else:
+        # filme no alinhamento avançado: os dois arquivos ficam em job["advanced"]
+        adv = job.get("advanced") or {}
+        src = adv.get("audio_file" if side == "a" else "video_file")
     if not src or not Path(src).is_file():
         raise HTTPException(404, "Arquivo de origem não está mais no disco")
 
@@ -823,10 +833,17 @@ async def select_job(job_id: str, req: SelectRequest):
     return job
 
 
+class ProceedRequest(BaseModel):
+    mode: str = "offset"   # offset (offset do início) | advanced (EDL por conteúdo)
+
+
 @app.post("/api/jobs/{job_id}/proceed")
-async def proceed_job(job_id: str):
+async def proceed_job(job_id: str, req: ProceedRequest | None = None):
     """Continua a conversão pausada por suspeita de versão/corte diferente."""
-    job = await jobs.proceed(job_id)
+    mode = (req.mode if req else "offset")
+    if mode not in ("offset", "advanced"):
+        raise HTTPException(400, f"mode inválido: {mode}")
+    job = await jobs.proceed(job_id, mode)
     if not job:
         raise HTTPException(409, "Job não está aguardando confirmação de conversão")
     return job

@@ -9,6 +9,7 @@ import { api } from '../api'
 import { Badge, CandidatesTable, ClampText, Collapsible, Elapsed, Empty, KindTags, MergeBar, ProgressBar } from '../components/ui'
 import { useDialog } from '../components/Dialog'
 import { SeriesEpisodes, SeriesGate, SeriesReport, SeriesTorrents } from '../components/SeriesJobSections'
+import AlignmentReview from '../components/AlignmentReview'
 import { jobTitle, removeJob } from './Jobs'
 
 export default function JobDetail() {
@@ -130,12 +131,13 @@ export default function JobDetail() {
     }
   }
 
-  // pausa de drift: converte mesmo com offsets divergentes (possível outra versão)
-  async function proceedAnyway() {
+  // pausa de drift: converte mesmo com offsets divergentes (possível outra
+  // versão) ou roda o alinhamento avançado (EDL por conteúdo, o das séries)
+  async function proceedAnyway(mode: 'offset' | 'advanced' = 'offset') {
     if (!job || submitting) return
     setSubmitting(true)
     try {
-      await post(`/api/jobs/${job.id}/proceed`)
+      await post(`/api/jobs/${job.id}/proceed`, { mode })
       void reload()
     } catch (e) {
       await dialog.alert({ title: 'Erro', message: (e as Error).message })
@@ -279,6 +281,10 @@ export default function JobDetail() {
       {/* relatório final da série (com recriação das falhas) */}
       {job.media_type === 'tv' && <SeriesReport job={job} />}
 
+      {job.media_type !== 'tv' && job.status === 'awaiting' && job.awaiting?.reason === 'alignment_review' && (
+        <AlignmentReview job={job} onResolved={reload} />
+      )}
+
       {job.status === 'awaiting' && job.drift_confirm && (
         <section className="mt-6 rounded-xl border border-amber-900/60 bg-amber-950/20 p-4">
           <h2 className="mb-2 flex items-center gap-1.5 font-semibold text-amber-300">
@@ -290,18 +296,51 @@ export default function JobDetail() {
             <span className="tabular-nums">{job.drift_confirm.tau2_ms.toFixed(0)} ms</span>) do filme — o áudio
             pode dessincronizar. Conversão pausada.
           </p>
-          <button
-            onClick={proceedAnyway}
-            disabled={submitting}
-            className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-zinc-950 hover:bg-amber-500 disabled:opacity-50"
-          >
-            <Play width={15} height={15} /> Continuar mesmo assim
-          </button>
-          {job.search && (
-            <p className="mt-2 text-xs text-zinc-500">
-              Ou escolha outro torrent abaixo, ou cancele o job.
-            </p>
+          {job.drift_confirm.profile ? (
+            <div className="mt-3 text-xs text-zinc-400">
+              <div className="mb-1">
+                Perfil do offset a cada 5 min:{' '}
+                <span className="font-semibold text-zinc-200">
+                  {{
+                    drift: 'drift — muda aos poucos (velocidade/frame rate)',
+                    cut: 'corte — salto entre patamares (cena/junção diferente)',
+                    flat: 'constante nas janelas medidas',
+                    mixed: 'misto',
+                    unknown: 'poucas janelas para dizer',
+                  }[job.drift_confirm.verdict ?? 'unknown']}
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {job.drift_confirm.profile.map((p) => (
+                  <span key={p.t} className="rounded bg-zinc-800/80 px-1.5 py-0.5 tabular-nums">
+                    {Math.round(p.t / 60)}min {p.offset_ms >= 0 ? '+' : ''}{p.offset_ms.toFixed(0)}ms
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <p className="mt-2 text-xs text-zinc-500">Medindo o offset ao longo do filme…</p>
           )}
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              onClick={() => proceedAnyway('advanced')}
+              disabled={submitting}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-zinc-950 hover:bg-amber-500 disabled:opacity-50"
+            >
+              <Play width={15} height={15} /> Rodar alinhamento avançado
+            </button>
+            <button
+              onClick={() => proceedAnyway('offset')}
+              disabled={submitting}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-amber-700/60 px-4 py-2 text-sm font-semibold text-amber-200 hover:bg-amber-900/30 disabled:opacity-50"
+            >
+              Continuar com o offset do início
+            </button>
+          </div>
+          <p className="mt-2 text-xs text-zinc-500">
+            O avançado é o alinhador das séries (por conteúdo, com EDL e revisão): resolve cena/junção
+            diferente no mesmo corte.{job.search ? ' Ou escolha outro torrent abaixo, ou cancele o job.' : ''}
+          </p>
         </section>
       )}
 

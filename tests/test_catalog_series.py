@@ -25,20 +25,20 @@ def _dest(temp_db, tmp_path, media: str = "movie") -> int:
 
 def test_list_items_detecta_serie(temp_db, tmp_path):
     dest_id = _dest(temp_db, tmp_path)
-    _make_series(tmp_path, "Breaking Bad (2008) [tmdbid-1396]", {1: [1, 2]})
+    _make_series(tmp_path, "Serie Exemplo (2008) [tmdbid-4242]", {1: [1, 2]})
     (tmp_path / "Um Filme (2020)").mkdir()
     ((tmp_path / "Um Filme (2020)") / "Um Filme (2020) [pt+orig].mkv").write_bytes(b"x")
 
     items = {i["folder"]: i for i in catalog.list_items(dest_id)["items"]}
-    assert items["Breaking Bad (2008) [tmdbid-1396]"]["type"] == "series"
+    assert items["Serie Exemplo (2008) [tmdbid-4242]"]["type"] == "series"
     assert items["Um Filme (2020)"]["type"] == "movie"
 
 
 def test_item_detail_agrupa_por_temporada(temp_db, tmp_path):
     dest_id = _dest(temp_db, tmp_path)
-    _make_series(tmp_path, "Breaking Bad (2008) [tmdbid-1396]",
+    _make_series(tmp_path, "Serie Exemplo (2008) [tmdbid-4242]",
                  {1: [1, 2], 2: [1]})
-    d = catalog.item_detail(dest_id, "Breaking Bad (2008) [tmdbid-1396]")
+    d = catalog.item_detail(dest_id, "Serie Exemplo (2008) [tmdbid-4242]")
     assert d["type"] == "series"
     seasons = {sg["season"]: [f["rel"] for f in sg["files"]] for sg in d["seasons"]}
     assert sorted(seasons) == [1, 2]
@@ -50,15 +50,15 @@ def test_owned_episodes_por_tmdbid_e_por_titulo(temp_db, tmp_path):
     # o índice de séries só olha destinos de SÉRIES (bibliotecas separadas)
     dest_id = _dest(temp_db, tmp_path, media="tv")
     assert dest_id
-    _make_series(tmp_path, "Breaking Bad (2008) [tmdbid-1396]",
+    _make_series(tmp_path, "Serie Exemplo (2008) [tmdbid-4242]",
                  {1: [1, 2, 3], 2: [5]})
     catalog.invalidate_library()
 
     # por id (pasta marcada)
-    owned = catalog.owned_episodes(1396, None, None)
+    owned = catalog.owned_episodes(4242, None, None)
     assert owned == {1: [1, 2, 3], 2: [5]}
     # por título normalizado + ano (fallback sem id)
-    owned = catalog.owned_episodes(None, "breaking bad", "2008")
+    owned = catalog.owned_episodes(None, "serie exemplo", "2008")
     assert owned == {1: [1, 2, 3], 2: [5]}
     # série que não existe
     assert catalog.owned_episodes(999, "Outra Série", None) == {}

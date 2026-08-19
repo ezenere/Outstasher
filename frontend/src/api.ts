@@ -466,7 +466,14 @@ export interface Job {
   events?: JobEvent[]
   /** Presente quando a conversão pausou por offsets divergentes (possível
    *  versão/corte diferente) e espera o usuário clicar em Continuar. */
-  drift_confirm?: { video_file: string; audio_file: string; tau1_ms: number; tau2_ms: number } | null
+  drift_confirm?: {
+    video_file: string; audio_file: string; tau1_ms: number; tau2_ms: number
+    /** offset medido a cada 5 min (mesmo scanner das séries) e a forma do
+     *  perfil: drift (muda aos poucos) | cut (salto entre patamares) | flat |
+     *  mixed | unknown; ausentes enquanto o perfil ainda está sendo medido */
+    profile?: { t: number; offset_ms: number; quality: number }[]
+    verdict?: 'drift' | 'cut' | 'flat' | 'mixed' | 'unknown'
+  } | null
   /** Conversão manual (mode 'files'): os dois arquivos locais de origem. */
   manual_files?: { video: string; audio: string } | null
   // ---- campos de job de SÉRIE (media_type 'tv') ----
