@@ -17,7 +17,40 @@ from services.jobs.runtime import (
     _set, _tag, poll_interval)
 
 
+async def _drop_tagged(job: dict, kind: str):
+    """Tira a tag deste papel de todo torrent que ainda a carrega e apaga os
+    que não servem a OUTRO papel (release dual áudio serve aos dois: perde só
+    a tag). Usado quando o torrent do papel é substituído — pela troca durante
+    o download ou por uma nova escolha depois da pausa."""
+    tag = _tag(job, kind)
+    torrents = await runtime._qbit.info_by_tag(tag)
+    if not torrents:
+        return
+    shared: set[str] = set()
+    for other in _needed_torrents(job):
+        if other != kind:
+            shared |= {t.get("hash") for t in
+                       await runtime._qbit.info_by_tag(_tag(job, other))}
+    for t in torrents:
+        h = t.get("hash")
+        if not h:
+            continue
+        await runtime._qbit.remove_tag(h, tag)
+        if h not in shared:
+            await runtime._qbit.delete(h, delete_files=True)
+            _event(job, "qbit", f"Torrent anterior de {kind} descartado: {t.get('name')}")
+
+
 async def _start_download(job: dict, a: dict | None, v: dict | None):
+    # nova escolha depois de já ter havido uma (pausa de drift, seleção manual
+    # refeita): o torrent anterior de cada papel TROCADO sai do qBittorrent —
+    # senão ele fica com a tag do job e o watchdog continua lendo o progresso
+    # dele, e a UI nunca mostra o novo
+    for kind, cand in (("video", v), ("audio", a)):
+        cur = (job.get("current") or {}).get(kind)
+        if cand and cur and cur.get("id") != cand.get("id"):
+            await _drop_tagged(job, kind)
+
     if a:
         _event(job, "chosen", f"🔊 Áudio: {a['title']} (score {a['score']}, "
                               f"{a['seeders']} seeds, corte {a['edition'] or 'normal'})")
@@ -252,8 +285,9 @@ async def _replace_torrent(job: dict, kind: str, current: dict | None, nxt: dict
     """Substitui o torrent ativo de `kind` por `nxt` (watchdog ou troca manual).
 
     `current` é o torrent como reportado pelo qBittorrent (pode ser None se ele
-    nem chegou a aparecer). O candidato substituído volta para o FIM da lista
-    de reservas — dá para tentar de novo mais tarde.
+    nem chegou a aparecer) — quem sai de fato é definido pela TAG, não por ele.
+    O candidato substituído volta para o FIM da lista de reservas — dá para
+    tentar de novo mais tarde.
     """
     if not job.get("fallbacks"):
         job["fallbacks"] = {}
@@ -264,24 +298,11 @@ async def _replace_torrent(job: dict, kind: str, current: dict | None, nxt: dict
         job["fallbacks"][kind].append(cur_cand)
 
     tag = _tag(job, kind)
-    # tira a tag de TUDO que ainda a carrega, não só do `current` que o
-    # chamador viu: se sobrar um torrent antigo com a tag, o watchdog pode
-    # continuar lendo o progresso dele e a UI nunca mostra o novo
-    stale = {t["hash"]: t for t in await runtime._qbit.info_by_tag(tag)}
-    if current and current.get("hash"):
-        stale.setdefault(current["hash"], current)
-    if stale:
-        # torrent que serve aos DOIS papéis (dual áudio) não é apagado: só
-        # perde esta tag e continua valendo para o outro papel
-        other = "audio" if kind == "video" else "video"
-        shared: set[str] = set()
-        if other in _needed_torrents(job):
-            shared = {t.get("hash") for t in
-                      await runtime._qbit.info_by_tag(_tag(job, other))}
-        for h in stale:
-            await runtime._qbit.remove_tag(h, tag)
-            if h not in shared:
-                await runtime._qbit.delete(h, delete_files=True)
+    # limpa a tag inteira (não só o `current` que o chamador viu): torrent
+    # antigo que sobra com a tag mantém a UI presa no download velho. Só o que
+    # CARREGA a tag é apagado — um torrent que já a perdeu não é mais deste
+    # papel, e apagá-lo poderia derrubar o download do outro
+    await _drop_tagged(job, kind)
     save_path = job.get("torrent_save_path") or config.QBIT_SAVE_PATH or None
     await runtime._qbit.add(nxt.get("magnet") or nxt["link"], tag, save_path)
 

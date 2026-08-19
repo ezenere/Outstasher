@@ -159,3 +159,62 @@ def test_troca_preserva_torrent_compartilhado_com_o_outro_papel(temp_db, monkeyp
         assert qbit.untagged == [("dual", "dl-sw1-audio")]
         assert qbit.deleted == []               # continua sendo o vídeo
     asyncio.run(go())
+
+
+def test_watchdog_nao_apaga_torrent_dual_audio(temp_db, monkeypatch):
+    """Watchdog trocando o áudio travado de um release DUAL (mesmo torrent nos
+    dois papéis): ele perde só a tag de áudio — apagá-lo derrubaria o vídeo."""
+    from services.jobs import downloads
+    job = _job()
+    jobs._jobs["sw1"] = job
+
+    class Dual(FakeQbit):
+        async def info_by_tag(self, tag):
+            return [{"hash": "dual", "name": "release dual áudio"}]
+
+    qbit = Dual()
+    monkeypatch.setattr(jobs.runtime, "_qbit", qbit)
+    travado = {"hash": "dual", "name": "release dual áudio"}
+    nxt = {"id": "a9", "title": "outro áudio", "seeders": 3, "size": 1,
+           "score": 1, "edition": None, "magnet": "magnet:?xt=urn:btih:a9"}
+
+    asyncio.run(downloads._replace_torrent(job, "audio", travado, nxt, "troca"))
+    assert qbit.untagged == [("dual", "dl-sw1-audio")]
+    assert qbit.deleted == []
+
+
+def test_escolher_outro_na_pausa_descarta_o_torrent_anterior(temp_db, monkeypatch):
+    """Caso real: na pausa de drift o usuário escolhe outro torrent na lista.
+    O anterior (já 100%) ficava no qBittorrent COM a tag do job — a UI seguia
+    presa nele. Agora sai; o papel que não mudou fica intacto."""
+    from services.jobs import downloads
+    job = _job(status="awaiting")
+    job["kind"] = "both"
+    job["search"] = {
+        "video": [{"id": "v0", "title": "vídeo escolhido", "seeders": 5, "size": 1,
+                   "score": 1, "edition": None, "magnet": "magnet:?xt=urn:btih:v0"}],
+        "audio": [{"id": "a1", "title": "áudio novo", "seeders": 4, "size": 1,
+                   "score": 1, "edition": None, "magnet": "magnet:?xt=urn:btih:a1"}],
+    }
+    job["current"] = {"video": job["search"]["video"][0],
+                      "audio": {"id": "a0", "title": "áudio velho", "seeders": 1,
+                                "size": 1, "score": 1, "edition": None,
+                                "magnet": "magnet:?xt=urn:btih:a0"}}
+    jobs._jobs["sw1"] = job
+
+    class PorPapel(FakeQbit):
+        async def info_by_tag(self, tag):
+            if tag.endswith("audio"):
+                return [{"hash": "audio_velho", "name": "áudio velho"}]
+            return [{"hash": "video_ok", "name": "vídeo escolhido"}]
+
+    qbit = PorPapel()
+    monkeypatch.setattr(jobs.runtime, "_qbit", qbit)
+
+    asyncio.run(downloads._start_download(job, job["search"]["audio"][0],
+                                          job["search"]["video"][0]))
+    # o áudio anterior saiu (tag + torrent); o vídeo, que não mudou, ficou
+    assert qbit.untagged == [("audio_velho", "dl-sw1-audio")]
+    assert qbit.deleted == ["audio_velho"]
+    assert sorted(u for u, _ in qbit.added) == ["magnet:?xt=urn:btih:a1",
+                                                "magnet:?xt=urn:btih:v0"]

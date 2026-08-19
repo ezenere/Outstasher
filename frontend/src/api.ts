@@ -479,6 +479,8 @@ export interface Job {
     profile?: { t: number; offset_ms: number; quality: number }[]
     verdict?: 'drift' | 'cut' | 'flat' | 'mixed' | 'unknown'
   } | null
+  /** Candidato ativo por papel (o que está no qBittorrent agora). */
+  current?: { video?: Candidate | null; audio?: Candidate | null } | null
   /** Conversão manual (mode 'files'): os dois arquivos locais de origem. */
   manual_files?: { video: string; audio: string } | null
   // ---- campos de job de SÉRIE (media_type 'tv') ----

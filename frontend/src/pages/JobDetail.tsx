@@ -120,6 +120,17 @@ export default function JobDetail() {
         confirmText: 'Continuar', tone: 'danger',
       }))) return
     }
+    // já houve uma escolha antes (pausa de drift, troca de versão): o torrent
+    // anterior de cada papel trocado sai do qBittorrent, com os dados
+    const trocados = [
+      a && job.current?.audio && job.current.audio.id !== a.id ? 'áudio' : null,
+      v && job.current?.video && job.current.video.id !== v.id ? 'vídeo' : null,
+    ].filter(Boolean)
+    if (trocados.length && !(await dialog.confirm({
+      title: 'Descartar o download anterior',
+      message: `O torrent atual de ${trocados.join(' e ')} será removido do qBittorrent (com os arquivos baixados) e substituído pelo escolhido. Continuar?`,
+      confirmText: 'Continuar', tone: 'danger',
+    }))) return
     setSubmitting(true)
     try {
       await post(`/api/jobs/${job.id}/select`, {
