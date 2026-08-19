@@ -318,9 +318,9 @@ export default function JobDetail() {
                 ))}
               </div>
             </div>
-          ) : (
+          ) : /Medindo/.test(job.detail ?? '') ? (
             <p className="mt-2 text-xs text-zinc-500">Medindo o offset ao longo do filme…</p>
-          )}
+          ) : null}
           <div className="mt-3 flex flex-wrap gap-2">
             <button
               onClick={() => proceedAnyway('advanced')}
