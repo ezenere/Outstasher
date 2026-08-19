@@ -34,7 +34,7 @@ baixa o release na qualidade original (fluxo normal deles). O Outstasher:
   eventos).
 
 ## Alinhamento
-- [ ] Fronteiras de corte vindas do vídeo ainda ficam na grade de 0,25 s —
+- [x] Fronteiras de corte vindas do vídeo ainda ficam na grade de 0,25 s —
   bissecção por áudio + snap no silêncio em todas, não só na junção "dublado a
   mais".
 - [ ] Rótulo do "miolo X/64" em plano escuro/parado: dizer "hash pouco confiável"

@@ -155,9 +155,86 @@ def test_juncao_com_dublado_a_mais_nao_puxa_original(tmp_path):
     ]
     logs = []
     out = refine._tighten_extra_dub(segs, str(dub), 0, log=logs.append)
-    assert [s.kind for s in out] == ["match", "match"]
-    a, b = out
+    # o gap fica no EDL (descreve o que saiu do dublado), com b colapsado
+    assert [s.kind for s in out] == ["match", "gap_dub", "match"]
+    a, g, b = out
+    assert g.b_start == g.b_end == a.b_end
     assert abs(a.a_end - 30.1) < 0.4          # corte no silêncio 29.8-30.4
     assert abs(b.a_start - (a.a_end + 0.6)) < 1e-6  # pula o excesso do dublado
     assert abs(b.b_start - a.b_end) < 1e-6    # original contínuo
     assert any("junção" in l for l in logs)
+
+
+def _dub_with_scene_cut(orig_wav, path, cut_at, drop):
+    """'Dublado' = o áudio original com [cut_at, cut_at+drop) REMOVIDO — a
+    cena existe só no original (censura/edição de TV)."""
+    return _dub_with_edit(orig_wav, path, cut_at=cut_at, drop=drop)
+
+
+def test_juncao_de_cena_cortada_sai_da_grade_do_video(tmp_path):
+    """[match][gap_orig][match]: a fronteira vinha crua do vídeo (grade de
+    0,25 s — aqui, de propósito, 2,2 s fora). O áudio bissecta a junção e o
+    corte cai no silêncio ao lado do ponto real; os lados b seguem os offsets
+    medidos, então o preenchimento se ajusta sozinho."""
+    orig = _audio(tmp_path / "orig.wav", 60, seed=11,
+                  gaps=[(29.9, 30.2), (40.2, 40.5), (12.0, 12.3), (50.0, 50.3)])
+    dub = _dub_with_scene_cut(orig, tmp_path / "dub.wav", cut_at=30.2, drop=10.0)
+    segs = [
+        Segment("match", 0.0, 28.0, 0.0, 28.0, offset=0.0),
+        Segment("gap_orig", 28.0, 28.0, 28.0, 38.0),
+        Segment("match", 28.0, 49.5, 38.0, 59.5, offset=10.0),
+    ]
+    logs = []
+    out = refine.refine_offsets(segs, str(dub), 0, str(orig), 0, log=logs.append)
+    matches = [x for x in out if x.kind == "match"]
+    gaps = [x for x in out if x.kind == "gap_orig" and (x.b_end - x.b_start) > 1]
+    assert len(matches) == 2 and len(gaps) == 1, [(x.kind, x.a_start, x.a_end) for x in out]
+    a, g, b = matches[0], gaps[0], matches[1]
+    # o corte saiu de 28,0 (vídeo) para o silêncio junto do ponto real (30,2)
+    assert 29.8 <= a.a_end <= 30.6, a.a_end
+    assert b.a_start == a.a_end
+    # lados b derivados dos offsets MEDIDOS: preenchimento de ~10 s
+    assert abs(a.b_end - (a.a_end + a.offset)) < 1e-6
+    assert abs(b.b_start - (b.a_start + b.offset)) < 1e-6
+    assert (g.b_start, g.b_end) == (a.b_end, b.b_start)
+    assert 9.5 <= g.b_end - g.b_start <= 10.5, (g.b_start, g.b_end)
+    assert any("junção de cena cortada" in l for l in logs), logs
+
+
+def test_bordas_de_recap_no_meio_encaixam_no_silencio(tmp_path):
+    """[match][gap_dub grande][match] (recap no meio): o corte sai da grade do
+    vídeo para o silêncio do dub e o ORIGINAL fica contínuo — o recap inteiro
+    é pulado dentro do silêncio, sem buraco nem sobreposição em b."""
+    orig = _audio(tmp_path / "orig.wav", 40, seed=21,
+                  gaps=[(19.8, 20.15), (8.0, 8.3), (33.0, 33.3)])
+    recap = _audio(tmp_path / "recap.wav", 15, seed=99,
+                   gaps=[(0.0, 0.25), (14.75, 15.0)])
+    dub = tmp_path / "dub.wav"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-i", str(orig), "-i", str(recap),
+         "-filter_complex",
+         "[0:a]atrim=0:20,asetpts=PTS-STARTPTS[p1];"
+         "[0:a]atrim=20,asetpts=PTS-STARTPTS[p2];"
+         "[p1][1:a][p2]concat=n=3:v=0:a=1[a]",
+         "-map", "[a]", "-c:a", "pcm_s16le", str(dub)], check=True)
+    segs = [
+        Segment("match", 0.0, 20.25, 0.0, 20.25, offset=0.0),
+        Segment("gap_dub", 20.25, 34.75, 20.25, 20.25),
+        Segment("match", 34.75, 54.75, 19.75, 39.75, offset=-15.0),
+    ]
+    out = refine.refine_offsets(segs, str(dub), 0, str(orig), 0,
+                                log=lambda m: None)
+    a = next(x for x in out if x.kind == "match" and x.a_start < 5)
+    g = next(x for x in out if x.kind == "gap_dub")
+    b = next(x for x in out if x.kind == "match" and x.a_start > 25)
+    # o corte saiu do 20,25 do vídeo para o silêncio [19,8-20,15]
+    assert 19.8 <= a.a_end <= 20.2, a.a_end
+    # e o outro lado retoma exatamente depois do recap (15 s de dublado)
+    assert abs(b.a_start - (a.a_end + 15.0)) < 0.3, (a.a_end, b.a_start)
+    # ORIGINAL contínuo: sem buraco (preenchido com inglês) nem sobreposição
+    assert abs(b.b_start - a.b_end) < 1e-6, (a.b_end, b.b_start)
+    assert abs(a.b_end - (a.a_end + a.offset)) < 1e-6
+    # o gap continua no EDL, descrevendo o que foi descartado do dublado
+    assert g.a_start == a.a_end and abs(g.a_end - b.a_start) < 1e-6
+    assert g.b_start == g.b_end == a.b_end

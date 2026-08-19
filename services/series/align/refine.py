@@ -208,9 +208,15 @@ def _silences(dub_path: str, dub_a: int, t0: float, t1: float) -> list[tuple[flo
     return out
 
 
-def _snap_to_silence(dub_path, dub_a, t: float, log) -> float:
-    """Ponto de corte -> meio do silêncio mais próximo (até SILENCE_SNAP_S)."""
-    sil = _silences(dub_path, dub_a, t - SILENCE_SNAP_S, t + SILENCE_SNAP_S)
+def _snap_to_silence(dub_path, dub_a, t: float, log,
+                     radius: float = SILENCE_SNAP_S) -> float:
+    """Ponto de corte -> meio do silêncio mais próximo (até `radius`).
+
+    O raio depende de quem chama: cortes onde o conteúdo dos dois lados é o
+    mesmo (junção de intervalo, divisão por perfil) aceitam silêncio longe
+    (qualquer um serve); fronteiras de CONTEÚDO (cena substituída, recap)
+    usam raio curto — o silêncio errado deslocaria material de verdade."""
+    sil = _silences(dub_path, dub_a, t - radius, t + radius)
     if not sil:
         log(f"  corte em {t:.2f}s sem silêncio por perto — mantido")
         return t
@@ -487,19 +493,24 @@ def _merge_adjacent(segs: list[Segment]) -> list[Segment]:
     return out
 
 
-EXTRA_DUB_MAX_S = 3.0   # gap "só no dublado" até isto entre matches é junção
-EXTRA_DUB_TOL_S = 0.5   # ... quando a mudança de offset explica o gap
+EXTRA_DUB_MAX_S = 180.0    # gap "só no dublado" entre matches: junção ou recap
+EXTRA_DUB_TOL_S = 0.5      # ... quando a mudança de offset explica o gap
+EXTRA_DUB_TOL_FRAC = 0.02  # ... com folga proporcional em gaps longos
 
 
 def _tighten_extra_dub(segs: list[Segment], dub_path, dub_a, log) -> list[Segment]:
-    """[match A][gap_dub curto][match B] com A.offset - B.offset ~ tamanho do
-    gap = o DUBLADO tem material a mais (respiro/repetição numa junção); no
+    """[match A][gap_dub][match B] com A.offset - B.offset ~ tamanho do gap
+    = o DUBLADO tem material a mais (respiro/repetição numa junção); no
     original a cena segue direto, sem buraco. Então: o corte no dublado vai
     para o SILÊNCIO mais próximo, a fatia seguinte retoma exatamente onde a
     anterior parou no original (b contínuo) e o excesso do dublado é pulado
     dentro do silêncio. Antes, as fronteiras quantizadas do vídeo (0,25 s)
     deixavam um buraco de ~100 ms no original que era preenchido com áudio
-    ORIGINAL no meio da fala — sem nenhum motivo."""
+    ORIGINAL no meio da fala — sem nenhum motivo.
+
+    É AQUI que toda fronteira de gap_dub ENTRE dois matches se resolve: mexer
+    nas duas bordas separadamente furaria a continuidade do original, já que
+    os dois lados têm offsets diferentes."""
     out: list[Segment] = []
     i = 0
     while i < len(segs):
@@ -511,8 +522,9 @@ def _tighten_extra_dub(segs: list[Segment], dub_path, dub_a, log) -> list[Segmen
             g, nxt = segs[i + 1], segs[i + 2]
             gap = g.a_end - g.a_start
             extra = s.offset - nxt.offset  # segundos a mais no dublado
+            tol = max(EXTRA_DUB_TOL_S, EXTRA_DUB_TOL_FRAC * gap)
             if 0 < gap <= EXTRA_DUB_MAX_S and extra > 0 \
-                    and abs(extra - gap) <= EXTRA_DUB_TOL_S:
+                    and abs(extra - gap) <= tol:
                 cut = _snap_to_silence(dub_path, dub_a, s.a_end, log)
                 cut = min(max(cut, s.a_start + 0.5), nxt.a_end - extra - 0.5)
                 s.a_end = cut
@@ -521,21 +533,195 @@ def _tighten_extra_dub(segs: list[Segment], dub_path, dub_a, log) -> list[Segmen
                 nxt.b_start = s.b_end
                 log(f"  junção com {extra * 1000:.0f} ms a mais no dublado em "
                     f"{cut:.2f}s: corte no silêncio, original contínuo")
+                # o gap fica no EDL (a revisão mostra quanto do dublado foi
+                # descartado), agora com os limites certos e b colapsado —
+                # o render o ignora, porque b_start == b_end
+                g.a_start, g.a_end = cut, cut + extra
+                g.b_start = g.b_end = s.b_end
                 out.append(s)
-                out.append(nxt)
-                i += 3
+                out.append(g)
+                # só até aqui: `nxt` volta ao laço como início de uma POSSÍVEL
+                # próxima junção — num episódio elas vêm em série, e avançar 3
+                # fazia as junções dispararem alternadamente
+                i += 2
                 continue
         out.append(s)
         i += 1
     return out
 
 
+# -------------------- 5. fronteiras entre segmentos --------------------
+# Cortes DENTRO de um match já saem do áudio (perfil + bissecção + silêncio);
+# as fronteiras ENTRE segmentos vinham cruas do vídeo — grade de 0,25 s.
+
+CUT_A_CONT_S = 0.75    # dub contínuo na junção: buraco em `a` até isto
+CUT_BRACKET_S = 4.0    # colchete da bissecção em volta da junção do vídeo
+CUT_WIN_S = 3.0        # janela curta das medições de presença
+CUT_SNAP_S = 1.5       # silêncio até isto do ponto bissectado
+EDGE_SNAP_S = 1.0      # borda de conteúdo (recap/substituída): raio curto
+EDGE_MIN_MATCH_S = 1.5 # match menor que isto não tem borda para mexer
+
+
+def _bisect_junction(dub_path, dub_a, orig_path, orig_a,
+                     t_lo: float, t_hi: float,
+                     off_a: float, off_b: float) -> float | None:
+    """Ponto (tempo `a`) onde o dub deixa de correlacionar em off_a e passa a
+    correlacionar em off_b — a junção de uma cena CORTADA do dublado, onde o
+    áudio dublado é contínuo e só o alvo no original salta.
+
+    Numa janela curta centrada no palpite, mede o pico nos DOIS offsets: antes
+    do corte ganha off_a, depois ganha off_b, perto do corte empatam (a janela
+    contém os dois lados). None = música/silêncio não deixou medir nada.
+    """
+    lo, hi = t_lo, t_hi
+    decisive = False
+    for _ in range(5):
+        if hi - lo <= CUT_WIN_S / 4:
+            break
+        mid = (lo + hi) / 2
+        a0 = mid - CUT_WIN_S / 2
+        try:
+            tau_a, q_a = _measure(dub_path, dub_a, orig_path, orig_a,
+                                  a0, a0 + off_a, CUT_WIN_S)
+            tau_b, q_b = _measure(dub_path, dub_a, orig_path, orig_a,
+                                  a0, a0 + off_b, CUT_WIN_S)
+        except merger.MergeError:
+            break
+        ga = q_a >= MIN_PEAK_QUALITY and abs(tau_a) <= 0.15
+        gb = q_b >= MIN_PEAK_QUALITY and abs(tau_b) <= 0.15
+        if ga and (not gb or q_a > 2 * q_b):
+            lo = mid
+            decisive = True
+        elif gb and (not ga or q_b > 2 * q_a):
+            hi = mid
+            decisive = True
+        elif ga and gb:
+            # os dois lados fortes: a janela contém o corte — está aqui perto
+            lo = hi = mid
+            decisive = True
+            break
+        else:
+            break   # nem um nem outro (música/silêncio): sem informação
+    return (lo + hi) / 2 if decisive else None
+
+
+def _refine_cut_junctions(segs: list[Segment], dub_path, dub_a,
+                          orig_path, orig_a, log) -> list[Segment]:
+    """[match A][gap_orig][match B] com o DUB contínuo (cena cortada da versão
+    dublada): a fronteira exata em `a` vem do áudio (bissecção de presença) e
+    cai num silêncio — não na grade de 0,25 s do vídeo. Os lados b são
+    recomputados dos offsets medidos, então o preenchimento se ajusta."""
+    for i in range(1, len(segs) - 1):
+        g = segs[i]
+        if g.kind != "gap_orig":
+            continue
+        a, b = segs[i - 1], segs[i + 1]
+        if not (a.kind == "match" and b.kind == "match"
+                and a.offset is not None and b.offset is not None):
+            continue
+        if b.a_start - a.a_end > CUT_A_CONT_S:
+            continue    # o dub NÃO é contínuo aqui — não é este padrão
+        if b.offset - a.offset <= 0.2:
+            continue    # sem material extra no original: suspeito, não mexe
+        video_cut = (a.a_end + b.a_start) / 2
+        t_lo = max(a.a_start + 0.5, video_cut - CUT_BRACKET_S)
+        t_hi = min(b.a_end - 0.5, video_cut + CUT_BRACKET_S)
+        if t_hi - t_lo < CUT_WIN_S / 2:
+            continue
+        cut = _bisect_junction(dub_path, dub_a, orig_path, orig_a,
+                               t_lo, t_hi, a.offset, b.offset)
+        if cut is None:
+            cut = video_cut   # indecisivo: fica o palpite do vídeo
+        else:
+            log(f"  junção de cena cortada ~{video_cut:.1f}s: áudio localizou "
+                f"o corte em {cut:.2f}s")
+        cut = _snap_to_silence(dub_path, dub_a, cut, log, radius=CUT_SNAP_S)
+        cut = min(max(cut, a.a_start + 0.5), b.a_end - 0.5)
+        a.a_end = cut
+        a.b_end = cut + a.offset
+        b.a_start = cut
+        b.b_start = cut + b.offset
+        g.a_start = g.a_end = cut
+        g.b_start, g.b_end = a.b_end, b.b_start
+    return segs
+
+
+def _movable_edge(segs: list[Segment], i: int, side: str) -> bool:
+    """Esta borda de match pode ser deslocada sozinha?
+
+    NÃO quando o vizinho é um gap_dub ENTRE dois matches: ali o original é
+    contínuo (b_end de um == b_start do outro) e os lados têm offsets
+    diferentes, então mover uma borda só abriria buraco/sobreposição no
+    original — esse caso é do `_tighten_extra_dub`, que move as duas pontas
+    juntas. gap_dub com match de um lado só (abertura/rabo do arquivo) é
+    seguro, e `replaced` também: ali o original tem extensão própria."""
+    j = i + 1 if side == "right" else i - 1
+    if not 0 <= j < len(segs):
+        return False
+    g = segs[j]
+    if g.kind == "replaced":
+        return True
+    if g.kind != "gap_dub":
+        return False
+    k = j + 1 if side == "right" else j - 1
+    other = segs[k] if 0 <= k < len(segs) else None
+    return other is None or other.kind not in ("match", "drift", "pal")
+
+
+def _snap_gap_edges(segs: list[Segment], dub_path, dub_a,
+                    log) -> list[Segment]:
+    """Bordas de match encostadas em conteúdo divergente (cena substituída ou
+    gap_dub na ponta do arquivo): encaixa a borda no silêncio do DUB num raio
+    curto. O corte real está a
+    <= 0,25 s da grade do vídeo e quase sempre há uma respiração ali; raio
+    curto porque silêncio longe deslocaria material de verdade."""
+    for i, seg in enumerate(segs):
+        if (seg.kind != "match" or seg.offset is None
+                or seg.a_end - seg.a_start < EDGE_MIN_MATCH_S):
+            continue
+        prv = segs[i - 1] if i > 0 else None
+        nxt = segs[i + 1] if i + 1 < len(segs) else None
+        # borda direita: match -> gap_dub/replaced
+        if (nxt is not None and nxt.kind in ("gap_dub", "replaced")
+                and nxt.a_end - nxt.a_start > 0
+                and _movable_edge(segs, i, "right")):
+            c = _snap_to_silence(dub_path, dub_a, seg.a_end, log,
+                                 radius=EDGE_SNAP_S)
+            c = min(max(c, seg.a_start + 0.5), nxt.a_end - 0.1)
+            if abs(c - seg.a_end) > 1e-6:
+                seg.a_end = c
+                seg.b_end = c + seg.offset
+                nxt.a_start = c
+                if nxt.kind == "gap_dub":
+                    nxt.b_start = nxt.b_end = seg.b_end
+                else:
+                    nxt.b_start = seg.b_end
+        # borda esquerda: gap_dub/replaced -> match
+        if (prv is not None and prv.kind in ("gap_dub", "replaced")
+                and prv.a_end - prv.a_start > 0
+                and _movable_edge(segs, i, "left")):
+            c = _snap_to_silence(dub_path, dub_a, seg.a_start, log,
+                                 radius=EDGE_SNAP_S)
+            c = min(max(c, prv.a_start + 0.1), seg.a_end - 0.5)
+            if abs(c - seg.a_start) > 1e-6:
+                seg.a_start = c
+                seg.b_start = c + seg.offset
+                prv.a_end = c
+                if prv.kind == "gap_dub":
+                    prv.b_start = prv.b_end = seg.b_start
+                else:
+                    prv.b_end = seg.b_start
+    return segs
+
+
 def refine_offsets(segs: list[Segment], dub_path: str, dub_a: int,
                    orig_path: str, orig_a: int, log=print) -> list[Segment]:
     """Refino por áudio: funde wobbles do vídeo, resolve 'substituídas' cujo
     áudio é contínuo, mede o perfil de offset em cada match e divide onde há
-    edição (corte em silêncio), descarta matches espúrios e funde vizinhos
-    iguais. Retorna a lista NOVA de segmentos (a estrutura pode mudar)."""
+    edição (corte em silêncio), descarta matches espúrios, refina as
+    FRONTEIRAS entre segmentos (junção de cena cortada por bissecção; bordas
+    de recap/substituída no silêncio) e funde vizinhos iguais. Retorna a
+    lista NOVA de segmentos (a estrutura pode mudar)."""
     segs = collapse_wobbles(segs, dub_path, dub_a, orig_path, orig_a, log)
     segs = _resolve_replaced_by_audio(segs, dub_path, dub_a, orig_path, orig_a, log)
     # substituídas resolvidas podem abrir novos wobbles
@@ -556,6 +742,9 @@ def refine_offsets(segs: list[Segment], dub_path: str, dub_a: int,
     _inherit_short(out)
     out = _drop_stray_matches(out, log, dub_path, dub_a, orig_path, orig_a)
     out = _tighten_extra_dub(out, dub_path, dub_a, log)
+    # fronteiras ENTRE segmentos: também saem da grade do vídeo para o áudio
+    out = _refine_cut_junctions(out, dub_path, dub_a, orig_path, orig_a, log)
+    out = _snap_gap_edges(out, dub_path, dub_a, log)
     return _merge_adjacent(out)
 
 

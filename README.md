@@ -131,8 +131,13 @@ varia — TV/streaming e Blu-ray raramente têm a mesma montagem — entra o
 alinhador por conteúdo: crop → **dHash 4 fps** → **Needleman-Wunsch com gap
 afim** (numba) → classificação (`match`, `gap_dub`, `gap_orig`, `replaced`,
 `pal`, `drift`) → **refino por áudio** (offset real dentro de cada trecho,
-cortes encaixados em silêncio, falsos positivos do vídeo resolvidos pelo áudio)
-→ **EDL** gravada no job.
+falsos positivos do vídeo resolvidos pelo áudio) → **EDL** gravada no job.
+
+Nenhum ponto de corte fica na grade de 0,25 s do vídeo: dentro de um trecho o
+ponto vem do perfil de offset; nas junções, de bissecção por áudio — e todos
+caem num **silêncio** do dublado. Quando o dublado tem material a mais
+(respiro numa junção, recap), o original segue **contínuo**: o excesso é
+pulado dentro do silêncio, sem buraco preenchido com inglês no meio da fala.
 
 - A saída usa a timeline do original (vídeo, áudios, legendas e capítulos em
   stream copy); só a faixa dublada é remontada. Cena sem dublagem recebe o áudio
