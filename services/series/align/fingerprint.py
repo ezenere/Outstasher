@@ -56,28 +56,64 @@ def crop_params(path: str, duration: float | None = None) -> str | None:
     return crop
 
 
+# aceleradores de decode tentados, em ordem, antes do software (a chave é a
+# família do transcode: "qsv" decodifica por VAAPI, "nvenc" por CUDA)
+HW_DECODE_ORDER = ("qsv", "nvenc")
+
+
+def _hw_decode_candidates(path: str) -> list[tuple[list[str], str]]:
+    """[(args de entrada, formato de hwframe)] dos aceleradores que ABREM este
+    arquivo na GPU (probe de 1 frame, como o transcode faz)."""
+    from services import transcode
+    out = []
+    for accel in HW_DECODE_ORDER:
+        try:
+            if transcode._hw_decode_works(path, accel):
+                out.append((transcode._hw_decode_args(accel),
+                            transcode._decode_output_format(accel)))
+        except Exception:  # noqa: BLE001 — probe é best-effort
+            continue
+    return out
+
+
 def dhash_stream(path: str, crop: str | None = None,
-                 fps: float = FPS) -> np.ndarray:
+                 fps: float = FPS, use_hw: bool = True) -> np.ndarray:
     """Sequência de dHashes (uint64, um por frame amostrado) do arquivo.
 
     O ffmpeg entrega rawvideo gray 9x8; o gradiente horizontal entre vizinhos
     vira um bit por comparação. dHash olha ESTRUTURA (onde a imagem clareia da
     esquerda para a direita) — sobrevive a recoloração/brilho, que histograma
     não sobrevive.
+
+    Decode na GPU quando ela abre o arquivo (mesmos filtros em software
+    depois: os hashes saem IDÊNTICOS aos do decode por CPU — medido — com
+    metade do tempo de CPU; a variante que aplica `fps` ainda na VRAM escolhe
+    frames diferentes e foi descartada). O tempo de parede de um REMUX 4K
+    continua limitado pela leitura do disco. Falha da GPU cai para software.
     """
-    vf = []
-    if crop:
-        vf.append(f"crop={crop}")
-    vf += [f"fps={fps}", f"scale={HASH_W}:{HASH_H}:flags=area", "format=gray"]
-    cmd = ["ffmpeg", "-hide_banner", "-nostats", "-loglevel", "error",
-           "-i", path, "-vf", ",".join(vf), "-f", "rawvideo",
-           "-pix_fmt", "gray", "-"]
-    proc = subprocess.run(cmd, capture_output=True)
-    if proc.returncode != 0:
+    vf = [f"fps={fps}"] + ([f"crop={crop}"] if crop else []) + [
+        f"scale={HASH_W}:{HASH_H}:flags=area", "format=gray"]
+    attempts: list[list[str]] = []
+    if use_hw:
+        for in_args, _hwfmt in _hw_decode_candidates(path):
+            attempts.append(["ffmpeg", "-hide_banner", "-nostats", "-loglevel", "error",
+                             *in_args, "-i", path, "-vf", ",".join(vf),
+                             "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+    attempts.append(["ffmpeg", "-hide_banner", "-nostats", "-loglevel", "error",
+                     "-i", path, "-vf", ",".join(vf),
+                     "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+    raw = b""
+    err = b""
+    for cmd in attempts:
+        proc = subprocess.run(cmd, capture_output=True)
+        if proc.returncode == 0 and len(proc.stdout) >= HASH_W * HASH_H:
+            raw = proc.stdout
+            break
+        err = proc.stderr
+    if not raw:
         raise FingerprintError(
             f"ffmpeg falhou extraindo fingerprint de {path}: "
-            f"{proc.stderr[-400:].decode('utf-8', 'ignore')}")
-    raw = proc.stdout
+            f"{err[-400:].decode('utf-8', 'ignore')}")
     frame_bytes = HASH_W * HASH_H
     n = len(raw) // frame_bytes
     if n == 0:
