@@ -212,3 +212,26 @@ def test_alinhamentos_nao_rodam_em_paralelo(tmp_path, monkeypatch):
     sozinho = []
     engine.align_pair(str(base), str(other), on_wait=lambda: sozinho.append(1))
     assert sozinho == []
+
+
+def test_progresso_do_fingerprint(tmp_path):
+    """O fingerprint reporta progresso (o stdout é o dado, então a conta sai do
+    volume de frames lido): um relatório por arquivo, terminando em 100%."""
+    base = _base_video(tmp_path / "base.mkv", dur=30)
+    other = _reencoded(base, tmp_path / "reenc.mkv")
+    infos = []
+    engine.align_pair(str(base), str(other), on_progress=infos.append)
+
+    assert {i["step"] for i in infos} == {1, 2}
+    assert {i["label"] for i in infos} == {"dublado", "original"}
+    for step in (1, 2):
+        ultimo = [i for i in infos if i["step"] == step][-1]
+        assert ultimo["pct"] == 100.0, ultimo
+        # 30 s de vídeo a 4 fps = 120 frames = 30 s de posição
+        assert abs(ultimo["out_s"] - 30.0) < 1.0, ultimo
+        assert abs(ultimo["duration_s"] - 30.0) < 1.0, ultimo
+        assert ultimo["speed"] > 0 and ultimo["eta"] == 0
+    # todo relatório é monotônico dentro do seu arquivo
+    for step in (1, 2):
+        pcts = [i["pct"] for i in infos if i["step"] == step]
+        assert pcts == sorted(pcts), pcts

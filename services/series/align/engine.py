@@ -51,12 +51,15 @@ _ALIGN_LOCK = threading.Lock()
 
 def align_pair(dub_path: str, orig_path: str, episode: str = "?",
                dump_png: str | None = None,
-               band: int = fingerprint.BAND, on_wait=None) -> dict:
+               band: int = fingerprint.BAND, on_wait=None,
+               on_progress=None) -> dict:
     """Estágios 0-3 completos: EDL do par (sem refino de áudio, sem render).
 
     dump_png: caminho para gravar a matriz de distância (debug visual).
     on_wait: chamado (uma vez) quando já existe outro alinhamento rodando e
     este vai esperar na fila — o chamador avisa a UI.
+    on_progress: progresso do fingerprint (mesmo formato do merge, com `label`
+    e `step` dizendo qual dos dois arquivos está sendo lido).
 
     Arquivo FUNDIDO (razão de duração ~2 — dois episódios num só, comum em
     releases de estreia dupla): em vez de falhar, o lado curto é alinhado
@@ -79,19 +82,27 @@ def align_pair(dub_path: str, orig_path: str, episode: str = "?",
         on_wait()
     with _ALIGN_LOCK:
         return _align_locked(dub_path, orig_path, episode, dump_png, band,
-                             dur_a, dur_b, ratio, merged)
+                             dur_a, dur_b, ratio, merged, on_progress)
 
 
 def _align_locked(dub_path: str, orig_path: str, episode: str,
                   dump_png: str | None, band: int, dur_a: float, dur_b: float,
-                  ratio: float, merged: bool) -> dict:
+                  ratio: float, merged: bool, on_progress=None) -> dict:
     """Fingerprint + DP + classificação, com a fila já garantida."""
     # estágio 0: normalização geométrica de CADA lado antes do hash
     crop_a = fingerprint.crop_params(dub_path, dur_a)
     crop_b = fingerprint.crop_params(orig_path, dur_b)
-    # estágio 1: fingerprint (dos arquivos inteiros)
-    ha = fingerprint.dhash_stream(dub_path, crop_a)
-    hb = fingerprint.dhash_stream(orig_path, crop_b)
+    # estágio 1: fingerprint (dos arquivos inteiros) — a parte demorada, por
+    # isso é ela que reporta progresso
+    def step(n: int, label: str):
+        if on_progress is None:
+            return None
+        return lambda info: on_progress({**info, "step": n, "label": label})
+
+    ha = fingerprint.dhash_stream(dub_path, crop_a, duration=dur_a,
+                                  on_progress=step(1, "dublado"))
+    hb = fingerprint.dhash_stream(orig_path, crop_b, duration=dur_b,
+                                  on_progress=step(2, "original"))
 
     if not merged:
         D, lo = fingerprint.hamming_band(ha, hb, band=band)

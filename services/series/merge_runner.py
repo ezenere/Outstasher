@@ -117,14 +117,22 @@ async def _align_episode(job: dict, key: str, ep: dict):
 
     dub, orig = ep["src"]["dubbed"], ep["src"]["original"]
 
+    log, on_progress = jobs._ffmpeg_hooks(job)
+
     def on_wait():   # roda na thread do alinhador (como o log do ffmpeg)
         job["detail"] = f"{key}: na fila de alinhamento..."
         jobs._event(job, "merge",
                     f"{key}: outro alinhamento em andamento — na fila")
 
+    def on_fp(info):
+        job["detail"] = (f"{key}: fingerprint {info['step']}/2 "
+                         f"({info['label']}) — {info['pct']:.0f}%")
+        on_progress(info)
+
     try:
         edl_dict = await asyncio.to_thread(
-            engine.align_pair, dub, orig, key, on_wait=on_wait)
+            engine.align_pair, dub, orig, key, on_wait=on_wait,
+            on_progress=on_fp)
     except engine.AlignConflict as e:
         # o PAR está errado (ordem trocada, episódios fundidos): não há o que
         # alinhar — falha deste episódio com o diagnóstico, o job segue
@@ -138,7 +146,7 @@ async def _align_episode(job: dict, key: str, ep: dict):
     # Para MEDIR usa o par de mesma língua (faixa inglesa do dual áudio vs
     # original): correlação bem mais nítida do que dublagem vs original
     dub_a, orig_a = await asyncio.to_thread(_alignment_pair, dub, orig)
-    log, _ = jobs._ffmpeg_hooks(job)
+    job["progress"]["merge"] = None      # fingerprint terminou: some a barra
     segs = await asyncio.to_thread(
         refine.refine_offsets, segs, dub, dub_a, orig, orig_a, log)
     dur_a = edl_dict["source_dub"]["duration"]

@@ -13,6 +13,8 @@
 import re
 import struct
 import subprocess
+import tempfile
+import time
 import zlib
 from collections import Counter
 
@@ -76,8 +78,61 @@ def _hw_decode_candidates(path: str) -> list[tuple[list[str], str]]:
     return out
 
 
+def _run_frames(cmd: list[str], frame_bytes: int, fps: float,
+                duration: float | None, on_progress) -> tuple[bytes, int, bytes]:
+    """Roda o ffmpeg lendo os frames crus do stdout aos poucos.
+
+    O stdout É o dado (rawvideo), então não dá para usar `-progress pipe:1`
+    como o resto do projeto — mas o progresso sai de graça do próprio volume
+    lido: cada frame tem `frame_bytes` e sai a `fps`, então bytes/frame_bytes/fps
+    é a posição no vídeo. stderr vai para um arquivo temporário (não trava o
+    pipe) e só é lido se o ffmpeg falhar.
+
+    Retorna (dados, returncode, stderr).
+    """
+    with tempfile.TemporaryFile() as err:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err)
+        chunks: list[bytes] = []
+        got = 0
+        t0 = time.monotonic()
+        last = 0.0
+        try:
+            while True:
+                buf = proc.stdout.read1(1 << 16)
+                if not buf:
+                    break
+                chunks.append(buf)
+                got += len(buf)
+                now = time.monotonic()
+                if on_progress and duration and now - last >= 0.5:
+                    last = now
+                    on_progress(_progress(got // frame_bytes, fps, duration,
+                                          now - t0))
+        finally:
+            proc.stdout.close()
+            proc.wait()
+        if on_progress and duration and proc.returncode == 0:
+            on_progress(_progress(got // frame_bytes, fps, duration,
+                                  time.monotonic() - t0, done=True))
+        err.seek(0)
+        return b"".join(chunks), proc.returncode, err.read()
+
+
+def _progress(frames: int, fps: float, duration: float, elapsed: float,
+              done: bool = False) -> dict:
+    """Mesmo formato do progresso de ffmpeg do merge — a UI reusa a barra."""
+    out_s = frames / fps
+    pct = 100.0 if done else min(99.9, out_s / duration * 100)
+    speed = out_s / elapsed if elapsed > 0 else 0.0
+    return {"pct": round(pct, 1), "out_s": out_s, "duration_s": duration,
+            "fps": frames / elapsed if elapsed > 0 else 0.0,
+            "speed": round(speed, 2), "size": 0, "bitrate": 0,
+            "eta": 0 if done else (int((duration - out_s) / speed) if speed > 0 else None)}
+
+
 def dhash_stream(path: str, crop: str | None = None,
-                 fps: float = FPS, use_hw: bool = True) -> np.ndarray:
+                 fps: float = FPS, use_hw: bool = True,
+                 duration: float | None = None, on_progress=None) -> np.ndarray:
     """Sequência de dHashes (uint64, um por frame amostrado) do arquivo.
 
     O ffmpeg entrega rawvideo gray 9x8; o gradiente horizontal entre vizinhos
@@ -90,6 +145,10 @@ def dhash_stream(path: str, crop: str | None = None,
     metade do tempo de CPU; a variante que aplica `fps` ainda na VRAM escolhe
     frames diferentes e foi descartada). O tempo de parede de um REMUX 4K
     continua limitado pela leitura do disco. Falha da GPU cai para software.
+
+    duration/on_progress: com a duração conhecida, o volume de frames já lido
+    vira progresso para a UI (o stdout é o próprio dado, então não há
+    `-progress` para consultar).
     """
     vf = [f"fps={fps}"] + ([f"crop={crop}"] if crop else []) + [
         f"scale={HASH_W}:{HASH_H}:flags=area", "format=gray"]
@@ -102,19 +161,20 @@ def dhash_stream(path: str, crop: str | None = None,
     attempts.append(["ffmpeg", "-hide_banner", "-nostats", "-loglevel", "error",
                      "-i", path, "-vf", ",".join(vf),
                      "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+    frame_bytes = HASH_W * HASH_H
     raw = b""
     err = b""
     for cmd in attempts:
-        proc = subprocess.run(cmd, capture_output=True)
-        if proc.returncode == 0 and len(proc.stdout) >= HASH_W * HASH_H:
-            raw = proc.stdout
+        out, code, err_out = _run_frames(cmd, frame_bytes, fps, duration,
+                                         on_progress)
+        if code == 0 and len(out) >= frame_bytes:
+            raw = out
             break
-        err = proc.stderr
+        err = err_out
     if not raw:
         raise FingerprintError(
             f"ffmpeg falhou extraindo fingerprint de {path}: "
             f"{err[-400:].decode('utf-8', 'ignore')}")
-    frame_bytes = HASH_W * HASH_H
     n = len(raw) // frame_bytes
     if n == 0:
         raise FingerprintError(f"nenhum frame extraído de {path}")

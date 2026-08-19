@@ -145,7 +145,8 @@ cortes encaixados em silêncio, falsos positivos do vídeo resolvidos pelo áudi
 
 Só **um alinhamento pesado por vez** no servidor: o fingerprint decodifica os
 dois arquivos inteiros, e dois em paralelo brigam pelo mesmo disco — o segundo
-job espera na fila (aparece como *na fila de alinhamento*).
+job espera na fila (aparece como *na fila de alinhamento*). O fingerprint tem
+**barra de progresso** por arquivo (posição, fps, velocidade e ETA).
 
 Triagem sem merge: `python merge.py --align-report <orig> <dub> <saida>`.
 
