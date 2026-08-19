@@ -118,7 +118,13 @@ async def _run_advanced(job: dict, video_file: Path, audio_file: Path):
         _set(job, "merging", "Alinhamento avançado: fingerprint dos dois arquivos...")
         job["merge_started_at"] = datetime.now().isoformat(timespec="seconds")
         dub, orig = str(audio_file), str(video_file)
-        edl_dict = await asyncio.to_thread(engine.align_pair, dub, orig, "filme")
+
+        def on_wait():   # roda na thread do alinhador (como o log do ffmpeg)
+            job["detail"] = "Alinhamento avançado: na fila..."
+            _event(job, "merge", "Outro alinhamento em andamento — na fila")
+
+        edl_dict = await asyncio.to_thread(engine.align_pair, dub, orig, "filme",
+                                           on_wait=on_wait)
         segs = edl_mod.segments(edl_dict)
         dub_a, orig_a = await asyncio.to_thread(_alignment_pair, dub, orig)
         log, _ = _ffmpeg_hooks(job)

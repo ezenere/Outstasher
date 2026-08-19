@@ -5,6 +5,7 @@ relatório em lote) é o chamador. Erros de MAPEAMENTO (durações incompatívei
 nenhum match) viram exceções específicas — o pipeline os transforma em gate,
 nunca em decisão automática.
 """
+import threading
 from pathlib import Path
 
 from services import merger
@@ -40,12 +41,22 @@ HALF_OVERLAP = 0.10
 COARSE_MIN_FRACTION = 0.15
 
 
+# UM alinhamento pesado por vez no processo inteiro. O fingerprint decodifica
+# os dois arquivos inteiros: dois em paralelo brigam pelo mesmo disco (num HDD,
+# a leitura sequencial de cada um cai pela metade) e pela mesma CPU/GPU, então
+# os dois terminam DEPOIS do que terminariam em fila. Vale para episódios de
+# séries, filmes no alinhamento avançado e o relatório do CLI.
+_ALIGN_LOCK = threading.Lock()
+
+
 def align_pair(dub_path: str, orig_path: str, episode: str = "?",
                dump_png: str | None = None,
-               band: int = fingerprint.BAND) -> dict:
+               band: int = fingerprint.BAND, on_wait=None) -> dict:
     """Estágios 0-3 completos: EDL do par (sem refino de áudio, sem render).
 
     dump_png: caminho para gravar a matriz de distância (debug visual).
+    on_wait: chamado (uma vez) quando já existe outro alinhamento rodando e
+    este vai esperar na fila — o chamador avisa a UI.
 
     Arquivo FUNDIDO (razão de duração ~2 — dois episódios num só, comum em
     releases de estreia dupla): em vez de falhar, o lado curto é alinhado
@@ -55,6 +66,8 @@ def align_pair(dub_path: str, orig_path: str, episode: str = "?",
     janela. Razão fora dessa faixa continua sendo conflito (é problema de
     mapeamento de arquivos, não de alinhamento).
     """
+    # as durações são baratas (ffprobe) e ficam FORA da fila: um par que nem
+    # dá para alinhar falha na hora, sem esperar o alinhamento de outro job
     dur_a = _duration(dub_path)
     dur_b = _duration(orig_path)
     conflict = classify.check_duration_ratio(dur_a, dur_b)
@@ -62,7 +75,17 @@ def align_pair(dub_path: str, orig_path: str, episode: str = "?",
     merged = bool(conflict) and MERGED_RATIO[0] <= ratio <= MERGED_RATIO[1]
     if conflict and not merged:
         raise AlignConflict(conflict)
+    if on_wait is not None and _ALIGN_LOCK.locked():
+        on_wait()
+    with _ALIGN_LOCK:
+        return _align_locked(dub_path, orig_path, episode, dump_png, band,
+                             dur_a, dur_b, ratio, merged)
 
+
+def _align_locked(dub_path: str, orig_path: str, episode: str,
+                  dump_png: str | None, band: int, dur_a: float, dur_b: float,
+                  ratio: float, merged: bool) -> dict:
+    """Fingerprint + DP + classificação, com a fila já garantida."""
     # estágio 0: normalização geométrica de CADA lado antes do hash
     crop_a = fingerprint.crop_params(dub_path, dur_a)
     crop_b = fingerprint.crop_params(orig_path, dur_b)

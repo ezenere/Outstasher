@@ -5,10 +5,12 @@ puro; corte no meio) e confere que a EDL descreve exatamente o que foi feito.
 É a validação de campo do fingerprint + DP + classificação — nada stubado.
 """
 import subprocess
+import threading
+import time
 
 import pytest
 
-from services.series.align import edl as edl_mod, engine
+from services.series.align import edl as edl_mod, engine, fingerprint
 
 pytestmark = pytest.mark.ffmpeg
 
@@ -157,3 +159,56 @@ def test_dublado_fundido_nao_precisa_de_janela_no_original(tmp_path):
     assert "b_window" not in edl and edl["a_window"][0] < 4.0
     matches = [s for s in edl["segments"] if s["kind"] == "match"]
     assert matches and abs(matches[0]["offset"]) < 2.0
+
+
+def test_alinhamentos_nao_rodam_em_paralelo(tmp_path, monkeypatch):
+    """Dois alinhamentos ao mesmo tempo brigam pelo disco: o segundo espera na
+    fila. O fingerprint REAL roda nos dois; o teste só cronometra as janelas e
+    confere que elas não se sobrepõem."""
+    base = _base_video(tmp_path / "base.mkv", dur=20)
+    other = _reencoded(base, tmp_path / "reenc.mkv")
+
+    queued = threading.Event()          # o 2º avisou que entrou na fila
+    spans, guard = [], threading.Lock()
+    real = fingerprint.dhash_stream
+    first = threading.Lock()
+
+    def timed(*a, **kw):
+        # o 1º a entrar segura o fingerprint até o 2º bater na fila: sem o
+        # lock do alinhador, o 2º passaria direto e as janelas se sobreporiam
+        held = first.acquire(blocking=False)
+        if held:
+            queued.wait(timeout=5)
+        t0 = time.monotonic()
+        try:
+            return real(*a, **kw)
+        finally:
+            with guard:
+                spans.append((t0, time.monotonic()))
+            if held:
+                first.release()
+
+    monkeypatch.setattr(fingerprint, "dhash_stream", timed)
+
+    waits = []
+
+    def run():
+        engine.align_pair(str(base), str(other),
+                          on_wait=lambda: (waits.append(1), queued.set()))
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=180)
+        assert not t.is_alive(), "alinhamento travou"
+
+    assert waits, "o segundo alinhamento não esperou na fila"
+    spans.sort()
+    for (_, fim), (comeco, _) in zip(spans, spans[1:]):
+        assert fim <= comeco + 1e-6, f"fingerprints em paralelo: {spans}"
+
+    # sem ninguém na frente, nada de fila
+    sozinho = []
+    engine.align_pair(str(base), str(other), on_wait=lambda: sozinho.append(1))
+    assert sozinho == []

@@ -143,6 +143,10 @@ cortes encaixados em silêncio, falsos positivos do vídeo resolvidos pelo áudi
   do job.
 - Legendas externas do lado dublado seguem a mesma EDL do áudio.
 
+Só **um alinhamento pesado por vez** no servidor: o fingerprint decodifica os
+dois arquivos inteiros, e dois em paralelo brigam pelo mesmo disco — o segundo
+job espera na fila (aparece como *na fila de alinhamento*).
+
 Triagem sem merge: `python merge.py --align-report <orig> <dub> <saida>`.
 
 ### Falhas parciais

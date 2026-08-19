@@ -116,9 +116,15 @@ async def _align_episode(job: dict, key: str, ep: dict):
     from services.series.align import edl as edl_mod, engine, refine, rules
 
     dub, orig = ep["src"]["dubbed"], ep["src"]["original"]
+
+    def on_wait():   # roda na thread do alinhador (como o log do ffmpeg)
+        job["detail"] = f"{key}: na fila de alinhamento..."
+        jobs._event(job, "merge",
+                    f"{key}: outro alinhamento em andamento — na fila")
+
     try:
         edl_dict = await asyncio.to_thread(
-            engine.align_pair, dub, orig, key)
+            engine.align_pair, dub, orig, key, on_wait=on_wait)
     except engine.AlignConflict as e:
         # o PAR está errado (ordem trocada, episódios fundidos): não há o que
         # alinhar — falha deste episódio com o diagnóstico, o job segue
