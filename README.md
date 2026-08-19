@@ -65,7 +65,9 @@ Busque, clique, escolha idioma e destino. Modos: **Baixar e fazer merge**,
 - **Modo manual**: o job busca e para em *Aguardando escolha* com as tabelas de
   candidatos (score, corte, motivo de rejeição).
 - **Watchdog**: download parado por `STALL_TIMEOUT_MINUTES` é trocado pelo
-  próximo candidato do mesmo corte.
+  próximo candidato do mesmo corte. Durante o download dá para trocar à mão:
+  *Próximo*, *Escolher outro…* (lista da busca) ou **magnet/link próprio**,
+  que entra direto no qBittorrent sem passar pelo indexador.
 - **Drift**: se as duas janelas de offset divergirem, o job mede o offset a
   cada 5 min (drift × corte), pausa e você decide: **alinhamento avançado**
   (o alinhador das séries, com EDL e revisão — resolve cena/junção diferente

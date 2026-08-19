@@ -6,12 +6,39 @@ pontua com o `selector` e guarda no job o rastro de cada decisão.
 
 import asyncio
 import re
-from urllib.parse import unquote_plus
+from urllib.parse import parse_qs, unquote_plus, urlparse
 
 import config
 from services import jackett, selector, store, tmdb
 from services.jobs.runtime import (
     MAX_SELECTABLE, _event, _needed_torrents, _set)
+
+
+def custom_candidate(url: str, title: str = "") -> dict:
+    """Candidato a partir de um magnet/link informado pelo usuário (sem passar
+    pelo Jackett), no mesmo formato dos candidatos da busca.
+
+    O título vem do campo informado, do `dn=` do magnet ou do próprio link —
+    é dele que saem o corte (edition) e a qualidade mostrados na UI.
+    """
+    url = (url or "").strip()
+    if not url:
+        raise ValueError("Informe um magnet: ou link de .torrent")
+    if not (url.startswith("magnet:") or url.startswith(("http://", "https://"))):
+        raise ValueError("Só aceito magnet: ou link http(s) de .torrent")
+    title = (title or "").strip()
+    if not title and url.startswith("magnet:"):
+        title = unquote_plus(parse_qs(urlparse(url).query).get("dn", [""])[0])
+    if not title:
+        title = url.rsplit("/", 1)[-1].split("?", 1)[0] or "torrent manual"
+    return {
+        "id": f"custom:{abs(hash(url)) % 10 ** 8}", "title": title,
+        "tracker": "manual", "seeders": None, "size": 0,
+        "edition": selector.edition_of(title), "score": None,
+        "quality": selector.quality_tier(title)[1],
+        "magnet": url if url.startswith("magnet:") else None,
+        "link": None if url.startswith("magnet:") else url,
+    }
 
 
 def _slim(cand: dict, cid: str) -> dict:

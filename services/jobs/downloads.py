@@ -280,7 +280,9 @@ async def _replace_torrent(job: dict, kind: str, current: dict | None, nxt: dict
     if not job.get("current"):
         job["current"] = {}
     job["current"][kind] = nxt
-    _event(job, "qbit", f"{reason}: {nxt['title']} ({nxt['seeders']} seeds)")
+    seeds = (f"{nxt['seeders']} seeds" if nxt.get("seeders") is not None
+             else "informado manualmente")
+    _event(job, "qbit", f"{reason}: {nxt['title']} ({seeds})")
 
 
 def _find_video_file(job: dict, content_path: str) -> Path:

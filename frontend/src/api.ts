@@ -408,7 +408,8 @@ export interface Candidate {
   id?: string
   title: string
   tracker?: string | null
-  seeders: number
+  /** null num torrent informado à mão (não passou pelo indexador). */
+  seeders: number | null
   size: number
   edition?: string | null
   /** Rótulo da qualidade estilo Radarr ("4K Remux", "1080p WEB-DL", "Desconhecida"). */

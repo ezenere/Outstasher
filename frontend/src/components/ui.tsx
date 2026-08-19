@@ -493,8 +493,8 @@ export function CandidatesTable({
                 </td>
                 <td className="px-2 py-1.5">{c.tracker ?? ''}</td>
                 <td className="px-2 py-1.5 whitespace-nowrap">{c.quality ?? '—'}</td>
-                <td className="px-2 py-1.5">{c.seeders}</td>
-                <td className="px-2 py-1.5">{fmtSize(c.size)}</td>
+                <td className="px-2 py-1.5">{c.seeders ?? '—'}</td>
+                <td className="px-2 py-1.5">{c.size ? fmtSize(c.size) : '—'}</td>
                 <td className="px-2 py-1.5">{c.edition ?? 'normal'}</td>
                 <td className="px-2 py-1.5">{c.score ?? '—'}</td>
                 {showReason && (

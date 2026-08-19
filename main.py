@@ -292,9 +292,15 @@ class SelectRequest(BaseModel):
     video_id: str | None = None
 
 
+class CustomTorrent(BaseModel):
+    url: str            # magnet: ou http(s) de .torrent
+    title: str = ""     # opcional: sai do dn= do magnet quando vazio
+
+
 class SwitchRequest(BaseModel):
     kind: str  # video | audio
     candidate_id: str | None = None  # vazio = "Tentar próximo" (primeiro reserva)
+    custom: CustomTorrent | None = None  # magnet/link do próprio usuário
 
 
 class CancelRequest(BaseModel):
@@ -855,7 +861,8 @@ async def switch_job(job_id: str, req: SwitchRequest):
     if req.kind not in ("video", "audio"):
         raise HTTPException(400, f"kind inválido: {req.kind}")
     try:
-        job = await jobs.switch(job_id, req.kind, req.candidate_id)
+        job = await jobs.switch(job_id, req.kind, req.candidate_id,
+                                req.custom.model_dump() if req.custom else None)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:  # qBittorrent fora do ar etc.

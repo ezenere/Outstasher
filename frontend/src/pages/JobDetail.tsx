@@ -23,6 +23,9 @@ export default function JobDetail() {
   // troca de torrent durante o download: qual lista está aberta + trava anti-duplo-clique
   const [pickKind, setPickKind] = useState<'video' | 'audio' | null>(null)
   const [switching, setSwitching] = useState(false)
+  // magnet/link próprio para trocar o torrent em andamento (por papel)
+  const [magnetForm, setMagnetForm] = useState<
+    { kind: 'video' | 'audio'; url: string; title: string } | null>(null)
   // timeline completa fica escondida por padrão (só os eventos recentes à vista)
   const [fullTimeline, setFullTimeline] = useState(false)
   const navigate = useNavigate()
@@ -178,6 +181,36 @@ export default function JobDetail() {
     }
   }
 
+  // troca por um magnet/link informado à mão (não passou pelo indexador)
+  async function switchToMagnet() {
+    if (!job || !magnetForm || switching) return
+    const url = magnetForm.url.trim()
+    if (!url) {
+      await dialog.alert({ title: 'Faltou o link', message: 'Informe um magnet: ou link de .torrent.' })
+      return
+    }
+    const alvo = magnetForm.kind === 'video' ? 'vídeo' : 'áudio'
+    if (!(await dialog.confirm({
+      title: 'Trocar torrent',
+      message: `Trocar o download de ${alvo} pelo torrent informado? O download atual será descartado.`,
+      confirmText: 'Trocar',
+    }))) return
+    setSwitching(true)
+    try {
+      await post(`/api/jobs/${job.id}/switch`, {
+        kind: magnetForm.kind,
+        custom: { url, title: magnetForm.title.trim() },
+      })
+      setMagnetForm(null)
+      setPickKind(null)
+      void reload()
+    } catch (e) {
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
+    } finally {
+      setSwitching(false)
+    }
+  }
+
   // controles de troca exibidos sob a barra de progresso enquanto baixa
   function switchControls(kind: 'video' | 'audio') {
     if (job?.status !== 'downloading') return null
@@ -202,7 +235,43 @@ export default function JobDetail() {
               {pickKind === kind ? 'Fechar lista' : 'Escolher outro…'}
             </button>
           )}
+          <button
+            onClick={() => setMagnetForm(
+              magnetForm?.kind === kind ? null : { kind, url: '', title: '' })}
+            className="rounded-lg border border-dashed border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
+          >
+            {magnetForm?.kind === kind ? 'Cancelar' : '+ Magnet/link próprio'}
+          </button>
         </div>
+        {magnetForm?.kind === kind && (
+          <div className="mt-2 rounded-lg border border-zinc-700 bg-zinc-900 p-2.5">
+            <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
+              <input
+                value={magnetForm.url}
+                onChange={(e) => setMagnetForm({ ...magnetForm, url: e.target.value })}
+                placeholder="magnet:?xt=… ou https://…/arquivo.torrent"
+                className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 font-mono text-xs outline-none focus:border-blue-500"
+              />
+              <input
+                value={magnetForm.title}
+                onChange={(e) => setMagnetForm({ ...magnetForm, title: e.target.value })}
+                placeholder="Título (opcional — sai do dn= do magnet; define o corte mostrado)"
+                className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs outline-none focus:border-blue-500"
+              />
+              <button
+                onClick={switchToMagnet}
+                disabled={switching}
+                className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold hover:bg-blue-500 disabled:opacity-50"
+              >
+                Trocar
+              </button>
+            </div>
+            <div className="mt-1.5 text-xs text-zinc-500">
+              O torrent entra direto no qBittorrent, sem passar pelo indexador — o
+              corte não é conferido contra o outro arquivo.
+            </div>
+          </div>
+        )}
         {pickKind === kind && list && (
           <div className="mt-2">
             <div className="mb-1 text-xs text-zinc-500">

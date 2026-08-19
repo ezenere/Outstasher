@@ -8,7 +8,7 @@ import asyncio
 from pathlib import Path
 
 from services import catalog, store
-from services.jobs import downloads, movies, recompress, runtime
+from services.jobs import downloads, movies, recompress, runtime, search
 from services.jobs.runtime import (
     _TERMINAL_STATUSES, _cancelling, _delete_output, _event, _has_torrents,
     _is_local_files, _is_recompress, _jobs, _kill_ffmpeg, _lookup,
@@ -92,11 +92,15 @@ async def select(job_id: str, audio_id: str | None, video_id: str | None) -> dic
     return _public(job)
 
 
-async def switch(job_id: str, kind: str, candidate_id: str | None = None) -> dict | None:
+async def switch(job_id: str, kind: str, candidate_id: str | None = None,
+                 custom: dict | None = None) -> dict | None:
     """Troca manual de torrent durante o download.
 
     Sem candidate_id: "Tentar próximo" — pega o primeiro candidato reserva.
     Com candidate_id: troca para o candidato escolhido na lista da busca.
+    Com custom {url, title}: magnet/link do próprio usuário (nem passa pelo
+    Jackett) — o candidato entra na busca do job, então aparece na lista e
+    pode voltar como reserva depois.
     """
     job = _jobs.get(job_id)
     if not job:
@@ -105,7 +109,12 @@ async def switch(job_id: str, kind: str, candidate_id: str | None = None) -> dic
         raise ValueError("O job não está baixando — só dá para trocar torrent durante o download")
     if kind not in _needed_torrents(job):
         raise ValueError(f"Este job não baixa {kind}")
-    if candidate_id:
+    if custom:
+        nxt = search.custom_candidate(custom.get("url", ""), custom.get("title", ""))
+        job.setdefault("search", {}).setdefault(kind, []).insert(0, nxt)
+        _event(job, "chosen",
+               f"Torrent manual informado pelo usuário ({kind}): {nxt['title']}")
+    elif candidate_id:
         cands = (job.get("search") or {}).get(kind) or []
         nxt = next((c for c in cands if c["id"] == candidate_id), None)
         if not nxt:
