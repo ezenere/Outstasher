@@ -27,7 +27,7 @@ export default function Catalog() {
   const [query, setQuery] = useState('')
   const [sortKey, setSortKey] = useState<SortKey>('title')
   const [sortDir, setSortDir] = useState<SortDir>('asc')
-  const [adding, setAdding] = useState(false)
+  const [adding, setAdding] = useState<'movie' | 'tv' | null>(null)
 
   useEffect(() => {
     api<Destination[]>('/api/destinations')
@@ -101,14 +101,21 @@ export default function Catalog() {
             </button>
           ))}
         </div>
+        {/* os dois sempre visíveis: qual aba está aberta não deve esconder
+            uma das conversões manuais */}
         <button
-          onClick={() => setAdding(true)}
-          title={media === 'tv'
-            ? 'Merge manual: pastas de original e dublado que já estão no disco'
-            : 'Conversão manual: merge de dois arquivos que já estão no disco'}
+          onClick={() => setAdding('movie')}
+          title="Conversão manual: merge de dois arquivos que já estão no disco"
           className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-semibold hover:bg-blue-500"
         >
-          <Plus width={16} height={16} /> Adicionar {media === 'tv' ? 'série' : 'filme'}
+          <Plus width={16} height={16} /> Filme
+        </button>
+        <button
+          onClick={() => setAdding('tv')}
+          title="Merge manual de série: pastas de original e dublado que já estão no disco"
+          className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-semibold hover:bg-blue-500"
+        >
+          <Plus width={16} height={16} /> Série
         </button>
         <label className="flex items-center gap-2 text-sm">
           Destino:
@@ -231,19 +238,20 @@ export default function Catalog() {
         ))}
       </div>
 
-      {adding && (media === 'tv' ? (
+      {adding === 'tv' && (
         <AddSeriesModal
           destinations={destinations.filter((d) => d.media === 'tv')}
-          defaultDestId={destId}
-          onClose={() => setAdding(false)}
+          defaultDestId={media === 'tv' ? destId : null}
+          onClose={() => setAdding(null)}
         />
-      ) : (
+      )}
+      {adding === 'movie' && (
         <AddMovieModal
           destinations={destinations.filter((d) => (d.media ?? 'movie') === 'movie')}
-          defaultDestId={destId}
-          onClose={() => setAdding(false)}
+          defaultDestId={media === 'movie' ? destId : null}
+          onClose={() => setAdding(null)}
         />
-      ))}
+      )}
     </div>
   )
 }
