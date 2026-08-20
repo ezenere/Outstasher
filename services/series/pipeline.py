@@ -1541,6 +1541,13 @@ async def retry(old: dict) -> dict:
         return await recompress.create_recompress_batch(
             old.get("destination_id"), r["folder"], r["rels"],
             old["convert"], r.get("replace", True), old.get("tmdb_id"))
+    if old.get("manual_rows"):
+        # merge manual: os arquivos estão no disco, então repetir é refazer o
+        # mesmo mapeamento — não uma busca nova
+        from services.series import manual
+        return await manual.create(
+            old["tmdb_id"], old["language"], old["manual_rows"],
+            old.get("destination_id"), old.get("convert"))
     req = old.get("request") or {}
     return await create_series(
         old["tmdb_id"], old["language"],

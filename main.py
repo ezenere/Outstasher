@@ -18,6 +18,8 @@ from pydantic import BaseModel
 
 import config
 from services import auth, catalog, jackett, jobs, store, tmdb, transcode
+from services import browse
+from services.series import manual as series_manual
 from services.series import pipeline as series_pipeline
 
 FRONTEND_DIR = Path(__file__).parent / "frontend"
@@ -678,6 +680,64 @@ async def create_series_job(req: SeriesJobRequest):
         return await series_pipeline.create_series(
             req.tmdb_id, req.language, req.seasons, req.episodes, req.mode,
             req.destination_id, req.torrent_target_id, req.convert)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class SeriesScanRequest(BaseModel):
+    tmdb_id: int
+    original_root: str
+    dubbed_root: str
+    seasons: list[int] | None = None   # None = todas as encontradas
+
+
+class SeriesManualRequest(BaseModel):
+    tmdb_id: int
+    language: str
+    rows: list[dict]                   # [{season, episode, original, dubbed, include}]
+    destination_id: int | None = None
+    convert: dict | None = None
+
+
+@app.get("/api/browse")
+async def browse_dir(path: str | None = None):
+    """Conteúdo de uma pasta do servidor (só leitura), para escolher caminhos."""
+    try:
+        return await asyncio.to_thread(browse.list_dir, path)
+    except browse.BrowseError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/series/manual/scan")
+async def scan_series_dirs(req: SeriesScanRequest):
+    """Lê as duas árvores e propõe o pareamento episódio a episódio."""
+    try:
+        original, dubbed = await asyncio.gather(
+            asyncio.to_thread(series_manual.scan_side, req.original_root),
+            asyncio.to_thread(series_manual.scan_side, req.dubbed_root))
+    except series_manual.ManualError as e:
+        raise HTTPException(400, str(e))
+    achadas = {int(k) for k in (*original["seasons"], *dubbed["seasons"])
+               if k != "unknown"}
+    querido = sorted(achadas & set(req.seasons)) if req.seasons else sorted(achadas)
+    if not querido:
+        raise HTTPException(400, "nenhuma temporada reconhecida nas pastas")
+    eps: dict[int, list[dict]] = {}
+    for season in querido:
+        try:
+            eps[season] = (await tmdb.tv_season(req.tmdb_id, season))["episodes"]
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, f"TMDB não devolveu a temporada {season}: {e}")
+    return {"original": original, "dubbed": dubbed,
+            "seasons": series_manual.propose(original, dubbed, eps)}
+
+
+@app.post("/api/jobs/series/manual")
+async def create_series_manual(req: SeriesManualRequest):
+    """Merge manual de série: pares de arquivos já no disco."""
+    try:
+        return await series_manual.create(req.tmdb_id, req.language, req.rows,
+                                          req.destination_id, req.convert)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
