@@ -167,7 +167,11 @@ Triagem sem merge: `python merge.py --align-report <orig> <dub> <saida>`.
 **Catálogo → Séries → Adicionar série**: você aponta as pastas do original e as
 do dublado — **quantas quiser de cada lado**, para release espalhado em várias
 pastas — com um navegador de pastas do servidor que começa nos destinos
-cadastrados. Ele lê as árvores e soma os arquivos por temporada. Por temporada aparece a **ordem
+cadastrados. Ele lê as árvores e soma os arquivos por temporada.
+
+A lista de temporadas vem do **TMDB**, não das pastas: temporada sem arquivo
+reconhecido também aparece (para receber uma pasta), e cada uma liga/desliga
+inteira num checkbox. Por temporada aparece a **ordem
 detectada** de cada lado — `SxxEyy (E01–E23, 1 fundido)`, `absoluta (137–160)`,
 `alfabética` — com pasta, contagem de arquivos e de episódios.
 

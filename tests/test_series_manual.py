@@ -290,3 +290,19 @@ def test_varias_pastas_no_mesmo_lado_se_somam(tmp_path):
     dobrada = manual.scan_sides([str(tmp_path / "t1"), str(tmp_path / "t1")],
                                 probe=False)
     assert len(dobrada["seasons"]["1"]["files"]) == 2
+
+
+def test_propose_lista_temporada_sem_arquivo_nenhum(tmp_path):
+    """Temporada que os arquivos não revelam ainda tem que aparecer — é nela
+    que o usuário vai apontar uma pasta."""
+    _touch(tmp_path / "o" / "Show.S01E01.mkv")
+    _touch(tmp_path / "d" / "Show.S01E01.mkv")
+    o = manual.scan_side(str(tmp_path / "o"), probe=False)
+    d = manual.scan_side(str(tmp_path / "d"), probe=False)
+
+    plano = manual.propose(o, d, {1: _tmdb(1, 1)[1], 2: _tmdb(2, 3)[2]})
+    assert [p["season"] for p in plano] == [1, 2]
+    vazia = plano[1]
+    assert len(vazia["rows"]) == 3                  # os 3 episódios do TMDB
+    assert all(r["original"] is None and not r["include"] for r in vazia["rows"])
+    assert vazia["original"]["files"] == 0

@@ -224,10 +224,11 @@ def scan_sides(roots: list[str], probe: bool = True) -> dict:
 
 def seasons_found(original: dict, dubbed: dict,
                   wanted: list[int] | None = None) -> list[int]:
-    """Temporadas reconhecidas nos DOIS lados (união), filtradas pelo pedido.
+    """Temporadas que os ARQUIVOS revelam (união dos dois lados).
 
-    `unknown` fica de fora: arquivo que não revela temporada nenhuma é o
-    usuário que atribui, na tela."""
+    A tela lista as temporadas do TMDB, não estas: temporada sem arquivo
+    reconhecido também precisa aparecer para receber uma pasta. Isto aqui é o
+    diagnóstico de "o que as pastas dizem"."""
     achadas = {int(k) for lado in (original, dubbed) for k in lado["seasons"]
                if k != "unknown"}
     if wanted:

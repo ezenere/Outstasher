@@ -717,15 +717,24 @@ async def scan_series_dirs(req: SeriesScanRequest):
             asyncio.to_thread(series_manual.scan_sides, req.dubbed_roots))
     except series_manual.ManualError as e:
         raise HTTPException(400, str(e))
-    querido = series_manual.seasons_found(original, dubbed, req.seasons)
+    # as temporadas vêm do TMDB, não dos arquivos: temporada sem arquivo
+    # reconhecido também precisa aparecer, para receber uma pasta na tela
+    try:
+        info = await tmdb.tv_details(req.tmdb_id)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"TMDB não devolveu a série: {e}")
+    todas = [s["season"] for s in info["seasons"]
+             if s["season"] is not None and s["season"] >= 0]
+    querido = ([s for s in todas if s in set(req.seasons)] if req.seasons
+               else todas)
     if not querido:
-        raise HTTPException(400, "nenhuma temporada reconhecida nas pastas")
-    eps: dict[int, list[dict]] = {}
-    for season in querido:
-        try:
-            eps[season] = (await tmdb.tv_season(req.tmdb_id, season))["episodes"]
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(400, f"TMDB não devolveu a temporada {season}: {e}")
+        raise HTTPException(400, "a série não tem temporadas no TMDB")
+    try:
+        temporadas = await asyncio.gather(
+            *(tmdb.tv_season(req.tmdb_id, n) for n in querido))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"TMDB não devolveu as temporadas: {e}")
+    eps = {n: t["episodes"] for n, t in zip(querido, temporadas)}
     return {"original": original, "dubbed": dubbed,
             "seasons": series_manual.propose(original, dubbed, eps)}
 

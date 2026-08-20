@@ -152,6 +152,14 @@ export default function AddSeriesModal({ destinations, defaultDestId, onClose }:
     }))
   }
 
+  /** Liga/desliga a temporada inteira (só entra episódio com os dois lados). */
+  function toggleSeason(season: number, on: boolean) {
+    setSeasons((prev) => prev.map((s) => s.season !== season ? s : {
+      ...s,
+      rows: s.rows.map((r) => ({ ...r, include: on && !!(r.original && r.dubbed) })),
+    }))
+  }
+
   /** Ações em massa: é isto que "troca a ordem" sem 24 cliques. */
   function repair(season: number, how: 'position' | 'shift+1' | 'shift-1') {
     setSeasons((prev) => prev.map((s) => {
@@ -269,6 +277,7 @@ export default function AddSeriesModal({ destinations, defaultDestId, onClose }:
                   dubOptions={options(s.season, 'dub')}
                   onPatch={patch}
                   onRepair={repair}
+                  onToggleSeason={(on) => toggleSeason(s.season, on)}
                   onPickFile={(ep, side) => setPickFile({ season: s.season, ep, side })}
                   onPickFolder={(side) => setSeasonPick({ season: s.season, side })}
                 />
@@ -410,10 +419,11 @@ function RootList({ icon: Icon, label, paths, onAdd, onRemove }: {
 }
 
 
-function SeasonCard({ season, open, onToggle, origOptions, dubOptions, onPatch, onRepair, onPickFile, onPickFolder }: {
+function SeasonCard({ season, open, onToggle, origOptions, dubOptions, onPatch, onRepair, onPickFile, onPickFolder, onToggleSeason }: {
   season: ManualSeason
   open: boolean
   onToggle: () => void
+  onToggleSeason: (on: boolean) => void
   origOptions: { path: string; name: string }[]
   dubOptions: { path: string; name: string }[]
   onPatch: (season: number, episode: number, fields: Partial<ManualRow>) => void
@@ -422,11 +432,24 @@ function SeasonCard({ season, open, onToggle, origOptions, dubOptions, onPatch, 
   onPickFolder: (side: 'orig' | 'dub') => void
 }) {
   const marcados = season.rows.filter((r) => r.include).length
-  const faltando = season.rows.filter((r) => !r.original || !r.dubbed).length
+  const pareaveis = season.rows.filter((r) => r.original && r.dubbed).length
+  const faltando = season.rows.length - pareaveis
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-950/40">
+    <div className={`rounded-lg border bg-zinc-950/40 ${
+      marcados ? 'border-zinc-800' : 'border-zinc-800/50'}`}>
       <div className="px-3 py-2">
-        <div className="flex cursor-pointer items-center gap-2" onClick={onToggle}>
+        <div className="flex items-center gap-2">
+          {/* liga/desliga a temporada inteira */}
+          <input
+            type="checkbox"
+            checked={marcados > 0}
+            disabled={!pareaveis}
+            title={pareaveis ? 'Incluir/excluir a temporada inteira'
+              : 'Nenhum episódio com os dois arquivos'}
+            onChange={(e) => onToggleSeason(e.target.checked)}
+          />
+          <div className="flex min-w-0 flex-1 cursor-pointer items-center gap-2"
+            onClick={onToggle}>
           <span className="text-sm font-semibold">Temporada {season.season}</span>
           <span className="text-xs text-zinc-500">
             {marcados} de {season.rows.length} episódio(s)
@@ -439,7 +462,14 @@ function SeasonCard({ season, open, onToggle, origOptions, dubOptions, onPatch, 
           <span className="ml-auto text-xs text-blue-400">
             {open ? 'fechar' : 'editar match manualmente'}
           </span>
+          </div>
         </div>
+        {!season.original.files && !season.dubbed.files && (
+          <div className="mt-1 text-xs text-amber-400/80">
+            Nenhum arquivo desta temporada nas pastas escolhidas — use a
+            pastinha ao lado para apontar a pasta dela.
+          </div>
+        )}
         <div className="mt-1 space-y-0.5 text-xs text-zinc-500">
           <SideLine icon={MediaVideo} label="Vídeo" side={season.original}
             onPickFolder={() => onPickFolder('orig')} />
