@@ -170,6 +170,10 @@ cadastrados) e ele lê as duas árvores. Por temporada aparece a **ordem
 detectada** de cada lado — `SxxEyy (E01–E23, 1 fundido)`, `absoluta (137–160)`,
 `alfabética` — com pasta, contagem de arquivos e de episódios.
 
+Cada temporada também aceita uma **pasta própria** (vídeo e/ou áudio): a
+escolha manda mesmo que os arquivos não digam a temporada — é assim que entram
+releases com nomes fora do padrão.
+
 O pareamento é proposto por `SxxEyy` quando os dois lados numeram assim, senão
 por posição; arquivo com dois episódios entra nas duas linhas (o alinhador
 localiza a metade certa). Em **editar match manualmente** dá para trocar

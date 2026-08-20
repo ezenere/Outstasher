@@ -730,6 +730,30 @@ async def scan_series_dirs(req: SeriesScanRequest):
             "seasons": series_manual.propose(original, dubbed, eps)}
 
 
+class SeriesScanSeasonRequest(BaseModel):
+    tmdb_id: int
+    season: int
+    original_dir: str | None = None    # None = manter o que já foi lido
+    dubbed_dir: str | None = None
+
+
+@app.post("/api/series/manual/scan-season")
+async def scan_series_season(req: SeriesScanSeasonRequest):
+    """Relê UMA temporada com a pasta que o usuário escolheu para ela."""
+    if not req.original_dir and not req.dubbed_dir:
+        raise HTTPException(400, "escolha ao menos uma pasta")
+    try:
+        eps = (await tmdb.tv_season(req.tmdb_id, req.season))["episodes"]
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"TMDB não devolveu a temporada {req.season}: {e}")
+    try:
+        return await asyncio.to_thread(
+            series_manual.scan_season, req.season, eps,
+            req.original_dir, req.dubbed_dir)
+    except series_manual.ManualError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/api/jobs/series/manual")
 async def create_series_manual(req: SeriesManualRequest):
     """Merge manual de série: pares de arquivos já no disco."""

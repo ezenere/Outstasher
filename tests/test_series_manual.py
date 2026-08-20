@@ -239,3 +239,36 @@ def test_mesmo_episodio_em_duas_qualidades_fica_com_o_maior(tmp_path):
     lado = manual.scan_side(str(d), probe=False)
     linhas = manual.propose(lado, lado, _tmdb(1, 1))[0]["rows"]
     assert linhas[0]["original"].endswith("1080p.mkv")
+
+
+def test_pasta_escolhida_para_a_temporada_manda(tmp_path):
+    """Escolher a pasta de uma temporada é uma DECISÃO: mesmo que os arquivos
+    não digam a temporada (ou digam outra), eles passam a valer para ela."""
+    # arquivos sem nenhuma referência de temporada
+    for nome in ("cap 1.mkv", "cap 2.mkv", "cap 3.mkv"):
+        _touch(tmp_path / "solta" / nome)
+    out = manual.scan_season(4, _tmdb(4, 3)[4], str(tmp_path / "solta"),
+                             str(tmp_path / "solta"))
+    linhas = out["season"]["rows"]
+    assert [ln["episode"] for ln in linhas] == [1, 2, 3]
+    assert [ln["original"].split("/")[-1] for ln in linhas] == [
+        "cap 1.mkv", "cap 2.mkv", "cap 3.mkv"]
+    assert all(ln["include"] for ln in linhas)
+    # os arquivos vão para os dropdowns dos dois lados
+    assert len(out["files"]["original"]) == 3
+
+
+def test_scan_season_troca_so_um_lado_e_reusa_o_outro(tmp_path):
+    _touch(tmp_path / "o" / "Show.S01E01.mkv")
+    _touch(tmp_path / "o" / "Show.S01E02.mkv")
+    _touch(tmp_path / "novo_dub" / "dub 1.mkv")
+    _touch(tmp_path / "novo_dub" / "dub 2.mkv")
+    cache = {"original": manual.scan_side(str(tmp_path / "o"), probe=False)}
+
+    out = manual.scan_season(1, _tmdb(1, 2)[1], None,
+                             str(tmp_path / "novo_dub"), cache=cache)
+    linhas = out["season"]["rows"]
+    assert [ln["original"].split("/")[-1] for ln in linhas] == [
+        "Show.S01E01.mkv", "Show.S01E02.mkv"]        # veio do cache
+    assert [ln["dubbed"].split("/")[-1] for ln in linhas] == [
+        "dub 1.mkv", "dub 2.mkv"]                    # veio da pasta nova

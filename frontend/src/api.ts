@@ -555,6 +555,13 @@ export interface ManualSeason {
   unmatched: { original: string[]; dubbed: string[] }
 }
 
+/** Releitura de UMA temporada com a pasta escolhida à mão para ela. */
+export interface ManualSeasonScan {
+  season: ManualSeason
+  files: { original: { path: string; name: string }[]
+           dubbed: { path: string; name: string }[] }
+}
+
 export interface ManualScan {
   original: { root: string; seasons: Record<string, { files: { path: string; name: string }[] }> }
   dubbed: { root: string; seasons: Record<string, { files: { path: string; name: string }[] }> }

@@ -5,7 +5,8 @@ import {
 } from 'iconoir-react'
 import {
   api, post, type ConvertOptions, type Destination, type Job, type Language,
-  type ManualRow, type ManualScan, type ManualSeason, type Movie, type MoviePage,
+  type ManualRow, type ManualScan, type ManualSeason, type ManualSeasonScan,
+  type Movie, type MoviePage,
 } from '../api'
 import AdvancedOptions from './AdvancedOptions'
 import FolderPicker from './FolderPicker'
@@ -39,6 +40,9 @@ export default function AddSeriesModal({ destinations, defaultDestId, onClose }:
   const [pickFile, setPickFile] = useState<null | { season: number; ep: number; side: 'orig' | 'dub' }>(null)
   const [scan, setScan] = useState<ManualScan | null>(null)
   const [seasons, setSeasons] = useState<ManualSeason[]>([])
+  // pasta escolhida para UMA temporada substitui os arquivos daquele lado
+  const [override, setOverride] = useState<Record<string, { path: string; name: string }[]>>({})
+  const [seasonPick, setSeasonPick] = useState<null | { season: number; side: 'orig' | 'dub' }>(null)
   const [openSeason, setOpenSeason] = useState<number | null>(null)
   const [destId, setDestId] = useState<number | null>(defaultDestId)
   const [advanced, setAdvanced] = useState<ConvertOptions | null>(null)
@@ -88,10 +92,37 @@ export default function AddSeriesModal({ destinations, defaultDestId, onClose }:
     }
   }
 
-  /** Arquivos disponíveis de um lado, para os dropdowns daquela temporada. */
+  /** Arquivos disponíveis de um lado, para os dropdowns daquela temporada.
+   *  Pasta escolhida para a temporada tem prioridade sobre o scan geral. */
   function options(season: number, side: 'orig' | 'dub') {
+    const chave = `${season}:${side}`
+    if (override[chave]) return override[chave]
     const lado = side === 'orig' ? scan?.original : scan?.dubbed
     return lado?.seasons?.[String(season)]?.files ?? []
+  }
+
+  /** Relê UMA temporada com a pasta que o usuário escolheu para ela. */
+  async function scanSeason(season: number, side: 'orig' | 'dub', dir: string) {
+    if (!series) return
+    setBusy(true)
+    setError(null)
+    try {
+      const out = await post<ManualSeasonScan>('/api/series/manual/scan-season', {
+        tmdb_id: series.id, season,
+        original_dir: side === 'orig' ? dir : null,
+        dubbed_dir: side === 'dub' ? dir : null,
+      })
+      setSeasons((prev) => prev.map((s) => s.season === season ? out.season : s))
+      setOverride((prev) => ({
+        ...prev,
+        [`${season}:orig`]: out.files.original,
+        [`${season}:dub`]: out.files.dubbed,
+      }))
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
   }
 
   function patch(season: number, episode: number, fields: Partial<ManualRow>) {
@@ -216,6 +247,7 @@ export default function AddSeriesModal({ destinations, defaultDestId, onClose }:
                   onPatch={patch}
                   onRepair={repair}
                   onPickFile={(ep, side) => setPickFile({ season: s.season, ep, side })}
+                  onPickFolder={(side) => setSeasonPick({ season: s.season, side })}
                 />
               ))}
             </div>
@@ -280,6 +312,18 @@ export default function AddSeriesModal({ destinations, defaultDestId, onClose }:
           onClose={() => setPicking(null)}
         />
       )}
+      {seasonPick && (
+        <FolderPicker
+          mode="dir"
+          title={`Pasta ${seasonPick.side === 'orig' ? 'do vídeo' : 'do áudio'} da temporada ${seasonPick.season}`}
+          start={seasonPick.side === 'orig' ? origRoot || null : dubRoot || null}
+          onPick={(p) => {
+            void scanSeason(seasonPick.season, seasonPick.side, p)
+            setSeasonPick(null)
+          }}
+          onClose={() => setSeasonPick(null)}
+        />
+      )}
       {pickFile && (
         <FolderPicker
           mode="file"
@@ -329,7 +373,7 @@ function RootRow({ icon: Icon, label, value, onPick }: {
   )
 }
 
-function SeasonCard({ season, open, onToggle, origOptions, dubOptions, onPatch, onRepair, onPickFile }: {
+function SeasonCard({ season, open, onToggle, origOptions, dubOptions, onPatch, onRepair, onPickFile, onPickFolder }: {
   season: ManualSeason
   open: boolean
   onToggle: () => void
@@ -338,6 +382,7 @@ function SeasonCard({ season, open, onToggle, origOptions, dubOptions, onPatch, 
   onPatch: (season: number, episode: number, fields: Partial<ManualRow>) => void
   onRepair: (season: number, how: 'position' | 'shift+1' | 'shift-1') => void
   onPickFile: (episode: number, side: 'orig' | 'dub') => void
+  onPickFolder: (side: 'orig' | 'dub') => void
 }) {
   const marcados = season.rows.filter((r) => r.include).length
   const faltando = season.rows.filter((r) => !r.original || !r.dubbed).length
@@ -365,52 +410,105 @@ function SeasonCard({ season, open, onToggle, origOptions, dubOptions, onPatch, 
       </button>
 
       {open && (
-        <div className="border-t border-zinc-800 p-2">
-          <div className="mb-2 flex flex-wrap gap-1.5">
+        <div className="space-y-2 border-t border-zinc-800 p-3">
+          {/* pasta desta temporada + ações em massa */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs text-zinc-500">Pasta desta temporada:</span>
+            <Bulk onClick={() => onPickFolder('orig')}>
+              <Folder width={11} height={11} /> vídeo
+            </Bulk>
+            <Bulk onClick={() => onPickFolder('dub')}>
+              <Folder width={11} height={11} /> áudio
+            </Bulk>
+            <span className="mx-1 h-3 w-px bg-zinc-700" />
             <Bulk onClick={() => onRepair(season.season, 'position')}>Parear por posição</Bulk>
-            <Bulk onClick={() => onRepair(season.season, 'shift-1')}>Deslocar dublado −1</Bulk>
-            <Bulk onClick={() => onRepair(season.season, 'shift+1')}>Deslocar dublado +1</Bulk>
+            <Bulk onClick={() => onRepair(season.season, 'shift-1')}>Áudio −1</Bulk>
+            <Bulk onClick={() => onRepair(season.season, 'shift+1')}>Áudio +1</Bulk>
           </div>
-          <table className="w-full text-xs">
-            <thead className="text-zinc-500">
-              <tr>
-                <th className="w-8 py-1"></th>
-                <th className="py-1 text-left">Episódio</th>
-                <th className="py-1 text-left">Original (vídeo)</th>
-                <th className="py-1 text-left">Dublado (áudio)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {season.rows.map((r) => (
-                <tr key={r.episode} className={r.include ? '' : 'opacity-40'}>
-                  <td className="py-1">
-                    <input type="checkbox" checked={r.include}
-                      onChange={(e) => onPatch(season.season, r.episode, { include: e.target.checked })} />
-                  </td>
-                  <td className="py-1 pr-2 align-top">
-                    <div className="font-medium text-zinc-300">
-                      E{String(r.episode).padStart(2, '0')}
-                    </div>
-                    <div className="truncate text-zinc-600">{r.name}</div>
-                  </td>
-                  <td className="py-1 pr-2">
-                    <FileSelect value={r.original} options={origOptions}
-                      duration={r.orig_duration}
-                      onChange={(v) => onPatch(season.season, r.episode, { original: v })}
-                      onBrowse={() => onPickFile(r.episode, 'orig')} />
-                  </td>
-                  <td className="py-1">
-                    <FileSelect value={r.dubbed} options={dubOptions}
-                      duration={r.dub_duration}
-                      onChange={(v) => onPatch(season.season, r.episode, { dubbed: v })}
-                      onBrowse={() => onPickFile(r.episode, 'dub')} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+
+          {season.rows.map((r) => (
+            <EpisodeCard
+              key={r.episode}
+              row={r}
+              origOptions={origOptions}
+              dubOptions={dubOptions}
+              onPatch={(fields) => onPatch(season.season, r.episode, fields)}
+              onPickFile={(side) => onPickFile(r.episode, side)}
+            />
+          ))}
         </div>
       )}
+    </div>
+  )
+}
+
+/** Um episódio: os dois arquivos EMPILHADOS, rótulo à esquerda. Lado a lado
+ *  (a tabela de antes) fica ilegível com nome de release. */
+function EpisodeCard({ row, origOptions, dubOptions, onPatch, onPickFile }: {
+  row: ManualRow
+  origOptions: { path: string; name: string }[]
+  dubOptions: { path: string; name: string }[]
+  onPatch: (fields: Partial<ManualRow>) => void
+  onPickFile: (side: 'orig' | 'dub') => void
+}) {
+  const falta = !row.original || !row.dubbed
+  return (
+    <div className={`rounded-lg border p-2 ${
+      row.include ? 'border-zinc-800 bg-zinc-900/60' : 'border-zinc-800/60 bg-zinc-900/20 opacity-50'
+    } ${falta ? 'border-amber-900/60' : ''}`}>
+      <div className="mb-1.5 flex items-center gap-2">
+        <input type="checkbox" checked={row.include}
+          onChange={(e) => onPatch({ include: e.target.checked })} />
+        <span className="text-sm font-semibold text-zinc-200">
+          E{String(row.episode).padStart(2, '0')}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-xs text-zinc-500">{row.name}</span>
+      </div>
+      <FieldRow icon={MediaVideo} label="Vídeo" value={row.original}
+        options={origOptions} duration={row.orig_duration}
+        onChange={(v) => onPatch({ original: v })}
+        onBrowse={() => onPickFile('orig')} />
+      <FieldRow icon={SoundHigh} label="Áudio" value={row.dubbed}
+        options={dubOptions} duration={row.dub_duration}
+        onChange={(v) => onPatch({ dubbed: v })}
+        onBrowse={() => onPickFile('dub')} />
+    </div>
+  )
+}
+
+function FieldRow({ icon: Icon, label, value, options, duration, onChange, onBrowse }: {
+  icon: typeof MediaVideo
+  label: string
+  value: string | null
+  options: { path: string; name: string }[]
+  duration: number | null
+  onChange: (v: string | null) => void
+  onBrowse: () => void
+}) {
+  // arquivo escolhido fora da pasta lida ainda precisa aparecer no dropdown
+  const extra = value && !options.some((o) => o.path === value)
+    ? [{ path: value, name: value.split('/').pop() ?? value }] : []
+  return (
+    <div className="mt-1 flex items-center gap-2">
+      <span className="flex w-16 shrink-0 items-center gap-1 text-xs text-zinc-500">
+        <Icon width={12} height={12} /> {label}
+      </span>
+      <select
+        value={value ?? ''}
+        onChange={(e) => onChange(e.target.value || null)}
+        className={`min-w-0 flex-1 rounded border bg-zinc-800 px-1.5 py-1 text-xs ${
+          value ? 'border-zinc-700 text-zinc-200' : 'border-amber-800 text-amber-300'}`}
+      >
+        <option value="">— sem arquivo —</option>
+        {[...options, ...extra].map((o) => (
+          <option key={o.path} value={o.path}>{o.name}</option>
+        ))}
+      </select>
+      <span className="w-12 shrink-0 text-right text-xs text-zinc-600">{fmtDur(duration)}</span>
+      <button onClick={onBrowse} title="Escolher outro arquivo no disco"
+        className="shrink-0 rounded border border-zinc-700 p-1 text-zinc-400 hover:bg-zinc-800">
+        <Folder width={12} height={12} />
+      </button>
     </div>
   )
 }
@@ -440,40 +538,8 @@ function SideLine({ icon: Icon, label, side }: {
 function Bulk({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
   return (
     <button onClick={onClick}
-      className="rounded border border-zinc-700 px-2 py-0.5 text-xs text-zinc-300 hover:bg-zinc-800">
+      className="inline-flex items-center gap-1 rounded border border-zinc-700 px-2 py-0.5 text-xs text-zinc-300 hover:bg-zinc-800">
       {children}
     </button>
-  )
-}
-
-function FileSelect({ value, options, duration, onChange, onBrowse }: {
-  value: string | null
-  options: { path: string; name: string }[]
-  duration: number | null
-  onChange: (v: string | null) => void
-  onBrowse: () => void
-}) {
-  // arquivo escolhido fora da pasta lida ainda precisa aparecer no dropdown
-  const extra = value && !options.some((o) => o.path === value)
-    ? [{ path: value, name: value.split('/').pop() ?? value }] : []
-  return (
-    <div className="flex items-center gap-1">
-      <select
-        value={value ?? ''}
-        onChange={(e) => onChange(e.target.value || null)}
-        className={`min-w-0 flex-1 rounded border bg-zinc-800 px-1 py-0.5 text-xs ${
-          value ? 'border-zinc-700' : 'border-amber-800 text-amber-300'}`}
-      >
-        <option value="">— sem arquivo —</option>
-        {[...options, ...extra].map((o) => (
-          <option key={o.path} value={o.path}>{o.name}</option>
-        ))}
-      </select>
-      <span className="w-12 shrink-0 text-right text-zinc-600">{fmtDur(duration)}</span>
-      <button onClick={onBrowse} title="Escolher outro arquivo no disco"
-        className="shrink-0 rounded border border-zinc-700 p-0.5 text-zinc-400 hover:bg-zinc-800">
-        <Folder width={12} height={12} />
-      </button>
-    </div>
   )
 }

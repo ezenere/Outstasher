@@ -208,6 +208,54 @@ def seasons_found(original: dict, dubbed: dict,
     return sorted(achadas)
 
 
+def season_group(side: dict, season: int) -> dict:
+    """O grupo de arquivos de UMA temporada dentro de um scan.
+
+    Quando a pasta escolhida não tem arquivo nenhum daquela temporada (nome
+    fora do padrão, pasta "sem temporada", release que numera de outro jeito),
+    a escolha do usuário MANDA: tudo o que está ali passa a valer para esta
+    temporada, na ordem natural. É o que "escolher a pasta desta temporada"
+    significa — senão a tela ficaria vazia sem explicação."""
+    grupo = side["seasons"].get(str(season))
+    if grupo and grupo["files"]:
+        return grupo
+    todos = [f for g in side["seasons"].values() for f in g["files"]]
+    if not todos:
+        return {"files": [], "dir": side.get("root", ""), "order": "—",
+                "episodes": 0, "dirs": 0}
+    todos.sort(key=_file_sort_key)
+    return {"files": todos, "dir": _dominant_dir(todos),
+            "dirs": len({f["dir"] for f in todos}),
+            "order": _describe_order(todos),
+            "episodes": len({e for f in todos for e in f["episodes"]})}
+
+
+def scan_season(season: int, episodes: list[dict], original_dir: str | None,
+                dubbed_dir: str | None, cache: dict | None = None) -> dict:
+    """Uma temporada com pasta escolhida à mão para um lado (ou os dois).
+
+    `cache`: {"original": scan, "dubbed": scan} do scan geral — o lado que o
+    usuário NÃO trocou não é lido de novo."""
+    cache = cache or {}
+    lados = {}
+    for papel, pasta in (("original", original_dir), ("dubbed", dubbed_dir)):
+        if pasta:
+            lados[papel] = scan_side(pasta)
+        elif cache.get(papel):
+            lados[papel] = cache[papel]
+        else:
+            lados[papel] = {"root": "", "seasons": {}}
+    montado = {
+        papel: {"root": lado.get("root", ""),
+                "seasons": {str(season): season_group(lado, season)}}
+        for papel, lado in lados.items()
+    }
+    plano = propose(montado["original"], montado["dubbed"], {season: episodes})
+    return {"season": plano[0], "files": {
+        papel: montado[papel]["seasons"][str(season)]["files"]
+        for papel in ("original", "dubbed")}}
+
+
 # -------------------- pareamento --------------------
 
 def propose(original: dict, dubbed: dict, tmdb_seasons: dict[int, list[dict]],
