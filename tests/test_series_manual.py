@@ -198,3 +198,44 @@ def test_cria_job_pronto_para_o_merge(temp_db, monkeypatch, tmp_path):
         await jobs._tasks[jid]
         assert convertidos == [["S01E01", "S01E02"]]
     asyncio.run(go())
+
+
+def test_seasons_found_une_os_dois_lados_e_ignora_unknown(tmp_path):
+    _touch(tmp_path / "o" / "Show.S01E01.mkv")
+    _touch(tmp_path / "o" / "Show.S02E01.mkv")
+    _touch(tmp_path / "o" / "sem numero.mkv")          # vai para "unknown"
+    _touch(tmp_path / "d" / "Show.S02E01.mkv")
+    _touch(tmp_path / "d" / "Show.S03E01.mkv")
+    o = manual.scan_side(str(tmp_path / "o"), probe=False)
+    d = manual.scan_side(str(tmp_path / "d"), probe=False)
+    assert manual.seasons_found(o, d) == [1, 2, 3]
+    assert manual.seasons_found(o, d, wanted=[2, 9]) == [2]
+
+
+def test_raiz_com_duas_series_usa_a_pasta_dominante(tmp_path):
+    """Apontar a raiz para a pasta de torrents inteira mistura séries: o
+    episódio 1 não pode vir de outra série só porque o nome dela vem antes no
+    alfabeto. Manda a pasta que mais cobre a temporada."""
+    outra = tmp_path / "raiz" / "AAA Outra Serie"      # vem primeiro no alfabeto
+    certa = tmp_path / "raiz" / "ZZZ Serie Certa"
+    _touch(outra / "Outra.S01E01.mkv")                 # só um episódio
+    for e in (1, 2, 3):
+        _touch(certa / f"Certa.S01E0{e}.mkv")
+
+    lado = manual.scan_side(str(tmp_path / "raiz"), probe=False)
+    s1 = lado["seasons"]["1"]
+    assert s1["dir"] == str(certa)      # a que cobre mais episódios
+    assert s1["dirs"] == 2              # a UI avisa que a raiz mistura pastas
+
+    linhas = manual.propose(lado, lado, _tmdb(1, 3))[0]["rows"]
+    assert [ln["original"].split("/")[-2] for ln in linhas] == ["ZZZ Serie Certa"] * 3
+
+
+def test_mesmo_episodio_em_duas_qualidades_fica_com_o_maior(tmp_path):
+    d = tmp_path / "s"
+    d.mkdir(parents=True)
+    (d / "Show.S01E01.720p.mkv").write_bytes(b"x" * 10)
+    (d / "Show.S01E01.1080p.mkv").write_bytes(b"x" * 100)
+    lado = manual.scan_side(str(d), probe=False)
+    linhas = manual.propose(lado, lado, _tmdb(1, 1))[0]["rows"]
+    assert linhas[0]["original"].endswith("1080p.mkv")

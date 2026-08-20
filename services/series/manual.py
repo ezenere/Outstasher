@@ -133,7 +133,13 @@ def scan_side(root: str, probe: bool = True) -> dict:
         grupo["dirs"].add(f["dir"])
     for chave, grupo in por_temporada.items():
         grupo["files"].sort(key=_file_sort_key)
-        grupo["dir"] = _common_dir(grupo.pop("dirs"))
+        pastas = grupo.pop("dirs")
+        # a pasta que MAIS cobre esta temporada manda: apontar a raiz para um
+        # lugar que mistura séries/releases (a pasta de torrents inteira, por
+        # exemplo) não pode fazer o episódio 3 vir de outra série só porque o
+        # nome dela vem antes no alfabeto
+        grupo["dir"] = _dominant_dir(grupo["files"]) or _common_dir(pastas)
+        grupo["dirs"] = len(pastas)
         grupo["order"] = _describe_order(grupo["files"])
         grupo["episodes"] = len({e for f in grupo["files"] for e in f["episodes"]})
     return {"root": str(base), "seasons": por_temporada}
@@ -148,6 +154,17 @@ def _file_sort_key(f: dict):
     """Ordem natural: por episódio quando o arquivo diz, senão pelo nome."""
     ep = min(f["episodes"]) if f["episodes"] else f["absolute"]
     return (ep is None, ep if ep is not None else 0, f["name"].lower())
+
+
+def _dominant_dir(files: list[dict]) -> str:
+    """Pasta que cobre mais episódios distintos desta temporada."""
+    cobertura: dict[str, set] = {}
+    for f in files:
+        alvo = cobertura.setdefault(f["dir"], set())
+        alvo.update(f["episodes"] or [f["name"]])
+    if not cobertura:
+        return ""
+    return max(cobertura.items(), key=lambda kv: (len(kv[1]), kv[0]))[0]
 
 
 def _common_dir(dirs: set[str]) -> str:
@@ -178,6 +195,19 @@ def _describe_order(files: list[dict]) -> str:
     return f"alfabética ({len(files)} arquivo(s))"
 
 
+def seasons_found(original: dict, dubbed: dict,
+                  wanted: list[int] | None = None) -> list[int]:
+    """Temporadas reconhecidas nos DOIS lados (união), filtradas pelo pedido.
+
+    `unknown` fica de fora: arquivo que não revela temporada nenhuma é o
+    usuário que atribui, na tela."""
+    achadas = {int(k) for lado in (original, dubbed) for k in lado["seasons"]
+               if k != "unknown"}
+    if wanted:
+        achadas &= {int(s) for s in wanted}
+    return sorted(achadas)
+
+
 # -------------------- pareamento --------------------
 
 def propose(original: dict, dubbed: dict, tmdb_seasons: dict[int, list[dict]],
@@ -192,8 +222,8 @@ def propose(original: dict, dubbed: dict, tmdb_seasons: dict[int, list[dict]],
         eps = tmdb_seasons[season]
         lado_o = original["seasons"].get(str(season), {"files": []})
         lado_d = dubbed["seasons"].get(str(season), {"files": []})
-        mapa_o = _map_files(lado_o["files"], eps)
-        mapa_d = _map_files(lado_d["files"], eps)
+        mapa_o = _map_files(lado_o["files"], eps, lado_o.get("dir", ""))
+        mapa_d = _map_files(lado_d["files"], eps, lado_d.get("dir", ""))
         linhas = []
         for ep in eps:
             n = ep["episode"]
@@ -223,17 +253,33 @@ def propose(original: dict, dubbed: dict, tmdb_seasons: dict[int, list[dict]],
     return saida
 
 
-def _map_files(files: list[dict], eps: list[dict]) -> dict[int, dict]:
+def _map_files(files: list[dict], eps: list[dict],
+               dominant: str = "") -> dict[int, dict]:
     """episódio -> arquivo. Por SxxEyy quando o lado numera assim (arquivo
-    fundido entra em cada episódio que cobre); senão por posição."""
+    fundido entra em cada episódio que cobre); senão por posição.
+
+    Dois arquivos para o mesmo episódio (raiz com duas séries, ou 720p e
+    1080p na mesma pasta): ganha o da pasta dominante e, dentro dela, o
+    MAIOR — a mesma regra que o pipeline de torrent usa."""
     if files and all(f["episodes"] for f in files):
         mapa: dict[int, dict] = {}
         for f in files:
             for e in f["episodes"]:
-                mapa.setdefault(e, f)
+                atual = mapa.get(e)
+                if atual is None or _prefer(f, atual, dominant):
+                    mapa[e] = f
         return mapa
     numeros = [ep["episode"] for ep in eps]
+    if dominant:
+        files = [f for f in files if f["dir"] == dominant] or files
     return {n: f for n, f in zip(numeros, files)}
+
+
+def _prefer(novo: dict, atual: dict, dominant: str) -> bool:
+    na, aa = novo["dir"] == dominant, atual["dir"] == dominant
+    if na != aa:
+        return na
+    return (novo.get("size") or 0) > (atual.get("size") or 0)
 
 
 def _side_summary(lado: dict) -> dict:
@@ -243,6 +289,9 @@ def _side_summary(lado: dict) -> dict:
         "order": lado.get("order", "—"),
         "files": len(files),
         "episodes": lado.get("episodes", 0) or len(files),
+        # >1 = a raiz escolhida mistura pastas (outra série, outro release):
+        # a UI avisa, porque só a pasta dominante entra no pareamento
+        "dirs": lado.get("dirs", 1),
     }
 
 

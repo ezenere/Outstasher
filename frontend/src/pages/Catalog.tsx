@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { Folder, MediaVideoList, NavArrowRight, Plus, Search, Tv, WarningTriangle, Xmark } from 'iconoir-react'
 import { api, type CatalogItem, type CatalogList, type Destination } from '../api'
 import AddMovieModal from '../components/AddMovieModal'
+import AddSeriesModal from '../components/AddSeriesModal'
 import { DiskBar, Empty } from '../components/ui'
 
 // critérios de ordenação disponíveis no catálogo
@@ -100,15 +101,15 @@ export default function Catalog() {
             </button>
           ))}
         </div>
-        {media === 'movie' && (
-          <button
-            onClick={() => setAdding(true)}
-            title="Conversão manual: merge de dois arquivos que já estão no disco"
-            className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-semibold hover:bg-blue-500"
-          >
-            <Plus width={16} height={16} /> Adicionar filme
-          </button>
-        )}
+        <button
+          onClick={() => setAdding(true)}
+          title={media === 'tv'
+            ? 'Merge manual: pastas de original e dublado que já estão no disco'
+            : 'Conversão manual: merge de dois arquivos que já estão no disco'}
+          className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-semibold hover:bg-blue-500"
+        >
+          <Plus width={16} height={16} /> Adicionar {media === 'tv' ? 'série' : 'filme'}
+        </button>
         <label className="flex items-center gap-2 text-sm">
           Destino:
           <select
@@ -230,13 +231,19 @@ export default function Catalog() {
         ))}
       </div>
 
-      {adding && (
+      {adding && (media === 'tv' ? (
+        <AddSeriesModal
+          destinations={destinations.filter((d) => d.media === 'tv')}
+          defaultDestId={destId}
+          onClose={() => setAdding(false)}
+        />
+      ) : (
         <AddMovieModal
           destinations={destinations.filter((d) => (d.media ?? 'movie') === 'movie')}
           defaultDestId={destId}
           onClose={() => setAdding(false)}
         />
-      )}
+      ))}
     </div>
   )
 }

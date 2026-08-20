@@ -30,6 +30,8 @@ baixa o release na qualidade original (fluxo normal deles). O Outstasher:
   filmes já fazem em `search`.
 
 ## Interface
+- [ ] Merge manual de série: permitir atribuir temporada aos arquivos que caem
+  em "sem temporada" (hoje eles ficam de fora do pareamento).
 - [ ] Mostrar as legendas externas encontradas por episódio/filme (hoje só nos
   eventos).
 

@@ -95,7 +95,8 @@ lookahead é limitado pela RAM (`IGNORE_AV1_LOOKAHEAD_LIMITS=true` desliga).
 ### Conversão manual
 
 **Catálogo → Adicionar filme**: merge a partir de dois arquivos já no disco,
-sem busca nem torrent.
+sem busca nem torrent. Na aba **Séries** do catálogo o botão vira **Adicionar
+série** (ver *Merge manual de série*).
 
 ## Séries
 
@@ -160,6 +161,25 @@ job espera na fila (aparece como *na fila de alinhamento*). O fingerprint tem
 **barra de progresso** por arquivo (posição, fps, velocidade e ETA).
 
 Triagem sem merge: `python merge.py --align-report <orig> <dub> <saida>`.
+
+### Merge manual (arquivos locais)
+
+**Catálogo → Séries → Adicionar série**: você aponta a pasta do original e a do
+dublado (com um navegador de pastas do servidor, que começa nos destinos
+cadastrados) e ele lê as duas árvores. Por temporada aparece a **ordem
+detectada** de cada lado — `SxxEyy (E01–E23, 1 fundido)`, `absoluta (137–160)`,
+`alfabética` — com pasta, contagem de arquivos e de episódios.
+
+O pareamento é proposto por `SxxEyy` quando os dois lados numeram assim, senão
+por posição; arquivo com dois episódios entra nas duas linhas (o alinhador
+localiza a metade certa). Em **editar match manualmente** dá para trocar
+qualquer arquivo dos dois lados, desmarcar episódios, buscar um arquivo
+avulso no disco, ou usar as ações em massa (parear por posição, deslocar o
+dublado ±1). Raiz que mistura séries/versões é avisada, e só a pasta que mais
+cobre a temporada entra no pareamento.
+
+O job resultante é um job de série normal — alinhamento, revisão, relatório e
+entrega no layout Jellyfin — só que sem torrent nenhum.
 
 ### Falhas parciais
 

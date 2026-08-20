@@ -717,9 +717,7 @@ async def scan_series_dirs(req: SeriesScanRequest):
             asyncio.to_thread(series_manual.scan_side, req.dubbed_root))
     except series_manual.ManualError as e:
         raise HTTPException(400, str(e))
-    achadas = {int(k) for k in (*original["seasons"], *dubbed["seasons"])
-               if k != "unknown"}
-    querido = sorted(achadas & set(req.seasons)) if req.seasons else sorted(achadas)
+    querido = series_manual.seasons_found(original, dubbed, req.seasons)
     if not querido:
         raise HTTPException(400, "nenhuma temporada reconhecida nas pastas")
     eps: dict[int, list[dict]] = {}

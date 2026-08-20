@@ -517,6 +517,50 @@ export interface Job {
 export type JobMedia = 'movie' | 'tv'
 
 /** Item do dropdown de processos (/api/jobs/summary). Só o mínimo. */
+/** Uma pasta do servidor, como o navegador a devolve (GET /api/browse). */
+export interface BrowseDir {
+  path: string
+  parent: string | null
+  dirs: { name: string; path: string }[]
+  files: { name: string; path: string; size: number }[]
+  truncated: boolean
+  shortcuts: { label: string; path: string }[]
+}
+
+/** Um lado (original/dublado) de uma temporada no scan do merge manual. */
+export interface ManualSide {
+  dir: string          // pasta DOMINANTE (a que mais cobre a temporada)
+  order: string        // "SxxEyy (E01–E24, 2 fundido(s))" | "absoluta (…)" | …
+  files: number
+  episodes: number
+  dirs: number         // >1 = a raiz mistura pastas; só a dominante pareia
+}
+
+export interface ManualRow {
+  season: number
+  episode: number
+  name: string | null
+  original: string | null
+  dubbed: string | null
+  orig_duration: number | null
+  dub_duration: number | null
+  include: boolean
+}
+
+export interface ManualSeason {
+  season: number
+  original: ManualSide
+  dubbed: ManualSide
+  rows: ManualRow[]
+  unmatched: { original: string[]; dubbed: string[] }
+}
+
+export interface ManualScan {
+  original: { root: string; seasons: Record<string, { files: { path: string; name: string }[] }> }
+  dubbed: { root: string; seasons: Record<string, { files: { path: string; name: string }[] }> }
+  seasons: ManualSeason[]
+}
+
 export interface JobSummary {
   /** etapa da conversão (só com state 'converting'); ver MERGE_PHASE */
   phase?: MergePhase | null
