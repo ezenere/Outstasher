@@ -42,6 +42,8 @@ BISECT_WIN_S = 6.0      # janela nas iterações de bissecção
 SILENCE_SNAP_S = 5.0    # procura silêncio até isto do ponto estimado
 SILENCE_DB = -30.0
 SILENCE_MIN_S = 0.12
+DISCARD_FIT_MAX_S = 3.0  # descarte até isto = preto de intervalo: a janela
+                         # inteira persegue o silêncio; acima é recap
 WOBBLE_MAX_S = 8.0      # anomalia do vídeo até este tamanho funde SEM consulta
 WOBBLE_AUDIO_MAX_S = 90.0  # até isto funde SE o áudio confirmar continuidade
 WOBBLE_OFF_TOL_S = 0.35  # vizinhos com offset até isto de diferença = contínuo
@@ -224,6 +226,39 @@ def _snap_to_silence(dub_path, dub_a, t: float, log,
     c = (best[0] + best[1]) / 2
     log(f"  corte em {t:.2f}s encaixado no silêncio {best[0]:.2f}-{best[1]:.2f}s "
         f"({c - t:+.2f}s)")
+    return c
+
+
+def _snap_discard_to_silence(dub_path, dub_a, t: float, extra: float, log,
+                             radius: float = SILENCE_SNAP_S) -> float:
+    """Começo da janela de DESCARTE [corte, corte+extra] do dublado.
+
+    Diferente do corte pontual, aqui `extra` segundos são jogados fora a
+    partir do corte — a janela INTEIRA deve cair no silêncio (o preto do
+    intervalo comercial), não só o ponto de partida. Mandar o ponto para o
+    MEIO do silêncio (como no corte pontual) fazia a janela sair pela borda
+    direita e comer o comecinho audível da cena seguinte (caso real: junção
+    aos 31:10 com 905 ms a mais no dublado e silêncio de 1,09 s — sobravam
+    360 ms de áudio descartado depois do silêncio).
+
+    Silêncio maior que o descarte: fica o mais perto possível do palpite,
+    dentro dele; menor mas descarte curto (preto de intervalo): centra, para
+    perder o mínimo dos dois lados. Descarte LONGO (recap) tem áudio de
+    verdade dentro por definição — aí só o ponto de corte importa, como no
+    corte pontual."""
+    sil = _silences(dub_path, dub_a, t - radius, t + radius + extra)
+    if not sil:
+        log(f"  corte em {t:.2f}s sem silêncio por perto — mantido")
+        return t
+    s0, s1 = min(sil, key=lambda iv: abs((iv[0] + iv[1]) / 2 - t))
+    if s1 - s0 >= extra:
+        c = min(max(t, s0), s1 - extra)
+    elif extra <= DISCARD_FIT_MAX_S:
+        c = (s0 + s1) / 2 - extra / 2
+    else:
+        c = (s0 + s1) / 2
+    log(f"  descarte de {extra * 1000:.0f} ms encaixado no silêncio "
+        f"{s0:.2f}-{s1:.2f}s (corte em {c:.2f}s, {c - t:+.2f}s)")
     return c
 
 
@@ -525,7 +560,8 @@ def _tighten_extra_dub(segs: list[Segment], dub_path, dub_a, log) -> list[Segmen
             tol = max(EXTRA_DUB_TOL_S, EXTRA_DUB_TOL_FRAC * gap)
             if 0 < gap <= EXTRA_DUB_MAX_S and extra > 0 \
                     and abs(extra - gap) <= tol:
-                cut = _snap_to_silence(dub_path, dub_a, s.a_end, log)
+                cut = _snap_discard_to_silence(dub_path, dub_a, s.a_end,
+                                               extra, log)
                 cut = min(max(cut, s.a_start + 0.5), nxt.a_end - extra - 0.5)
                 s.a_end = cut
                 s.b_end = cut + s.offset

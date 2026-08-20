@@ -165,6 +165,29 @@ def test_juncao_com_dublado_a_mais_nao_puxa_original(tmp_path):
     assert any("junção" in l for l in logs)
 
 
+def test_descarte_da_juncao_cabe_inteiro_no_silencio(tmp_path):
+    """Caso real (E05 aos 31:10): 905 ms a mais no dublado (preto do intervalo
+    comercial) e silêncio de ~1,1 s. Mandar o CORTE para o meio do silêncio
+    fazia a janela de descarte [corte, corte+extra] sair pela borda direita e
+    comer ~360 ms audíveis da cena seguinte. A janela inteira tem que caber
+    no silêncio."""
+    dub = _audio(tmp_path / "dub.wav", 70, seed=9, gaps=[(29.9, 31.0)])
+    segs = [
+        Segment("match", 0.0, 30.0, 0.0, 30.0, offset=0.0),
+        Segment("gap_dub", 30.0, 30.9, 30.0, 30.0),      # 0,9 s só no dublado
+        Segment("match", 30.9, 60.0, 30.0, 59.1, offset=-0.9),
+    ]
+    logs = []
+    out = refine._tighten_extra_dub(segs, str(dub), 0, log=logs.append)
+    a, g, b = out
+    # descarte = [a.a_end, a.a_end + 0.9] dentro do silêncio 29.9-31.0
+    assert 29.9 - 0.05 <= a.a_end, a.a_end
+    assert a.a_end + 0.9 <= 31.0 + 0.05, a.a_end
+    assert abs(b.a_start - (a.a_end + 0.9)) < 1e-6
+    assert abs(b.b_start - a.b_end) < 1e-6    # original contínuo
+    assert any("descarte" in l for l in logs), logs
+
+
 def _dub_with_scene_cut(orig_wav, path, cut_at, drop):
     """'Dublado' = o áudio original com [cut_at, cut_at+drop) REMOVIDO — a
     cena existe só no original (censura/edição de TV)."""
