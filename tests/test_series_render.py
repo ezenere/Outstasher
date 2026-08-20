@@ -378,8 +378,9 @@ def test_mux_aplica_o_teto_de_memoria_no_filho():
     """O teto tem que chegar ao PROCESSO do ffmpeg (é ele que estoura, não o
     servidor): o filho enxerga o limite; sem limite, fica ilimitado."""
     from services import merger as m
-    p = render_mod._run_mux(["sh", "-c", "ulimit -v"])
-    assert p.stdout.strip() == str(int(m.MUX_MEM_LIMIT_GB * 1024 ** 2))
+    # (o _run_mux lê o -progress do stdout, então o eco vai para o stderr)
+    p = render_mod._run_mux(["sh", "-c", "ulimit -v 1>&2"])
+    assert p.stderr.strip() == str(int(m.MUX_MEM_LIMIT_GB * 1024 ** 2))
 
 
 @pytest.mark.ffmpeg
@@ -400,3 +401,33 @@ def test_render_com_mkvmerge_de_verdade(tmp_path):
     assert audios[1]["disposition"]["default"] == 1
     assert audios[0]["disposition"]["default"] == 0
     assert [c["tags"]["title"] for c in info["chapters"]] == ["A", "B"]
+
+
+@pytest.mark.ffmpeg
+def test_mux_final_reporta_progresso(tmp_path, monkeypatch):
+    """O mux do arquivo final é a etapa mais longa num REMUX (uma hora sem
+    sinal, parecendo travado): ela tem que alimentar a barra até 100%."""
+    orig = _media(tmp_path / "orig.mkv", 30, seed=1)
+    dub = _media(tmp_path / "dub.mkv", 30, seed=2)
+    vistos = []
+
+    def on_progress(info):
+        vistos.append(info["pct"])
+
+    # sem mkvmerge: caminho do ffmpeg (-progress)
+    monkeypatch.setattr(render_mod, "has_mkvmerge", lambda: False)
+    render_mod.render([Segment("match", 0.0, 30.0, 0.0, 30.0, offset=0.0)],
+                      str(dub), str(orig), str(tmp_path / "a.mkv"), "pt",
+                      log=lambda m: None, on_progress=on_progress)
+    assert vistos and vistos[-1] == 100.0
+    assert vistos == sorted(vistos), vistos
+
+    import shutil
+    if shutil.which("mkvmerge") is None:
+        return
+    monkeypatch.undo()
+    vistos.clear()
+    render_mod.render([Segment("match", 0.0, 30.0, 0.0, 30.0, offset=0.0)],
+                      str(dub), str(orig), str(tmp_path / "b.mkv"), "pt",
+                      log=lambda m: None, on_progress=on_progress)
+    assert vistos and vistos[-1] == 100.0

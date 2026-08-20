@@ -18,8 +18,10 @@ nenhum capítulo de auditoria é criado — os preenchimentos ficam registrados
 na EDL do job, não na mídia. Num original FUNDIDO (b_window) o ffmpeg desloca
 e recorta os capítulos junto com o -ss/-to.
 """
+import re
 import subprocess
 import tempfile
+import threading
 from functools import lru_cache
 from pathlib import Path
 
@@ -205,7 +207,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         if has_mkvmerge() and not in_opts:
             cmd2 = _mkvmerge_cmd(str(output), orig_path, str(dub_mka),
                                  iso, probe_orig)
-            p2 = _run_mux(cmd2)
+            p2 = _run_mkvmerge(cmd2, on_progress)
             if p2.returncode >= 2:   # 1 = só avisos; 2 = erro de verdade
                 raise merger.MergeError(
                     "mux final (mkvmerge) falhou: "
@@ -213,8 +215,11 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
             _check_mux_duration(output, duration_b)
             return {"b_shift": 0.0}
 
-        cmd2 = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-fflags", "+genpts",
+        # loglevel WARNING (não error): é em nível de aviso que o ffmpeg diz
+        # "forcing output" — o sinal de que a intercalação saiu frouxa. Com
+        # -loglevel error esse aviso nunca chegaria ao usuário.
+        cmd2 = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-y",
+                "-progress", "pipe:1", "-nostats", "-fflags", "+genpts",
                 *in_opts, "-i", orig_path, "-i", str(dub_mka)]
         cmd2 += ["-map", "0:v:0", "-c:v", "copy"]
         # áudios do original (todas as línguas), depois o dublado
@@ -238,7 +243,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         cmd2 += ["-avoid_negative_ts", "make_zero", "-max_interleave_delta",
                  str(merger.sized_interleave_delta(merger.byte_rate_of(probe_orig))),
                  *out_opts, output]
-        p2 = _run_mux(cmd2)
+        p2 = _run_mux(cmd2, duration_b, on_progress)
         if p2.returncode != 0:
             raise merger.MergeError(
                 "mux final falhou: "
@@ -259,6 +264,9 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
     # deslocamento aplicado aos tempos b (0 sem b_window): quem for anexar
     # legendas externas precisa dele
     return {"b_shift": float(in_opts[1]) if in_opts else 0.0}
+
+
+_MKV_PROGRESS = re.compile(r"Progress:\s*(\d+(?:\.\d+)?)%")
 
 
 @lru_cache(maxsize=1)
@@ -297,12 +305,64 @@ def _check_mux_duration(output: str, expected_s: float) -> None:
             f"esperados — quase sempre falta de memória no muxer")
 
 
-def _run_mux(cmd: list[str]) -> subprocess.CompletedProcess:
+def _run_mkvmerge(cmd: list[str], on_progress=None) -> subprocess.CompletedProcess:
+    """mkvmerge com progresso: ele imprime 'Progress: NN%' na saída padrão
+    enquanto copia. Sem isso o mux de um REMUX de 150 GB fica uma hora sem
+    dar sinal e parece travado."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace",
+                            bufsize=1, preexec_fn=merger.mem_limiter())
+    erros: list[str] = []
+    dreno = threading.Thread(target=lambda: erros.extend(proc.stderr), daemon=True)
+    dreno.start()
+    linhas: list[str] = []
+    for line in proc.stdout:
+        linhas.append(line)
+        m = _MKV_PROGRESS.search(line)
+        if m and on_progress:
+            on_progress({"pct": float(m.group(1)), "out_s": 0.0,
+                         "duration_s": 0.0, "size": 0, "bitrate": 0,
+                         "speed": 0.0, "fps": 0.0, "eta": None})
+    proc.stdout.close()
+    proc.wait()
+    dreno.join(timeout=5)
+    proc.stderr.close()
+    if on_progress and proc.returncode < 2:
+        on_progress({"pct": 100.0, "out_s": 0.0, "duration_s": 0.0, "size": 0,
+                     "bitrate": 0, "speed": 0.0, "fps": 0.0, "eta": 0})
+    return subprocess.CompletedProcess(cmd, proc.returncode,
+                                       "".join(linhas), "".join(erros))
+
+
+def _run_mux(cmd: list[str], duration_s: float = 0.0,
+             on_progress=None) -> subprocess.CompletedProcess:
     """Mux final (cópia pura) com o teto de memória do merger: um muxer que
     dispara é problema DELE, não da máquina."""
-    return subprocess.run(cmd, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace",
-                          preexec_fn=merger.mem_limiter())
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace",
+                            bufsize=1, preexec_fn=merger.mem_limiter())
+    # stderr numa thread: lendo os dois em sequência, um mux que avisa muito
+    # (uma linha "forcing output" por faixa esparsa) encheria o pipe e travaria
+    erros: list[str] = []
+    dreno = threading.Thread(target=lambda: erros.extend(proc.stderr), daemon=True)
+    dreno.start()
+    bloco: dict = {}
+    for line in proc.stdout:
+        key, _, value = line.strip().partition("=")
+        if key != "progress":
+            bloco[key] = value
+            continue
+        if on_progress and duration_s > 0:
+            info = merger._parse_progress_block(bloco, duration_s)
+            if value == "end":
+                info.update(pct=100.0, eta=0)
+            on_progress(info)
+        bloco = {}
+    proc.stdout.close()
+    proc.wait()
+    dreno.join(timeout=5)
+    proc.stderr.close()
+    return subprocess.CompletedProcess(cmd, proc.returncode, "", "".join(erros))
 
 
 def _plan_slices(segs: list[Segment],
