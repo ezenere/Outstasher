@@ -247,8 +247,8 @@ def test_pasta_escolhida_para_a_temporada_manda(tmp_path):
     # arquivos sem nenhuma referência de temporada
     for nome in ("cap 1.mkv", "cap 2.mkv", "cap 3.mkv"):
         _touch(tmp_path / "solta" / nome)
-    out = manual.scan_season(4, _tmdb(4, 3)[4], str(tmp_path / "solta"),
-                             str(tmp_path / "solta"))
+    out = manual.scan_season(4, _tmdb(4, 3)[4], [str(tmp_path / "solta")],
+                             [str(tmp_path / "solta")])
     linhas = out["season"]["rows"]
     assert [ln["episode"] for ln in linhas] == [1, 2, 3]
     assert [ln["original"].split("/")[-1] for ln in linhas] == [
@@ -258,17 +258,35 @@ def test_pasta_escolhida_para_a_temporada_manda(tmp_path):
     assert len(out["files"]["original"]) == 3
 
 
-def test_scan_season_troca_so_um_lado_e_reusa_o_outro(tmp_path):
+def test_trocar_a_pasta_de_um_lado_nao_apaga_o_outro(tmp_path):
+    """Bug de campo: escolher a pasta do áudio zerava o vídeo da temporada.
+    Os dois lados vão sempre na chamada — o que não mudou vai como está."""
     _touch(tmp_path / "o" / "Show.S01E01.mkv")
     _touch(tmp_path / "o" / "Show.S01E02.mkv")
     _touch(tmp_path / "novo_dub" / "dub 1.mkv")
     _touch(tmp_path / "novo_dub" / "dub 2.mkv")
-    cache = {"original": manual.scan_side(str(tmp_path / "o"), probe=False)}
 
-    out = manual.scan_season(1, _tmdb(1, 2)[1], None,
-                             str(tmp_path / "novo_dub"), cache=cache)
+    out = manual.scan_season(1, _tmdb(1, 2)[1], [str(tmp_path / "o")],
+                             [str(tmp_path / "novo_dub")])
     linhas = out["season"]["rows"]
     assert [ln["original"].split("/")[-1] for ln in linhas] == [
-        "Show.S01E01.mkv", "Show.S01E02.mkv"]        # veio do cache
+        "Show.S01E01.mkv", "Show.S01E02.mkv"]        # continua lá
     assert [ln["dubbed"].split("/")[-1] for ln in linhas] == [
         "dub 1.mkv", "dub 2.mkv"]                    # veio da pasta nova
+    assert all(ln["include"] for ln in linhas)
+
+
+def test_varias_pastas_no_mesmo_lado_se_somam(tmp_path):
+    """Release espalhado: uma pasta por temporada, apontadas juntas."""
+    _touch(tmp_path / "t1" / "Show.S01E01.mkv")
+    _touch(tmp_path / "t1" / "Show.S01E02.mkv")
+    _touch(tmp_path / "t2" / "Show.S02E01.mkv")
+    lado = manual.scan_sides([str(tmp_path / "t1"), str(tmp_path / "t2")],
+                             probe=False)
+    assert sorted(lado["seasons"]) == ["1", "2"]
+    assert len(lado["seasons"]["1"]["files"]) == 2
+    assert lado["roots"] == [str(tmp_path / "t1"), str(tmp_path / "t2")]
+    # a mesma pasta duas vezes não duplica arquivo
+    dobrada = manual.scan_sides([str(tmp_path / "t1"), str(tmp_path / "t1")],
+                                probe=False)
+    assert len(dobrada["seasons"]["1"]["files"]) == 2

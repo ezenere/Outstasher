@@ -195,6 +195,33 @@ def _describe_order(files: list[dict]) -> str:
     return f"alfabética ({len(files)} arquivo(s))"
 
 
+def scan_sides(roots: list[str], probe: bool = True) -> dict:
+    """Várias pastas de um mesmo lado lidas como UM lado só.
+
+    Um release pode estar espalhado (uma pasta por temporada, extras à parte),
+    então o usuário aponta quantas quiser e elas se somam por temporada."""
+    limpas = [r for r in (roots or []) if r]
+    if not limpas:
+        return {"root": "", "roots": [], "seasons": {}}
+    partes = [scan_side(r, probe=probe) for r in limpas]
+    juntas: dict[str, list[dict]] = {}
+    for parte in partes:
+        for chave, grupo in parte["seasons"].items():
+            juntas.setdefault(chave, []).extend(grupo["files"])
+    seasons: dict[str, dict] = {}
+    for chave, files in juntas.items():
+        vistos: dict[str, dict] = {f["path"]: f for f in files}   # sem repetir
+        lista = sorted(vistos.values(), key=_file_sort_key)
+        seasons[chave] = {
+            "files": lista,
+            "dir": _dominant_dir(lista),
+            "dirs": len({f["dir"] for f in lista}),
+            "order": _describe_order(lista),
+            "episodes": len({e for f in lista for e in f["episodes"]}),
+        }
+    return {"root": limpas[0], "roots": limpas, "seasons": seasons}
+
+
 def seasons_found(original: dict, dubbed: dict,
                   wanted: list[int] | None = None) -> list[int]:
     """Temporadas reconhecidas nos DOIS lados (união), filtradas pelo pedido.
@@ -230,21 +257,18 @@ def season_group(side: dict, season: int) -> dict:
             "episodes": len({e for f in todos for e in f["episodes"]})}
 
 
-def scan_season(season: int, episodes: list[dict], original_dir: str | None,
-                dubbed_dir: str | None, cache: dict | None = None) -> dict:
-    """Uma temporada com pasta escolhida à mão para um lado (ou os dois).
+def scan_season(season: int, episodes: list[dict],
+                original_dirs: list[str] | None,
+                dubbed_dirs: list[str] | None) -> dict:
+    """Uma temporada relida com as pastas escolhidas para ela.
 
-    `cache`: {"original": scan, "dubbed": scan} do scan geral — o lado que o
-    usuário NÃO trocou não é lido de novo."""
-    cache = cache or {}
-    lados = {}
-    for papel, pasta in (("original", original_dir), ("dubbed", dubbed_dir)):
-        if pasta:
-            lados[papel] = scan_side(pasta)
-        elif cache.get(papel):
-            lados[papel] = cache[papel]
-        else:
-            lados[papel] = {"root": "", "seasons": {}}
+    Os DOIS lados vêm sempre na chamada (mesmo o que não mudou): sem isso, o
+    lado não informado sumiria da temporada — era o bug de "escolher a pasta
+    do áudio apagava o vídeo"."""
+    lados = {
+        "original": scan_sides(original_dirs or []),
+        "dubbed": scan_sides(dubbed_dirs or []),
+    }
     montado = {
         papel: {"root": lado.get("root", ""),
                 "seasons": {str(season): season_group(lado, season)}}

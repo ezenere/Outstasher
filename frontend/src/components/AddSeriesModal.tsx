@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  Folder, MediaVideo, Play, Search, SoundHigh, Tv, Xmark,
+  Folder, MediaVideo, Play, Plus, Search, SoundHigh, Tv, Xmark,
 } from 'iconoir-react'
 import {
   api, post, type ConvertOptions, type Destination, type Job, type Language,
@@ -17,6 +17,9 @@ interface Props {
   defaultDestId: number | null
   onClose: () => void
 }
+
+/** Última pasta usada — de onde o navegador abre da próxima vez. */
+const ultimo = (v: string[] | undefined) => (v && v.length ? v[v.length - 1] : null)
 
 const fmtDur = (s: number | null) =>
   s == null ? '—' : `${Math.floor(s / 60)}min`
@@ -34,14 +37,17 @@ export default function AddSeriesModal({ destinations, defaultDestId, onClose }:
   const [results, setResults] = useState<Movie[] | null>(null)
   const [searching, setSearching] = useState(false)
   const [series, setSeries] = useState<Movie | null>(null)
-  const [origRoot, setOrigRoot] = useState('')
-  const [dubRoot, setDubRoot] = useState('')
+  const [origRoots, setOrigRoots] = useState<string[]>([])
+  const [dubRoots, setDubRoots] = useState<string[]>([])
   const [picking, setPicking] = useState<null | { side: 'orig' | 'dub' }>(null)
   const [pickFile, setPickFile] = useState<null | { season: number; ep: number; side: 'orig' | 'dub' }>(null)
   const [scan, setScan] = useState<ManualScan | null>(null)
   const [seasons, setSeasons] = useState<ManualSeason[]>([])
   // pasta escolhida para UMA temporada substitui os arquivos daquele lado
   const [override, setOverride] = useState<Record<string, { path: string; name: string }[]>>({})
+  // pastas escolhidas para UMA temporada ("3:orig" -> [pasta]); sem entrada,
+  // valem as raízes do passo 2
+  const [seasonDirs, setSeasonDirs] = useState<Record<string, string[]>>({})
   const [seasonPick, setSeasonPick] = useState<null | { season: number; side: 'orig' | 'dub' }>(null)
   const [openSeason, setOpenSeason] = useState<number | null>(null)
   const [destId, setDestId] = useState<number | null>(defaultDestId)
@@ -75,12 +81,14 @@ export default function AddSeriesModal({ destinations, defaultDestId, onClose }:
   }
 
   async function runScan() {
-    if (!series || !origRoot || !dubRoot || busy) return
+    if (!series || !origRoots.length || !dubRoots.length || busy) return
     setBusy(true)
     setError(null)
+    setSeasonDirs({})
+    setOverride({})
     try {
       const data = await post<ManualScan>('/api/series/manual/scan', {
-        tmdb_id: series.id, original_root: origRoot, dubbed_root: dubRoot,
+        tmdb_id: series.id, original_roots: origRoots, dubbed_roots: dubRoots,
       })
       setScan(data)
       setSeasons(data.seasons)
@@ -101,17 +109,29 @@ export default function AddSeriesModal({ destinations, defaultDestId, onClose }:
     return lado?.seasons?.[String(season)]?.files ?? []
   }
 
-  /** Relê UMA temporada com a pasta que o usuário escolheu para ela. */
+  /** Relê UMA temporada com a pasta que o usuário escolheu para ela.
+   *
+   *  Os dois lados vão na chamada: o que não mudou vai como está na tela —
+   *  mandar só o lado trocado apagava o outro. */
   async function scanSeason(season: number, side: 'orig' | 'dub', dir: string) {
     if (!series) return
+    const atual = {
+      orig: seasonDirs[`${season}:orig`] ?? origRoots,
+      dub: seasonDirs[`${season}:dub`] ?? dubRoots,
+    }
+    const novos = { ...atual, [side]: [dir] }
     setBusy(true)
     setError(null)
     try {
       const out = await post<ManualSeasonScan>('/api/series/manual/scan-season', {
         tmdb_id: series.id, season,
-        original_dir: side === 'orig' ? dir : null,
-        dubbed_dir: side === 'dub' ? dir : null,
+        original_dirs: novos.orig, dubbed_dirs: novos.dub,
       })
+      setSeasonDirs((prev) => ({
+        ...prev,
+        [`${season}:orig`]: novos.orig,
+        [`${season}:dub`]: novos.dub,
+      }))
       setSeasons((prev) => prev.map((s) => s.season === season ? out.season : s))
       setOverride((prev) => ({
         ...prev,
@@ -221,11 +241,14 @@ export default function AddSeriesModal({ destinations, defaultDestId, onClose }:
         {/* 2. pastas */}
         {series && (
           <Step n={2} title="Pastas dos arquivos">
-            <RootRow icon={MediaVideo} label="Original (vídeo)" value={origRoot}
-              onPick={() => setPicking({ side: 'orig' })} />
-            <RootRow icon={SoundHigh} label="Dublado (áudio)" value={dubRoot}
-              onPick={() => setPicking({ side: 'dub' })} />
-            <button onClick={() => void runScan()} disabled={!origRoot || !dubRoot || busy}
+            <RootList icon={MediaVideo} label="Original (vídeo)" paths={origRoots}
+              onAdd={() => setPicking({ side: 'orig' })}
+              onRemove={(p) => setOrigRoots((v) => v.filter((x) => x !== p))} />
+            <RootList icon={SoundHigh} label="Dublado (áudio)" paths={dubRoots}
+              onAdd={() => setPicking({ side: 'dub' })}
+              onRemove={(p) => setDubRoots((v) => v.filter((x) => x !== p))} />
+            <button onClick={() => void runScan()}
+              disabled={!origRoots.length || !dubRoots.length || busy}
               className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-zinc-700 px-3 py-1.5 text-sm hover:bg-zinc-600 disabled:opacity-50">
               <Search width={15} height={15} /> {busy ? 'Lendo as pastas…' : 'Ler as pastas'}
             </button>
@@ -304,9 +327,10 @@ export default function AddSeriesModal({ destinations, defaultDestId, onClose }:
         <FolderPicker
           mode="dir"
           title={picking.side === 'orig' ? 'Pasta do original (vídeo)' : 'Pasta do dublado (áudio)'}
-          start={picking.side === 'orig' ? origRoot || null : dubRoot || null}
+          start={ultimo(picking.side === 'orig' ? origRoots : dubRoots)}
           onPick={(p) => {
-            picking.side === 'orig' ? setOrigRoot(p) : setDubRoot(p)
+            const add = (v: string[]) => v.includes(p) ? v : [...v, p]
+            picking.side === 'orig' ? setOrigRoots(add) : setDubRoots(add)
             setPicking(null)
           }}
           onClose={() => setPicking(null)}
@@ -316,7 +340,8 @@ export default function AddSeriesModal({ destinations, defaultDestId, onClose }:
         <FolderPicker
           mode="dir"
           title={`Pasta ${seasonPick.side === 'orig' ? 'do vídeo' : 'do áudio'} da temporada ${seasonPick.season}`}
-          start={seasonPick.side === 'orig' ? origRoot || null : dubRoot || null}
+          start={ultimo(seasonDirs[`${seasonPick.season}:${seasonPick.side}`]
+            ?? (seasonPick.side === 'orig' ? origRoots : dubRoots))}
           onPick={(p) => {
             void scanSeason(seasonPick.season, seasonPick.side, p)
             setSeasonPick(null)
@@ -328,7 +353,7 @@ export default function AddSeriesModal({ destinations, defaultDestId, onClose }:
         <FolderPicker
           mode="file"
           title={`Arquivo ${pickFile.side === 'orig' ? 'original' : 'dublado'} de S${String(pickFile.season).padStart(2, '0')}E${String(pickFile.ep).padStart(2, '0')}`}
-          start={pickFile.side === 'orig' ? origRoot || null : dubRoot || null}
+          start={ultimo(pickFile.side === 'orig' ? origRoots : dubRoots)}
           onPick={(p) => {
             patch(pickFile.season, pickFile.ep,
               pickFile.side === 'orig' ? { original: p, include: true } : { dubbed: p, include: true })
@@ -352,26 +377,38 @@ function Step({ n, title, children }: { n: number; title: string; children: Reac
   )
 }
 
-function RootRow({ icon: Icon, label, value, onPick }: {
+function RootList({ icon: Icon, label, paths, onAdd, onRemove }: {
   icon: typeof MediaVideo
   label: string
-  value: string
-  onPick: () => void
+  paths: string[]
+  onAdd: () => void
+  onRemove: (path: string) => void
 }) {
   return (
-    <div className="mb-2 flex items-center gap-2">
-      <Icon width={15} height={15} className="shrink-0 text-zinc-500" />
-      <span className="w-32 shrink-0 text-sm text-zinc-400">{label}</span>
-      <code className="min-w-0 flex-1 truncate rounded-lg border border-zinc-800 bg-zinc-950/60 px-2 py-1 text-xs text-zinc-300">
-        {value || 'nenhuma pasta escolhida'}
-      </code>
-      <button onClick={onPick}
-        className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800">
-        <Folder width={13} height={13} /> Escolher
-      </button>
+    <div className="mb-2 flex items-start gap-2">
+      <Icon width={15} height={15} className="mt-1.5 shrink-0 text-zinc-500" />
+      <span className="mt-1 w-32 shrink-0 text-sm text-zinc-400">{label}</span>
+      <div className="min-w-0 flex-1 space-y-1">
+        {paths.map((p) => (
+          <div key={p} className="flex items-center gap-1">
+            <code className="min-w-0 flex-1 truncate rounded-lg border border-zinc-800 bg-zinc-950/60 px-2 py-1 text-xs text-zinc-300">
+              {p}
+            </code>
+            <button onClick={() => onRemove(p)} title="Remover esta pasta"
+              className="shrink-0 rounded-lg border border-zinc-700 p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300">
+              <Xmark width={12} height={12} />
+            </button>
+          </div>
+        ))}
+        <button onClick={onAdd}
+          className="inline-flex items-center gap-1 rounded-lg border border-dashed border-zinc-700 px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+          <Plus width={12} height={12} /> {paths.length ? 'adicionar outra pasta' : 'escolher pasta'}
+        </button>
+      </div>
     </div>
   )
 }
+
 
 function SeasonCard({ season, open, onToggle, origOptions, dubOptions, onPatch, onRepair, onPickFile, onPickFolder }: {
   season: ManualSeason
@@ -388,8 +425,8 @@ function SeasonCard({ season, open, onToggle, origOptions, dubOptions, onPatch, 
   const faltando = season.rows.filter((r) => !r.original || !r.dubbed).length
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-950/40">
-      <button onClick={onToggle} className="w-full px-3 py-2 text-left hover:bg-zinc-800/40">
-        <div className="flex items-center gap-2">
+      <div className="px-3 py-2">
+        <div className="flex cursor-pointer items-center gap-2" onClick={onToggle}>
           <span className="text-sm font-semibold">Temporada {season.season}</span>
           <span className="text-xs text-zinc-500">
             {marcados} de {season.rows.length} episódio(s)
@@ -404,23 +441,16 @@ function SeasonCard({ season, open, onToggle, origOptions, dubOptions, onPatch, 
           </span>
         </div>
         <div className="mt-1 space-y-0.5 text-xs text-zinc-500">
-          <SideLine icon={MediaVideo} label="Vídeo" side={season.original} />
-          <SideLine icon={SoundHigh} label="Áudio" side={season.dubbed} />
+          <SideLine icon={MediaVideo} label="Vídeo" side={season.original}
+            onPickFolder={() => onPickFolder('orig')} />
+          <SideLine icon={SoundHigh} label="Áudio" side={season.dubbed}
+            onPickFolder={() => onPickFolder('dub')} />
         </div>
-      </button>
+      </div>
 
       {open && (
         <div className="space-y-2 border-t border-zinc-800 p-3">
-          {/* pasta desta temporada + ações em massa */}
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-xs text-zinc-500">Pasta desta temporada:</span>
-            <Bulk onClick={() => onPickFolder('orig')}>
-              <Folder width={11} height={11} /> vídeo
-            </Bulk>
-            <Bulk onClick={() => onPickFolder('dub')}>
-              <Folder width={11} height={11} /> áudio
-            </Bulk>
-            <span className="mx-1 h-3 w-px bg-zinc-700" />
             <Bulk onClick={() => onRepair(season.season, 'position')}>Parear por posição</Bulk>
             <Bulk onClick={() => onRepair(season.season, 'shift-1')}>Áudio −1</Bulk>
             <Bulk onClick={() => onRepair(season.season, 'shift+1')}>Áudio +1</Bulk>
@@ -513,10 +543,11 @@ function FieldRow({ icon: Icon, label, value, options, duration, onChange, onBro
   )
 }
 
-function SideLine({ icon: Icon, label, side }: {
+function SideLine({ icon: Icon, label, side, onPickFolder }: {
   icon: typeof MediaVideo
   label: string
   side: ManualSeason['original']
+  onPickFolder: () => void
 }) {
   return (
     <div className="flex items-center gap-1.5">
@@ -524,6 +555,13 @@ function SideLine({ icon: Icon, label, side }: {
       <span className="w-12 shrink-0">{label}</span>
       <span className="shrink-0 rounded bg-zinc-800 px-1.5 text-zinc-400">{side.order}</span>
       <span className="min-w-0 flex-1 truncate">{side.dir || '—'}</span>
+      <button
+        onClick={(e) => { e.stopPropagation(); onPickFolder() }}
+        title={`Trocar a pasta de ${label.toLowerCase()} desta temporada`}
+        className="shrink-0 rounded border border-zinc-700 p-0.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+      >
+        <Folder width={11} height={11} />
+      </button>
       {side.dirs > 1 && (
         <span className="shrink-0 rounded bg-amber-950/70 px-1 text-amber-300"
           title="A pasta escolhida mistura séries/versões: só a pasta acima entra no pareamento">

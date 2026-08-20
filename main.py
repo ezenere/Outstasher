@@ -686,8 +686,8 @@ async def create_series_job(req: SeriesJobRequest):
 
 class SeriesScanRequest(BaseModel):
     tmdb_id: int
-    original_root: str
-    dubbed_root: str
+    original_roots: list[str]          # um release pode estar em várias pastas
+    dubbed_roots: list[str]
     seasons: list[int] | None = None   # None = todas as encontradas
 
 
@@ -713,8 +713,8 @@ async def scan_series_dirs(req: SeriesScanRequest):
     """Lê as duas árvores e propõe o pareamento episódio a episódio."""
     try:
         original, dubbed = await asyncio.gather(
-            asyncio.to_thread(series_manual.scan_side, req.original_root),
-            asyncio.to_thread(series_manual.scan_side, req.dubbed_root))
+            asyncio.to_thread(series_manual.scan_sides, req.original_roots),
+            asyncio.to_thread(series_manual.scan_sides, req.dubbed_roots))
     except series_manual.ManualError as e:
         raise HTTPException(400, str(e))
     querido = series_manual.seasons_found(original, dubbed, req.seasons)
@@ -733,14 +733,16 @@ async def scan_series_dirs(req: SeriesScanRequest):
 class SeriesScanSeasonRequest(BaseModel):
     tmdb_id: int
     season: int
-    original_dir: str | None = None    # None = manter o que já foi lido
-    dubbed_dir: str | None = None
+    # os DOIS lados sempre (o que não mudou vai como está na tela): a rota não
+    # guarda estado, então o lado ausente sumiria da temporada
+    original_dirs: list[str] = []
+    dubbed_dirs: list[str] = []
 
 
 @app.post("/api/series/manual/scan-season")
 async def scan_series_season(req: SeriesScanSeasonRequest):
     """Relê UMA temporada com a pasta que o usuário escolheu para ela."""
-    if not req.original_dir and not req.dubbed_dir:
+    if not req.original_dirs and not req.dubbed_dirs:
         raise HTTPException(400, "escolha ao menos uma pasta")
     try:
         eps = (await tmdb.tv_season(req.tmdb_id, req.season))["episodes"]
@@ -749,7 +751,7 @@ async def scan_series_season(req: SeriesScanSeasonRequest):
     try:
         return await asyncio.to_thread(
             series_manual.scan_season, req.season, eps,
-            req.original_dir, req.dubbed_dir)
+            req.original_dirs, req.dubbed_dirs)
     except series_manual.ManualError as e:
         raise HTTPException(400, str(e))
 

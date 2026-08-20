@@ -164,15 +164,17 @@ Triagem sem merge: `python merge.py --align-report <orig> <dub> <saida>`.
 
 ### Merge manual (arquivos locais)
 
-**Catálogo → Séries → Adicionar série**: você aponta a pasta do original e a do
-dublado (com um navegador de pastas do servidor, que começa nos destinos
-cadastrados) e ele lê as duas árvores. Por temporada aparece a **ordem
+**Catálogo → Séries → Adicionar série**: você aponta as pastas do original e as
+do dublado — **quantas quiser de cada lado**, para release espalhado em várias
+pastas — com um navegador de pastas do servidor que começa nos destinos
+cadastrados. Ele lê as árvores e soma os arquivos por temporada. Por temporada aparece a **ordem
 detectada** de cada lado — `SxxEyy (E01–E23, 1 fundido)`, `absoluta (137–160)`,
 `alfabética` — com pasta, contagem de arquivos e de episódios.
 
-Cada temporada também aceita uma **pasta própria** (vídeo e/ou áudio): a
-escolha manda mesmo que os arquivos não digam a temporada — é assim que entram
-releases com nomes fora do padrão.
+Cada temporada também aceita uma **pasta própria**: a pastinha ao lado do
+caminho de cada lado (vídeo/áudio) troca só aquela temporada, e a escolha manda
+mesmo que os arquivos não digam a temporada — é assim que entram releases com
+nomes fora do padrão.
 
 O pareamento é proposto por `SxxEyy` quando os dois lados numeram assim, senão
 por posição; arquivo com dois episódios entra nas duas linhas (o alinhador
