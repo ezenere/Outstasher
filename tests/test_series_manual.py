@@ -306,3 +306,42 @@ def test_propose_lista_temporada_sem_arquivo_nenhum(tmp_path):
     assert len(vazia["rows"]) == 3                  # os 3 episódios do TMDB
     assert all(r["original"] is None and not r["include"] for r in vazia["rows"])
     assert vazia["original"]["files"] == 0
+
+
+def _grupo_dvd():
+    """Episode group como o TMDB devolve: a ordem de DVD junta os dois
+    primeiros episódios de exibição num só e reordena o resto."""
+    return {"id": "abc", "name": "DVD Order", "groups": [
+        {"name": "Season 1", "order": 0, "episodes": [
+            {"id": 1, "season": 1, "episode": 2, "order": 0, "name": "Segundo na exibição"},
+            {"id": 2, "season": 1, "episode": 1, "order": 1, "name": "Primeiro na exibição"},
+            {"id": 3, "season": 1, "episode": 3, "order": 2, "name": "Terceiro"},
+        ]},
+        {"name": "Season 2", "order": 1, "episodes": [
+            {"id": 4, "season": 2, "episode": 1, "order": 0, "name": "T2 E1"},
+        ]},
+    ]}
+
+
+def test_ordem_alternativa_vira_temporadas_e_numeracao(tmp_path):
+    eps = manual.episodes_from_group(_grupo_dvd())
+    assert sorted(eps) == [1, 2]
+    assert [e["episode"] for e in eps[1]] == [1, 2, 3]
+    # o E01 desta ordem é o S01E02 da exibição — a tela mostra isso
+    assert eps[1][0]["aired"] == {"season": 1, "episode": 2}
+    assert eps[1][0]["name"] == "Segundo na exibição"
+
+
+def test_linhas_carregam_a_referencia_da_exibicao(tmp_path):
+    for e in (1, 2, 3):
+        _touch(tmp_path / "o" / f"Show.S01E0{e}.mkv")
+        _touch(tmp_path / "d" / f"Show.S01E0{e}.mkv")
+    o = manual.scan_side(str(tmp_path / "o"), probe=False)
+    d = manual.scan_side(str(tmp_path / "d"), probe=False)
+    eps = manual.episodes_from_group(_grupo_dvd())
+    linhas = manual.propose(o, d, {1: eps[1]})[0]["rows"]
+    assert [ln["aired"]["episode"] for ln in linhas] == [2, 1, 3]
+    # o nome da ordem escolhida é o que vai para o job
+    assert linhas[0]["name"] == "Segundo na exibição"
+    pares = manual._validate_rows(linhas)
+    assert pares[0]["name"] == "Segundo na exibição"

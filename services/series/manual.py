@@ -281,6 +281,26 @@ def scan_season(season: int, episodes: list[dict],
         for papel in ("original", "dubbed")}}
 
 
+def episodes_from_group(detail: dict) -> dict[int, list[dict]]:
+    """Episode group do TMDB (ordem de DVD, absoluta, produção...) no formato
+    que a tela usa: {temporada da ORDEM: [episódios]}.
+
+    Cada episódio guarda também a referência na ordem de exibição (`aired`) —
+    é ela que diz "o E05 desta ordem é o S03E12 da exibição", e sem isso não
+    dá para conferir o que a numeração escolhida está fazendo."""
+    out: dict[int, list[dict]] = {}
+    for gi, g in enumerate(detail.get("groups") or [], start=1):
+        eps = [{
+            "episode": (e.get("order") or 0) + 1,
+            "name": e.get("name"),
+            "aired": ({"season": e["season"], "episode": e["episode"]}
+                      if e.get("season") is not None else None),
+        } for e in (g.get("episodes") or [])]
+        if eps:
+            out[gi] = sorted(eps, key=lambda x: x["episode"])
+    return out
+
+
 # -------------------- pareamento --------------------
 
 def propose(original: dict, dubbed: dict, tmdb_seasons: dict[int, list[dict]],
@@ -303,6 +323,7 @@ def propose(original: dict, dubbed: dict, tmdb_seasons: dict[int, list[dict]],
             o, d = mapa_o.get(n), mapa_d.get(n)
             linhas.append({
                 "season": season, "episode": n, "name": ep.get("name"),
+                "aired": ep.get("aired"),
                 "original": o["path"] if o else None,
                 "dubbed": d["path"] if d else None,
                 "orig_duration": o["duration"] if o else None,
@@ -413,7 +434,10 @@ async def create(tmdb_id: int, language: str, rows: list[dict],
         meta = nomes.get((p["season"], p["episode"]), {})
         episodes[chave] = {
             "season": p["season"], "episode": p["episode"],
-            "name": meta.get("name"), "air_date": meta.get("air_date"),
+            # numeração alternativa não bate com tv_season: o nome que a tela
+            # mostrou (vindo do episode group) vale mais que o do TMDB padrão
+            "name": p.get("name") or meta.get("name"),
+            "air_date": meta.get("air_date"),
             "runtime": meta.get("runtime"),
             "state": "downloaded",       # os arquivos já estão aqui
             "src": {"original": p["original"], "dubbed": p["dubbed"]},
@@ -484,7 +508,8 @@ def _validate_rows(rows: list[dict]) -> list[dict]:
             raise ValueError(f"S{season:02d}E{episode:02d} aparece duas vezes")
         vistos.add((season, episode))
         saida.append({"season": season, "episode": episode,
-                      "original": str(o), "dubbed": str(d)})
+                      "original": str(o), "dubbed": str(d),
+                      "name": r.get("name")})
     if not saida:
         raise ValueError("Nenhum episódio selecionado")
     return sorted(saida, key=lambda p: (p["season"], p["episode"]))

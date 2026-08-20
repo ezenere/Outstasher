@@ -171,7 +171,12 @@ cadastrados. Ele lê as árvores e soma os arquivos por temporada.
 
 A lista de temporadas vem do **TMDB**, não das pastas: temporada sem arquivo
 reconhecido também aparece (para receber uma pasta), e cada uma liga/desliga
-inteira num checkbox. Por temporada aparece a **ordem
+inteira num checkbox.
+
+**Ordem dos episódios**: além da exibição (padrão), dá para escolher qualquer
+*episode group* do TMDB — DVD, Blu-ray, absoluta, produção, streaming. A
+numeração das linhas e a do arquivo final passam a ser as dessa ordem, e cada
+linha mostra a que episódio de exibição ela corresponde. Por temporada aparece a **ordem
 detectada** de cada lado — `SxxEyy (E01–E23, 1 fundido)`, `absoluta (137–160)`,
 `alfabética` — com pasta, contagem de arquivos e de episódios.
 

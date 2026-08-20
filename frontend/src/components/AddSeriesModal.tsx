@@ -5,7 +5,8 @@ import {
 } from 'iconoir-react'
 import {
   api, post, type ConvertOptions, type Destination, type Job, type Language,
-  type ManualRow, type ManualScan, type ManualSeason, type ManualSeasonScan,
+  type EpisodeOrder, type ManualRow, type ManualScan, type ManualSeason,
+  type ManualSeasonScan,
   type Movie, type MoviePage,
 } from '../api'
 import AdvancedOptions from './AdvancedOptions'
@@ -48,6 +49,8 @@ export default function AddSeriesModal({ destinations, defaultDestId, onClose }:
   // pastas escolhidas para UMA temporada ("3:orig" -> [pasta]); sem entrada,
   // valem as raízes do passo 2
   const [seasonDirs, setSeasonDirs] = useState<Record<string, string[]>>({})
+  const [orders, setOrders] = useState<EpisodeOrder[]>([])
+  const [order, setOrder] = useState('')        // '' = ordem de exibição
   const [seasonPick, setSeasonPick] = useState<null | { season: number; side: 'orig' | 'dub' }>(null)
   const [openSeason, setOpenSeason] = useState<number | null>(null)
   const [destId, setDestId] = useState<number | null>(defaultDestId)
@@ -60,6 +63,12 @@ export default function AddSeriesModal({ destinations, defaultDestId, onClose }:
   useEffect(() => {
     api<Language[]>('/api/languages').then(setLanguages).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    if (!series) { setOrders([]); setOrder(''); return }
+    api<EpisodeOrder[]>(`/api/series/${series.id}/orders`)
+      .then(setOrders).catch(() => setOrders([]))
+  }, [series])
 
   const total = useMemo(
     () => seasons.reduce((n, s) => n + s.rows.filter((r) => r.include).length, 0),
@@ -89,6 +98,7 @@ export default function AddSeriesModal({ destinations, defaultDestId, onClose }:
     try {
       const data = await post<ManualScan>('/api/series/manual/scan', {
         tmdb_id: series.id, original_roots: origRoots, dubbed_roots: dubRoots,
+        episode_group: order || null,
       })
       setScan(data)
       setSeasons(data.seasons)
@@ -124,7 +134,7 @@ export default function AddSeriesModal({ destinations, defaultDestId, onClose }:
     setError(null)
     try {
       const out = await post<ManualSeasonScan>('/api/series/manual/scan-season', {
-        tmdb_id: series.id, season,
+        tmdb_id: series.id, season, episode_group: order || null,
         original_dirs: novos.orig, dubbed_dirs: novos.dub,
       })
       setSeasonDirs((prev) => ({
@@ -255,6 +265,23 @@ export default function AddSeriesModal({ destinations, defaultDestId, onClose }:
             <RootList icon={SoundHigh} label="Dublado (áudio)" paths={dubRoots}
               onAdd={() => setPicking({ side: 'dub' })}
               onRemove={(p) => setDubRoots((v) => v.filter((x) => x !== p))} />
+            {orders.length > 0 && (
+              <label className="mb-2 flex items-center gap-2 text-sm">
+                <span className="w-32 shrink-0 text-zinc-400">Ordem dos episódios</span>
+                <select
+                  value={order}
+                  onChange={(e) => setOrder(e.target.value)}
+                  className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm"
+                >
+                  <option value="">Exibição (padrão do TMDB)</option>
+                  {orders.map((o) => (
+                    <option key={o.id} value={o.id}>
+                      {o.name} — {o.group_count} temporada(s), {o.episode_count} episódio(s)
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <button onClick={() => void runScan()}
               disabled={!origRoots.length || !dubRoots.length || busy}
               className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-zinc-700 px-3 py-1.5 text-sm hover:bg-zinc-600 disabled:opacity-50">
@@ -523,6 +550,12 @@ function EpisodeCard({ row, origOptions, dubOptions, onPatch, onPickFile }: {
           E{String(row.episode).padStart(2, '0')}
         </span>
         <span className="min-w-0 flex-1 truncate text-xs text-zinc-500">{row.name}</span>
+        {row.aired && (
+          <span className="shrink-0 rounded bg-zinc-800 px-1.5 text-xs text-zinc-500"
+            title="Onde este episódio fica na ordem de exibição">
+            exibição S{String(row.aired.season).padStart(2, '0')}E{String(row.aired.episode).padStart(2, '0')}
+          </span>
+        )}
       </div>
       <FieldRow icon={MediaVideo} label="Vídeo" value={row.original}
         options={origOptions} duration={row.orig_duration}

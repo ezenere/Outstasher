@@ -689,6 +689,7 @@ class SeriesScanRequest(BaseModel):
     original_roots: list[str]          # um release pode estar em várias pastas
     dubbed_roots: list[str]
     seasons: list[int] | None = None   # None = todas as encontradas
+    episode_group: str | None = None   # ordem alternativa (DVD, absoluta...)
 
 
 class SeriesManualRequest(BaseModel):
@@ -708,6 +709,19 @@ async def browse_dir(path: str | None = None):
         raise HTTPException(400, str(e))
 
 
+@app.get("/api/series/{tv_id}/orders")
+async def series_orders(tv_id: int):
+    """Ordens de episódios da série (episode groups do TMDB): DVD, absoluta,
+    produção... A ordem de exibição é o padrão e não vem daqui."""
+    try:
+        grupos = await tmdb.tv_episode_groups(tv_id)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"TMDB não devolveu as ordens: {e}")
+    # grupo cadastrado mas vazio existe (0 episódios) — oferecer seria um erro
+    # garantido na hora de escolher
+    return [g for g in grupos if (g.get("episode_count") or 0) > 0]
+
+
 @app.post("/api/series/manual/scan")
 async def scan_series_dirs(req: SeriesScanRequest):
     """Lê as duas árvores e propõe o pareamento episódio a episódio."""
@@ -717,6 +731,20 @@ async def scan_series_dirs(req: SeriesScanRequest):
             asyncio.to_thread(series_manual.scan_sides, req.dubbed_roots))
     except series_manual.ManualError as e:
         raise HTTPException(400, str(e))
+    if req.episode_group:
+        # ordem alternativa: as "temporadas" e a numeração saem do grupo
+        try:
+            detalhe = await tmdb.tv_episode_group(req.episode_group)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, f"TMDB não devolveu a ordem escolhida: {e}")
+        eps = series_manual.episodes_from_group(detalhe)
+        if req.seasons:
+            eps = {n: v for n, v in eps.items() if n in set(req.seasons)}
+        if not eps:
+            raise HTTPException(400, "a ordem escolhida não tem episódios")
+        return {"original": original, "dubbed": dubbed,
+                "seasons": series_manual.propose(original, dubbed, eps)}
+
     # as temporadas vêm do TMDB, não dos arquivos: temporada sem arquivo
     # reconhecido também precisa aparecer, para receber uma pasta na tela
     try:
@@ -742,6 +770,7 @@ async def scan_series_dirs(req: SeriesScanRequest):
 class SeriesScanSeasonRequest(BaseModel):
     tmdb_id: int
     season: int
+    episode_group: str | None = None   # a mesma ordem do scan geral
     # os DOIS lados sempre (o que não mudou vai como está na tela): a rota não
     # guarda estado, então o lado ausente sumiria da temporada
     original_dirs: list[str] = []
@@ -754,9 +783,15 @@ async def scan_series_season(req: SeriesScanSeasonRequest):
     if not req.original_dirs and not req.dubbed_dirs:
         raise HTTPException(400, "escolha ao menos uma pasta")
     try:
-        eps = (await tmdb.tv_season(req.tmdb_id, req.season))["episodes"]
+        if req.episode_group:
+            detalhe = await tmdb.tv_episode_group(req.episode_group)
+            eps = series_manual.episodes_from_group(detalhe).get(req.season, [])
+        else:
+            eps = (await tmdb.tv_season(req.tmdb_id, req.season))["episodes"]
     except Exception as e:  # noqa: BLE001
         raise HTTPException(400, f"TMDB não devolveu a temporada {req.season}: {e}")
+    if not eps:
+        raise HTTPException(400, f"temporada {req.season} não existe nesta ordem")
     try:
         return await asyncio.to_thread(
             series_manual.scan_season, req.season, eps,

@@ -536,10 +536,22 @@ export interface ManualSide {
   dirs: number         // >1 = a raiz mistura pastas; só a dominante pareia
 }
 
+/** Ordem de episódios da série (episode group do TMDB). A de exibição é o
+ *  padrão e não vem da API — a tela a oferece como primeira opção. */
+export interface EpisodeOrder {
+  id: string
+  name: string | null
+  type: number          // 1=exibição 2=absoluta 3=DVD 4=digital … 7=TV
+  group_count: number
+  episode_count: number
+}
+
 export interface ManualRow {
   season: number
   episode: number
   name: string | null
+  /** Onde este episódio fica na ordem de EXIBIÇÃO (só em ordem alternativa). */
+  aired: { season: number; episode: number } | null
   original: string | null
   dubbed: string | null
   orig_duration: number | null
