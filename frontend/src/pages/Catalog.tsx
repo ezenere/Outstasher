@@ -101,21 +101,15 @@ export default function Catalog() {
             </button>
           ))}
         </div>
-        {/* os dois sempre visíveis: qual aba está aberta não deve esconder
-            uma das conversões manuais */}
+        {/* segue a aba: na biblioteca de séries o botão é o de série */}
         <button
-          onClick={() => setAdding('movie')}
-          title="Conversão manual: merge de dois arquivos que já estão no disco"
+          onClick={() => setAdding(media)}
+          title={media === 'tv'
+            ? 'Merge manual de série: pastas de original e dublado que já estão no disco'
+            : 'Conversão manual: merge de dois arquivos que já estão no disco'}
           className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-semibold hover:bg-blue-500"
         >
-          <Plus width={16} height={16} /> Filme
-        </button>
-        <button
-          onClick={() => setAdding('tv')}
-          title="Merge manual de série: pastas de original e dublado que já estão no disco"
-          className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-semibold hover:bg-blue-500"
-        >
-          <Plus width={16} height={16} /> Série
+          <Plus width={16} height={16} /> Adicionar {media === 'tv' ? 'série' : 'filme'}
         </button>
         <label className="flex items-center gap-2 text-sm">
           Destino:
@@ -241,14 +235,14 @@ export default function Catalog() {
       {adding === 'tv' && (
         <AddSeriesModal
           destinations={destinations.filter((d) => d.media === 'tv')}
-          defaultDestId={media === 'tv' ? destId : null}
+          defaultDestId={destId}
           onClose={() => setAdding(null)}
         />
       )}
       {adding === 'movie' && (
         <AddMovieModal
           destinations={destinations.filter((d) => (d.media ?? 'movie') === 'movie')}
-          defaultDestId={media === 'movie' ? destId : null}
+          defaultDestId={destId}
           onClose={() => setAdding(null)}
         />
       )}
