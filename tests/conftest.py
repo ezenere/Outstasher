@@ -74,6 +74,21 @@ def pytest_configure(config):
                             "ffmpeg: exercita ffmpeg de verdade (gera/converte mídia)")
 
 
+# -------------------- nada escreve na raiz do repo --------------------
+
+@pytest.fixture(autouse=True)
+def _fpcache_isolado(tmp_path, monkeypatch):  # noqa: PT004
+    """Cache de fingerprint fora do repo, em TODO teste.
+
+    Sem DB_DIR no ambiente, `config.DB_DIR` é o diretório do código — e o
+    alinhador passou a gravar fingerprints em `DB_DIR/fpcache`. Rodar a suíte
+    criava (e uma vez até commitou) uma pasta de .npy na raiz do repo.
+    """
+    from services.series.align import fingerprint
+    monkeypatch.setattr(fingerprint, "_cache_dir",
+                        lambda: tmp_path / "fpcache")
+
+
 # -------------------- DB isolado por teste --------------------
 
 @pytest.fixture

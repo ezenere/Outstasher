@@ -7,3 +7,4 @@ jobs.db
 jobs.db-*
 .env
 output/
+fpcache/
