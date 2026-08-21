@@ -66,22 +66,41 @@ def _resume_manual(job: dict):
 
 # -------------------- acoes da UI --------------------
 
-async def select(job_id: str, audio_id: str | None, video_id: str | None) -> dict | None:
-    """Continuacao do modo manual: usuario escolheu o(s) torrent(s)."""
+async def select(job_id: str, audio_id: str | None, video_id: str | None,
+                 custom: dict | None = None) -> dict | None:
+    """Continuacao do modo manual: usuario escolheu o(s) torrent(s).
+
+    custom {"audio": {url, title}, "video": {...}}: magnet/link do próprio
+    usuário no lugar de um candidato da busca — é o que torna útil o modo
+    "pular busca de torrents", em que a lista de candidatos nasce vazia.
+    """
     job = _jobs.get(job_id)
     if not job or job["status"] != "awaiting":
         return None
-    search = job.get("search") or {}
+    busca = job.get("search") or {}
     needed = _needed_torrents(job)
-    a = v = None
-    if "audio" in needed:
-        a = next((c for c in search.get("audio", []) if c["id"] == audio_id), None)
-        if not a:
-            raise ValueError("Candidato de áudio não encontrado (a busca pode ter sido refeita)")
-    if "video" in needed:
-        v = next((c for c in search.get("video", []) if c["id"] == video_id), None)
-        if not v:
-            raise ValueError("Candidato de vídeo não encontrado (a busca pode ter sido refeita)")
+    custom = custom or {}
+    escolhidos: dict[str, dict] = {}
+    for kind, cid in (("audio", audio_id), ("video", video_id)):
+        if kind not in needed:
+            continue
+        proprio = custom.get(kind)
+        if proprio and (proprio.get("url") or "").strip():
+            cand = search.custom_candidate(proprio.get("url", ""),
+                                           proprio.get("title", ""))
+            # entra na busca do job: aparece na lista e serve de reserva depois
+            job.setdefault("search", {}).setdefault(kind, []).insert(0, cand)
+            _event(job, "chosen",
+                   f"Torrent manual informado pelo usuário ({kind}): {cand['title']}")
+        else:
+            cand = next((c for c in busca.get(kind, []) if c["id"] == cid), None)
+            if not cand:
+                rotulo = "áudio" if kind == "audio" else "vídeo"
+                raise ValueError(
+                    f"Candidato de {rotulo} não encontrado (a busca pode ter "
+                    f"sido refeita)")
+        escolhidos[kind] = cand
+    a, v = escolhidos.get("audio"), escolhidos.get("video")
     # awaiting também acontece na pausa de drift (possível versão diferente);
     # se o usuário preferiu outro torrent em vez de Continuar, a pausa caduca
     job.pop("drift_confirm", None)

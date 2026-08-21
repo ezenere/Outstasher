@@ -20,9 +20,12 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
                  destination_id: int | None = None,
                  torrent_target_id: int | None = None,
                  kind: str = "both", download_only: bool = False,
-                 convert: dict | None = None) -> dict:
+                 convert: dict | None = None,
+                 skip_search: bool = False) -> dict:
     if kind not in KINDS:
         raise ValueError(f"kind inválido: {kind!r}")
+    if skip_search and mode != "manual":
+        raise ValueError("Pular a busca só faz sentido no modo manual")
     if download_only:
         convert = None  # apenas baixar: nunca há conversão
     if convert is not None:
@@ -59,6 +62,7 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
         "language": language,
         "mode": mode,
         "kind": kind,
+        "skip_search": skip_search,
         "download_only": download_only,
         "convert": convert,
         "status": "searching",
@@ -207,6 +211,14 @@ async def _run_manual(job: dict, video_file: Path, audio_file: Path):
 
 async def _run(job: dict):
     try:
+        if job.get("skip_search"):
+            # o usuário já sabe qual torrent quer: o indexador não é consultado
+            # (só o TMDB, que dá título/ano ao job) e o gate abre com a lista
+            # vazia — é nele que o magnet é colado
+            await search._load_movie(job)
+            job["search"] = {"audio": [], "video": []}
+            _set(job, "awaiting", "Informe o magnet/link de cada torrent")
+            return
         await search._search(job)
         if job["mode"] == "manual":
             _set(job, "awaiting", "Escolha os torrents para baixar")

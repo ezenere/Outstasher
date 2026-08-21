@@ -59,6 +59,8 @@ export default function SeriesModal({
   const [targets, setTargets] = useState<TorrentTarget[]>([])
   const [targetId, setTargetId] = useState<number | null>(null)
   const [manual, setManual] = useState(false)
+  // manual + pular busca: o usuário já tem os magnets e não quer o indexador
+  const [skipSearch, setSkipSearch] = useState(false)
   const [advanced, setAdvanced] = useState<ConvertOptions | null>(null)
   const [starting, setStarting] = useState(false)
   // episódios já na coleção ({temporada: [eps]}) — badge informativo; baixar
@@ -175,6 +177,7 @@ export default function SeriesModal({
         seasons: selection.seasons,
         episodes: selection.episodes,
         mode: manual ? 'manual' : 'auto',
+        skip_search: manual && skipSearch,
         destination_id: destId,
         torrent_target_id: targetId,
         convert: advanced,
@@ -394,6 +397,22 @@ export default function SeriesModal({
             <input type="checkbox" checked={manual} onChange={(e) => setManual(e.target.checked)} />
             Escolher torrents manualmente (por episódio)
           </label>
+          {manual && (
+            <label
+              className="ml-5 flex items-center gap-1.5 text-sm text-zinc-300"
+              title="Não consulta o indexador: você cola o magnet/link de cada torrent"
+            >
+              <input type="checkbox" checked={skipSearch}
+                onChange={(e) => setSkipSearch(e.target.checked)} />
+              Pular busca de torrents
+            </label>
+          )}
+          {manual && skipSearch && (
+            <p className="ml-5 text-xs text-zinc-500">
+              O job abre direto na escolha, com a lista vazia — informe lá o
+              magnet ou link .torrent de cada torrent e a que episódios ele serve.
+            </p>
+          )}
         </div>
 
         {/* opções avançadas de conversão (aplicadas episódio a episódio) */}

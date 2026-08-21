@@ -156,14 +156,23 @@ async def _run_extra_search(job: dict, spec: dict) -> list[dict]:
         return []
 
 
-async def _search(job: dict):
-    """Busca no Jackett e preenche job["search"] com os candidatos viáveis."""
+async def _load_movie(job: dict) -> dict:
+    """Metadados do TMDB no job (título/ano/pôster). Separado da busca porque
+    o modo "pular busca" precisa deles sem consultar o indexador."""
     lang = job["language"]
     label = config.LANGUAGES[lang]["label"]
     movie = await tmdb.details(job["tmdb_id"], lang)
     job["movie"] = movie
+    _event(job, "info", f"Filme: {movie['original_title']} ({movie['year']}) "
+                        f"— título em {label}: {movie['localized_title']}")
+    return movie
+
+
+async def _search(job: dict):
+    """Busca no Jackett e preenche job["search"] com os candidatos viáveis."""
+    lang = job["language"]
+    movie = await _load_movie(job)
     original, localized, year = movie["original_title"], movie["localized_title"], movie["year"]
-    _event(job, "info", f"Filme: {original} ({year}) — título em {label}: {localized}")
 
     needed = _needed_torrents(job)
     want_video = "video" in needed

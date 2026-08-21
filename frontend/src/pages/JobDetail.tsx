@@ -26,6 +26,10 @@ export default function JobDetail() {
   // magnet/link próprio para trocar o torrent em andamento (por papel)
   const [magnetForm, setMagnetForm] = useState<
     { kind: 'video' | 'audio'; url: string; title: string } | null>(null)
+  // magnet/link próprio no GATE de escolha (por papel) — é o que faz o modo
+  // "pular busca" funcionar: a lista de candidatos nasce vazia
+  const [selCustom, setSelCustom] = useState<Record<'audio' | 'video', { url: string; title: string }>>(
+    { audio: { url: '', title: '' }, video: { url: '', title: '' } })
   // timeline completa fica escondida por padrão (só os eventos recentes à vista)
   const [fullTimeline, setFullTimeline] = useState(false)
   const navigate = useNavigate()
@@ -104,12 +108,16 @@ export default function JobDetail() {
   // que torrents este job baixa (kind = both | original | dubbed)
   const needAudio = job.kind !== 'original'
   const needVideo = job.kind !== 'dubbed'
-  const selectionReady = (!needAudio || !!selAudio) && (!needVideo || !!selVideo)
+  const okAudio = !!selAudio || !!selCustom.audio.url.trim()
+  const okVideo = !!selVideo || !!selCustom.video.url.trim()
+  const selectionReady = (!needAudio || okAudio) && (!needVideo || okVideo)
 
   async function submitSelection() {
     if (!job || !selectionReady) return
-    const a = needAudio ? job.search?.audio.find((c) => c.id === selAudio) : null
-    const v = needVideo ? job.search?.video.find((c) => c.id === selVideo) : null
+    const a = needAudio && !selCustom.audio.url.trim()
+      ? job.search?.audio.find((c) => c.id === selAudio) : null
+    const v = needVideo && !selCustom.video.url.trim()
+      ? job.search?.video.find((c) => c.id === selVideo) : null
     // aviso de corte só quando os dois são baixados (merge)
     if (a && v) {
       const ea = a.edition ?? null
@@ -133,9 +141,14 @@ export default function JobDetail() {
     }))) return
     setSubmitting(true)
     try {
+      const custom: Record<string, { url: string; title: string }> = {}
+      for (const k of ['audio', 'video'] as const) {
+        if (selCustom[k].url.trim()) custom[k] = selCustom[k]
+      }
       await post(`/api/jobs/${job.id}/select`, {
         audio_id: needAudio ? selAudio : null,
         video_id: needVideo ? selVideo : null,
+        custom: Object.keys(custom).length ? custom : null,
       })
       void reload()
     } catch (e) {
@@ -295,6 +308,39 @@ export default function JobDetail() {
     )
   }
 
+  /** Campos de magnet/link próprio dentro do gate de escolha. Com a busca
+   *  pulada a lista vem vazia e é por aqui que o torrent entra. */
+  function customTorrentFields(kind: 'audio' | 'video') {
+    const v = selCustom[kind]
+    const vazio = !(job?.search?.[kind]?.length)
+    const set = (patch: Partial<{ url: string; title: string }>) =>
+      setSelCustom((c) => ({ ...c, [kind]: { ...c[kind], ...patch } }))
+    return (
+      <div className={`rounded-lg border border-dashed p-2.5 ${
+        v.url.trim() ? 'border-blue-700 bg-blue-950/20' : 'border-zinc-700'} ${vazio ? '' : 'mt-2'}`}>
+        <div className="mb-1.5 text-xs text-zinc-400">
+          {vazio
+            ? 'Busca pulada: informe o magnet ou link .torrent'
+            : 'Ou use um magnet/link próprio (ignora a lista acima)'}
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2">
+          <input
+            value={v.url}
+            onChange={(e) => set({ url: e.target.value })}
+            placeholder="magnet:?xt=… ou https://…/arquivo.torrent"
+            className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 font-mono text-xs outline-none focus:border-blue-500"
+          />
+          <input
+            value={v.title}
+            onChange={(e) => set({ title: e.target.value })}
+            placeholder="Título (opcional — sai do dn= do magnet)"
+            className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs outline-none focus:border-blue-500"
+          />
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div>
       <div className="flex flex-wrap items-center gap-3">
@@ -434,7 +480,15 @@ export default function JobDetail() {
               <h3 className="mb-2 flex items-center gap-1.5 text-sm text-zinc-400">
                 <SoundHigh width={14} height={14} /> Áudio ({job.language})
               </h3>
-              <CandidatesTable candidates={job.search.audio} selectable selectedId={selAudio} onSelect={setSelAudio} />
+              {job.search.audio.length > 0 && (
+                <CandidatesTable candidates={job.search.audio} selectable
+                  selectedId={selCustom.audio.url.trim() ? undefined : selAudio}
+                  onSelect={(id) => {
+                    setSelAudio(id)
+                    setSelCustom((c) => ({ ...c, audio: { url: '', title: '' } }))
+                  }} />
+              )}
+              {customTorrentFields('audio')}
             </>
           )}
           {needVideo && (
@@ -442,7 +496,15 @@ export default function JobDetail() {
               <h3 className="mt-4 mb-2 flex items-center gap-1.5 text-sm text-zinc-400">
                 <MediaVideo width={14} height={14} /> Vídeo (original)
               </h3>
-              <CandidatesTable candidates={job.search.video} selectable selectedId={selVideo} onSelect={setSelVideo} />
+              {job.search.video.length > 0 && (
+                <CandidatesTable candidates={job.search.video} selectable
+                  selectedId={selCustom.video.url.trim() ? undefined : selVideo}
+                  onSelect={(id) => {
+                    setSelVideo(id)
+                    setSelCustom((c) => ({ ...c, video: { url: '', title: '' } }))
+                  }} />
+              )}
+              {customTorrentFields('video')}
             </>
           )}
           <button

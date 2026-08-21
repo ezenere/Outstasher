@@ -63,7 +63,11 @@ Busque, clique, escolha idioma e destino. Modos: **Baixar e fazer merge**,
 **Só original** / **Só dublado** (hardlink, sem merge) e **Apenas baixar**.
 
 - **Modo manual**: o job busca e para em *Aguardando escolha* com as tabelas de
-  candidatos (score, corte, motivo de rejeição).
+  candidatos (score, corte, motivo de rejeição). Cada papel também aceita um
+  **magnet/link próprio** ali no gate, no lugar de um candidato da lista.
+- **Pular busca de torrents** (só no modo manual, filmes e séries): o indexador
+  nem é consultado — o job abre direto na escolha, com a lista vazia, para você
+  colar os magnets. Útil quando já se sabe qual release quer.
 - **Watchdog**: download parado por `STALL_TIMEOUT_MINUTES` é trocado pelo
   próximo candidato do mesmo corte. Durante o download dá para trocar à mão:
   *Próximo*, *Escolher outro…* (lista da busca) ou **magnet/link próprio**,

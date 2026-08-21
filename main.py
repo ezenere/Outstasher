@@ -287,11 +287,14 @@ class JobRequest(BaseModel):
     torrent_target_id: int | None = None
     download_only: bool = False  # só baixa (sem conversão/hardlink/cópia)
     convert: dict | None = None  # opções avançadas de conversão (transcode.validate)
+    skip_search: bool = False    # manual: nem consulta o indexador (magnet próprio)
 
 
 class SelectRequest(BaseModel):
     audio_id: str | None = None
     video_id: str | None = None
+    # magnet/link do próprio usuário por papel: {"audio": {url, title}, ...}
+    custom: dict | None = None
 
 
 class CustomTorrent(BaseModel):
@@ -636,7 +639,7 @@ async def create_job(req: JobRequest):
     try:
         return await jobs.create(req.tmdb_id, req.language, req.mode,
                                  req.destination_id, req.torrent_target_id, req.kind,
-                                 req.download_only, req.convert)
+                                 req.download_only, req.convert, req.skip_search)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -671,6 +674,7 @@ class SeriesJobRequest(BaseModel):
     destination_id: int | None = None
     torrent_target_id: int | None = None
     convert: dict | None = None
+    skip_search: bool = False          # manual: nem consulta o indexador
 
 
 @app.post("/api/jobs/series")
@@ -679,7 +683,8 @@ async def create_series_job(req: SeriesJobRequest):
     try:
         return await series_pipeline.create_series(
             req.tmdb_id, req.language, req.seasons, req.episodes, req.mode,
-            req.destination_id, req.torrent_target_id, req.convert)
+            req.destination_id, req.torrent_target_id, req.convert,
+            req.skip_search)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -959,7 +964,7 @@ async def job_progress(job_id: str):
 @app.post("/api/jobs/{job_id}/select")
 async def select_job(job_id: str, req: SelectRequest):
     try:
-        job = await jobs.select(job_id, req.audio_id, req.video_id)
+        job = await jobs.select(job_id, req.audio_id, req.video_id, req.custom)
     except ValueError as e:
         raise HTTPException(400, str(e))
     if not job:

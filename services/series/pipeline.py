@@ -70,10 +70,13 @@ async def create_series(tmdb_id: int, language: str,
                         mode: str = "auto",
                         destination_id: int | None = None,
                         torrent_target_id: int | None = None,
-                        convert: dict | None = None) -> dict:
+                        convert: dict | None = None,
+                        skip_search: bool = False) -> dict:
     """Cria um job de série cobrindo temporadas inteiras e/ou episódios
     avulsos ({"3": [1, 5]}). Sempre baixa os DOIS lados (original + dublado)
     de cada episódio — é a razão de ser do serviço."""
+    if skip_search and mode != "manual":
+        raise ValueError("Pular a busca só faz sentido no modo manual")
     seasons = sorted({int(s) for s in (seasons or [])})
     episodes = {int(s): sorted({int(e) for e in eps})
                 for s, eps in (episodes or {}).items() if eps}
@@ -107,6 +110,7 @@ async def create_series(tmdb_id: int, language: str,
         "language": language,
         "mode": mode,
         "kind": "series",
+        "skip_search": skip_search,
         "download_only": False,
         "convert": convert,
         "status": "searching",
@@ -150,7 +154,8 @@ async def create_series(tmdb_id: int, language: str,
 async def _run(job: dict):
     try:
         await _prepare(job)
-        await _search_series(job)
+        if not job.get("skip_search"):
+            await _search_series(job)
         await _plan_and_gate(job)
     except asyncio.CancelledError:
         raise
@@ -371,7 +376,7 @@ async def _plan_and_gate(job: dict):
     aceitas) MUTAM o plano existente e não podem ser descartadas por um
     replanejamento."""
     if not job["torrents"]:
-        if job["id"] not in _pools:
+        if job["id"] not in _pools and not job.get("skip_search"):
             # pool perdido (restart/remap): refaz a busca antes de planejar
             await _search_series(job)
         jobs._set(job, "searching", "Avaliando candidatos por episódio...")
@@ -381,7 +386,8 @@ async def _plan_and_gate(job: dict):
         missing = {role: [ref for ref in _active_refs(job)
                           if not ranked_all[role].get(ref)]
                    for role in ROLES}
-        if any(missing.values()) and not job.get("_phase2_done"):
+        if (any(missing.values()) and not job.get("_phase2_done")
+                and not job.get("skip_search")):
             job["_phase2_done"] = True
             await _phase2_search(job, missing)
             ranked_all = _rank_all(job)

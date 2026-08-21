@@ -28,6 +28,8 @@ export default function Movies() {
   const [languages, setLanguages] = useState<Language[]>([])
   const [language, setLanguage] = useState('pt')
   const [manual, setManual] = useState(false)
+  // manual + pular busca: o usuário já tem o magnet e não quer o indexador
+  const [skipSearch, setSkipSearch] = useState(false)
   const [downloadOnly, setDownloadOnly] = useState(false)
   const [advanced, setAdvanced] = useState<ConvertOptions | null>(null)
   const [destinations, setDestinations] = useState<Destination[]>([])
@@ -161,6 +163,7 @@ export default function Movies() {
         tmdb_id: tmdbId,
         language,
         mode: manual ? 'manual' : 'auto',
+        skip_search: manual && skipSearch,
         kind,
         // apenas baixar: não há arquivo final, então destino não se aplica
         destination_id: downloadOnly ? null : destId,
@@ -406,6 +409,22 @@ export default function Movies() {
                 <input type="checkbox" checked={manual} onChange={(e) => setManual(e.target.checked)} />
                 Escolher torrents manualmente
               </label>
+              {manual && (
+                <label
+                  className="ml-5 flex items-center gap-1.5 text-sm text-zinc-300"
+                  title="Não consulta o indexador: você cola o magnet/link de cada torrent"
+                >
+                  <input type="checkbox" checked={skipSearch}
+                    onChange={(e) => setSkipSearch(e.target.checked)} />
+                  Pular busca de torrents
+                </label>
+              )}
+              {manual && skipSearch && (
+                <p className="ml-5 text-xs text-zinc-500">
+                  O job abre direto na escolha, com a lista vazia — informe lá o
+                  magnet ou link .torrent de cada versão.
+                </p>
+              )}
               <label
                 className="flex items-center gap-1.5 text-sm text-zinc-300"
                 title="Só baixa pelo qBittorrent e conclui — sem conversão, hardlink ou cópia"
