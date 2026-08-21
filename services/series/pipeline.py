@@ -615,6 +615,9 @@ async def resolve(job_id: str, reason: str, decision: dict) -> dict | None:
     - incompatible_torrents: {action: "accept"}
                              {action: "replace", torrent_n, candidate_id}
                              {action: "remap", group_id}
+    - mismatched_pairs:      {action: "auto", ignore: [ep_key,...]}
+                             {action: "manual", pairs: {orig: dub}, ignore: [...]}
+                             {action: "finish", ignore: [...]}
     - force_continue:        {} (aceito com o job em downloading)
     """
     job = jobs._jobs.get(job_id)
@@ -678,6 +681,31 @@ async def resolve(job_id: str, reason: str, decision: dict) -> dict | None:
         elif reason == "manual_pick":
             _apply_manual(job, decision)
             job["_manual_done"] = True
+        elif reason == "mismatched_pairs":
+            from services.series import rematch
+            action = decision.get("action")
+            ignore = list(decision.get("ignore") or [])
+            if action == "auto":
+                jobs._event(job, "chosen",
+                            "Usuário pediu rematch automático dos desalinhados")
+                jobs._spawn(job["id"], rematch.run_auto(job, ignore))
+            elif action == "manual":
+                pairs = dict(decision.get("pairs") or {})
+                dubs = list(pairs.values())
+                if len(dubs) != len(set(dubs)):
+                    raise ValueError("o mesmo dublado foi escolhido para dois "
+                                     "episódios")
+                rematch.apply_ignores(job, ignore)
+                rematch.apply_pairs(job, pairs)   # valida contra o pool
+                jobs._event(job, "chosen",
+                            f"Usuário casou {len(pairs)} par(es) manualmente")
+                jobs._spawn(job["id"], _resume_merge(job))
+            elif action == "finish":
+                rematch.apply_ignores(job, ignore)
+                jobs._spawn(job["id"], rematch.finish_now(job))
+            else:
+                raise ValueError(f"Ação inválida: {action!r}")
+            return jobs._public(job)
         elif reason == "alignment_review":
             _apply_review(job, decision)
             # episódios ainda sem decisão continuam em revisão: re-abre o gate

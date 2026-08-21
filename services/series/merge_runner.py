@@ -33,8 +33,7 @@ async def merge_all(job: dict):
     if not keys:
         # ex.: revisão terminou com tudo pulado — ainda assim fecha o
         # relatório E aplica a política de limpeza dos torrents
-        _finish(job)
-        await _cleanup_torrents(job)
+        await _wrap_up(job)
         return
     jobs._set(job, "merging",
               f"Convertendo {len(keys)} episódio(s) (um por vez)...")
@@ -96,14 +95,30 @@ async def merge_all(job: dict):
                 job["output"] = None
         store.upsert_job(job)
 
-    # episódios que pararam em revisão: o job pausa UMA vez, com todos eles
+    await _wrap_up(job)
+
+
+async def _wrap_up(job: dict):
+    """Fim do laço de merge: gates pendentes ou relatório final.
+
+    Ordem: revisão de alinhamento primeiro (EDLs esperando decisão), depois o
+    rematch de desalinhados (2+ conflitos de alinhamento = provável ordem de
+    episódios trocada — o gate reabre a cada volta enquanto persistirem, até
+    o usuário mandar finalizar), e só então o relatório + limpeza."""
+    from services.series import pipeline, rematch
+
     reviews = {k: v["edl"] for k, v in job["episodes"].items()
                if v["state"] == "review"}
     if reviews:
-        from services.series import pipeline
         pipeline._gate(job, "alignment_review", {"episodes": reviews},
                        f"⚠️ {len(reviews)} episódio(s) precisam de revisão de "
                        f"alinhamento")
+        return
+    conflicts = rematch.mismatched(job)
+    if len(conflicts) >= 2 and not job.get("_rematch_done"):
+        pipeline._gate(job, "mismatched_pairs", rematch.gate_payload(job),
+                       f"⚠️ {len(conflicts)} episódio(s) desalinhados — "
+                       f"tentar casar entre si, casar na mão ou finalizar?")
         return
     _finish(job)
     await _cleanup_torrents(job)
@@ -357,7 +372,8 @@ def _finish(job: dict):
     failed = sorted(k for k, v in job["episodes"].items()
                     if v["state"] in ("failed", "review"))
     skipped = sorted(k for k, v in job["episodes"].items()
-                     if v["state"] in ("skipped_future", "skipped_missing"))
+                     if v["state"] in ("skipped_future", "skipped_missing",
+                                       "skipped_mismatch"))
     attempted = len(done) + len(failed)
     job["report"] = {"attempted": attempted, "succeeded": len(done),
                      "failed": failed, "skipped": skipped}

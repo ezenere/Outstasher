@@ -10,6 +10,8 @@
 - dump_matrix_png: a matriz como PNG (zlib puro, sem dependência de imagem) —
   o debug visual que mostra a estrutura do problema a olho nu.
 """
+import hashlib
+import os
 import re
 import struct
 import subprocess
@@ -17,6 +19,7 @@ import tempfile
 import time
 import zlib
 from collections import Counter
+from pathlib import Path
 
 import numpy as np
 
@@ -183,6 +186,59 @@ def dhash_stream(path: str, crop: str | None = None,
     bits = frames[:, :, 1:] > frames[:, :, :-1]          # (n, 8, 8) bool
     weights = (1 << np.arange(64, dtype=np.uint64)).reshape(HASH_H, HASH_W - 1)
     return (bits.astype(np.uint64) * weights).sum(axis=(1, 2))
+
+
+CACHE_MAX_AGE_S = 60 * 24 * 3600   # fingerprints de jobs de 2 meses atrás: fora
+
+
+def _cache_dir() -> Path:
+    import config
+    return config.DB_DIR / "fpcache"
+
+
+def _cache_key(path: str, crop: str | None) -> str:
+    st = os.stat(path)
+    raw = f"{path}|{st.st_size}|{int(st.st_mtime)}|{crop}|{FPS}"
+    return hashlib.sha1(raw.encode()).hexdigest()
+
+
+def dhash_cached(path: str, crop: str | None = None,
+                 duration: float | None = None, on_progress=None) -> np.ndarray:
+    """dhash_stream com cache em DISCO (chave: caminho+tamanho+mtime+crop).
+
+    O fingerprint é a parte cara do alinhamento (minutos por arquivo) e o
+    resultado é minúsculo (~90 KB por episódio). Persistir significa que um
+    alinhamento que FALHOU deixa o trabalho pago — o rematch todos×todos dos
+    desalinhados e qualquer nova tentativa partem daqui, de graça."""
+    cdir = _cache_dir()
+    try:
+        f = cdir / f"{_cache_key(path, crop)}.npy"
+        if f.exists():
+            return np.load(f)
+    except OSError:
+        f = None
+    h = dhash_stream(path, crop, duration=duration, on_progress=on_progress)
+    if f is not None:
+        try:
+            cdir.mkdir(parents=True, exist_ok=True)
+            tmp = f.with_suffix(".tmp.npy")
+            np.save(tmp, h)
+            tmp.replace(f)
+            _prune_cache(cdir)
+        except OSError:
+            pass   # cache é otimização: sem espaço/permissão, segue sem
+    return h
+
+
+def _prune_cache(cdir: Path):
+    """Remove fingerprints velhos (o cache não pode crescer para sempre)."""
+    cutoff = time.time() - CACHE_MAX_AGE_S
+    try:
+        for f in cdir.glob("*.npy"):
+            if f.stat().st_mtime < cutoff:
+                f.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def hamming_band(a: np.ndarray, b: np.ndarray,

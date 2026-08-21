@@ -32,6 +32,7 @@ const STATE_TONE: Partial<Record<EpisodeState, string>> = {
   review: 'bg-amber-950 text-amber-300',
   skipped_future: 'bg-zinc-800 text-zinc-400',
   skipped_missing: 'bg-zinc-800 text-zinc-400',
+  skipped_mismatch: 'bg-zinc-800 text-zinc-400',
 }
 
 function EpisodeBadge({ state }: { state: EpisodeState }) {
@@ -320,6 +321,176 @@ export function SeriesReport({ job }: { job: Job }) {
 }
 
 /** Gates de série: lacunas, torrents incompatíveis e escolha manual. */
+/** Gate de episódios DESALINHADOS (conflito de alinhamento em 2+): sintoma de
+ *  ordem de episódios trocada entre as versões. Oferece o rematch todos×todos
+ *  automático, o pareamento manual (dublado de quem ↔ original de quem) e o
+ *  finalizar sem eles — com "ignorar" por episódio nos dois primeiros. */
+function MismatchedGate({ job, onResolved }: { job: Job; onResolved: () => void }) {
+  const dialog = useDialog()
+  const [busy, setBusy] = useState(false)
+  const [manual, setManual] = useState(false)
+  const [ignored, setIgnored] = useState<Set<string>>(new Set())
+  const [pairs, setPairs] = useState<Record<string, string>>({})
+  const pool = job.awaiting?.payload.mismatched ?? {}
+  const attempts = job.awaiting?.payload.attempts ?? 0
+  const keys = Object.keys(pool).sort()
+  const active = keys.filter((k) => !ignored.has(k))
+
+  async function send(decision: object, confirm?: string) {
+    if (busy) return
+    if (confirm && !(await dialog.confirm({
+      title: 'Confirmar', message: confirm, confirmText: 'Confirmar',
+    }))) return
+    setBusy(true)
+    try {
+      await resolveGate(job.id, 'mismatched_pairs', decision)
+      onResolved()
+    } catch (e) {
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const toggleIgnore = (k: string) => setIgnored((s) => {
+    const n = new Set(s)
+    if (n.has(k)) n.delete(k)
+    else {
+      n.add(k)
+      // par manual que usava este episódio (de qualquer lado) cai junto
+      setPairs((p) => Object.fromEntries(
+        Object.entries(p).filter(([ok, dk]) => ok !== k && dk !== k)))
+    }
+    return n
+  })
+
+  const chosenDubs = new Set(Object.values(pairs))
+  const validPairs = Object.entries(pairs).filter(([ok, dk]) =>
+    active.includes(ok) && active.includes(dk))
+
+  return (
+    <section className="mt-6 rounded-xl border border-amber-900/60 bg-amber-950/20 p-4">
+      <h2 className="mb-2 flex items-center gap-1.5 font-semibold text-amber-300">
+        <WarningTriangle width={16} height={16} /> Episódios desalinhados
+      </h2>
+      <p className="text-sm text-zinc-300">
+        Estes pares não têm quase nada em comum — sintoma clássico de ordem de
+        episódios trocada entre as duas versões (cada arquivo é de um episódio
+        real, casado com o parceiro errado). Dá para cruzar todos com todos e
+        deixar o conteúdo decidir, casar na mão, ou finalizar sem eles.
+        {attempts > 0 && (
+          <span className="text-amber-300"> Já houve {attempts} tentativa(s)
+          automática(s) — os restantes não casaram sozinhos.</span>
+        )}
+      </p>
+
+      <ul className="mt-3 space-y-2">
+        {keys.map((k) => {
+          const ep = pool[k]
+          const off = ignored.has(k)
+          return (
+            <li key={k}
+              className={`rounded-lg border border-zinc-800 bg-zinc-900/60 p-2.5 ${off ? 'opacity-50' : ''}`}>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-mono text-xs font-semibold">{k}</span>
+                <span className="min-w-0 flex-1" />
+                <label className="flex items-center gap-1.5 text-xs text-zinc-400">
+                  <input type="checkbox" checked={off}
+                    onChange={() => toggleIgnore(k)}
+                    className="h-3.5 w-3.5 accent-amber-500" />
+                  ignorar
+                </label>
+              </div>
+              <div className="mt-1.5 grid gap-1 text-xs text-zinc-400">
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <MediaVideo width={13} height={13} className="shrink-0 text-zinc-500" />
+                  <span className="truncate" title={ep.original}>{ep.original}</span>
+                </div>
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <SoundHigh width={13} height={13} className="shrink-0 text-zinc-500" />
+                  {manual && !off ? (
+                    <select
+                      value={pairs[k] ?? ''}
+                      onChange={(e) => setPairs((p) => {
+                        const n = { ...p }
+                        if (e.target.value) n[k] = e.target.value
+                        else delete n[k]
+                        return n
+                      })}
+                      className="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs"
+                    >
+                      <option value="">— manter como está —</option>
+                      {active.map((dk) => (
+                        <option key={dk} value={dk}
+                          disabled={chosenDubs.has(dk) && pairs[k] !== dk}>
+                          dublado de {dk}: {pool[dk].dubbed}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className="truncate" title={ep.dubbed}>{ep.dubbed}</span>
+                  )}
+                </div>
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        {!manual ? (
+          <>
+            <button
+              onClick={() => send({ action: 'auto', ignore: [...ignored] })}
+              disabled={busy || active.length < 2}
+              title="Cruza o conteúdo de todos os desalinhados e casa quem corresponder"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-zinc-950 hover:bg-amber-500 disabled:opacity-50"
+            >
+              <Refresh width={14} height={14} /> Tentar casar automaticamente
+            </button>
+            <button
+              onClick={() => setManual(true)}
+              disabled={busy}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+            >
+              <EditPencil width={14} height={14} /> Casar manualmente
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              onClick={() => send({
+                action: 'manual',
+                pairs: Object.fromEntries(validPairs),
+                ignore: [...ignored],
+              })}
+              disabled={busy || validPairs.length === 0}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-zinc-950 hover:bg-amber-500 disabled:opacity-50"
+            >
+              <Check width={14} height={14} /> Aplicar {validPairs.length} par(es)
+            </button>
+            <button
+              onClick={() => { setManual(false); setPairs({}) }}
+              disabled={busy}
+              className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+            >
+              Voltar
+            </button>
+          </>
+        )}
+        <button
+          onClick={() => send({ action: 'finish', ignore: [...ignored] },
+            'Finalizar o processamento sem casar os episódios restantes?')}
+          disabled={busy}
+          className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+        >
+          <SkipNext width={14} height={14} /> Finalizar processamento
+        </button>
+      </div>
+    </section>
+  )
+}
+
 export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => void }) {
   const dialog = useDialog()
   const [busy, setBusy] = useState(false)
@@ -337,6 +508,10 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
 
   if (gate.reason === 'alignment_review') {
     return <AlignmentReview job={job} onResolved={onResolved} />
+  }
+
+  if (gate.reason === 'mismatched_pairs') {
+    return <MismatchedGate job={job} onResolved={onResolved} />
   }
 
   async function send(reason: Parameters<typeof resolveGate>[1], decision: object,

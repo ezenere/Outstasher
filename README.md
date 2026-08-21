@@ -154,6 +154,11 @@ pulado dentro do silêncio, sem buraco preenchido com inglês no meio da fala.
   e frames lado a lado; decisões podem virar **regras** para todos os episódios
   do job.
 - Legendas externas do lado dublado seguem a mesma EDL do áudio.
+- **Episódios desalinhados** (2+ pares sem quase nada em comum = provável
+  ordem de episódios trocada): o job pausa e oferece **casar automaticamente**
+  (todos × todos por fingerprint, que fica em cache em disco), **casar
+  manualmente** (dublado de quem ↔ original de quem) ou **finalizar** sem
+  eles — com "ignorar" por episódio. O gate reabre enquanto sobrarem 2+.
 
 Só **um alinhamento pesado por vez** no servidor: o fingerprint decodifica os
 dois arquivos inteiros, e dois em paralelo brigam pelo mesmo disco — o segundo

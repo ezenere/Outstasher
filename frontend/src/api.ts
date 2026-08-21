@@ -62,6 +62,7 @@ export interface SeasonDetail {
 export type EpisodeState =
   | 'pending' | 'downloading' | 'downloaded' | 'aligning' | 'review'
   | 'merging' | 'done' | 'failed' | 'skipped_future' | 'skipped_missing'
+  | 'skipped_mismatch'
 
 export const EPISODE_STATE_LABEL: Record<EpisodeState, string> = {
   pending: 'Aguardando',
@@ -74,6 +75,7 @@ export const EPISODE_STATE_LABEL: Record<EpisodeState, string> = {
   failed: 'Falhou',
   skipped_future: 'Não lançado',
   skipped_missing: 'Pulado (sem torrent)',
+  skipped_mismatch: 'Ignorado (desalinhado)',
 }
 
 /** Episódio dentro de job["episodes"] (chave "S01E02"). */
@@ -123,7 +125,7 @@ export interface SeriesCandidate {
 
 export type GateReason =
   | 'manual_pick' | 'gaps_confirm' | 'incompatible_torrents'
-  | 'alignment_review' | 'drift'
+  | 'alignment_review' | 'drift' | 'mismatched_pairs'
 
 /** Candidato na visão invertida do manual: torrent + episódios que o TÍTULO
  *  dele cobre (o match fino pelo arquivo acontece após o download). */
@@ -150,6 +152,9 @@ export interface JobGate {
       alternatives: SeriesCandidate[]
     }[]
     episode_groups?: { id: string; name: string; type: number; episode_count: number }[]
+    /** mismatched_pairs: episódios que falharam por conflito de alinhamento */
+    mismatched?: Record<string, { original: string; dubbed: string; error: string }>
+    attempts?: number
     /** manual_pick */
     candidates?: Record<'original' | 'dubbed', Record<string, SeriesCandidate[]>>
     by_torrent?: Record<'original' | 'dubbed', TorrentChoice[]>

@@ -99,9 +99,9 @@ def _align_locked(dub_path: str, orig_path: str, episode: str,
             return None
         return lambda info: on_progress({**info, "step": n, "label": label})
 
-    ha = fingerprint.dhash_stream(dub_path, crop_a, duration=dur_a,
+    ha = fingerprint.dhash_cached(dub_path, crop_a, duration=dur_a,
                                   on_progress=step(1, "dublado"))
-    hb = fingerprint.dhash_stream(orig_path, crop_b, duration=dur_b,
+    hb = fingerprint.dhash_cached(orig_path, crop_b, duration=dur_b,
                                   on_progress=step(2, "original"))
 
     if not merged:
