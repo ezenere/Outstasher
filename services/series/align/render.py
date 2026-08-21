@@ -196,7 +196,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
                 *in_opts, "-i", orig_path, "-i", dub_path,
                 "-filter_complex", filter_complex,
                 "-map", "[dub_out]", "-c:a", codec, "-b:a", bitrate,
-                "-vn", "-sn", *out_opts, str(dub_mka)]
+                "-vn", "-sn", "-map_chapters", "-1", *out_opts, str(dub_mka)]
         merger._run_ffmpeg_progress(cmd1, duration_b, on_progress, on_start)
 
         # passo 2: mux com stream copy de tudo (rápido). Com mkvmerge no
@@ -221,6 +221,12 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         cmd2 = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-y",
                 "-progress", "pipe:1", "-nostats", "-fflags", "+genpts",
                 *in_opts, "-i", orig_path, "-i", str(dub_mka)]
+        ch_file = None
+        if in_opts:
+            # janela: capítulos filtrados e deslocados (entrada 2)
+            ch_file = _window_chapters(probe_orig, kf, w1, tmp_dir)
+            if ch_file is not None:
+                cmd2 += ["-f", "ffmetadata", "-i", str(ch_file)]
         cmd2 += ["-map", "0:v:0", "-c:v", "copy"]
         # áudios do original (todas as línguas), depois o dublado
         n_orig_a = len(merger.get_streams(probe_orig, "audio"))
@@ -233,9 +239,15 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         # de existirem, e é a intercalação que se adapta a elas (abaixo)
         if merger.get_streams(probe_orig, "subtitle"):
             cmd2 += ["-map", "0:s?", "-c:s", "copy"]
-        # capítulos do original, sempre (com -ss/-to o ffmpeg desloca e
-        # recorta os que caem fora da janela)
-        cmd2 += ["-map_chapters", "0"]
+        # capítulos do original, sempre. Com JANELA, não vale copiar do
+        # arquivo (-map_chapters 0): o ffmpeg mantém capítulos além do -t, e
+        # a duração DECLARADA do MKV vira a do capítulo mais distante — o
+        # player mostra 81 min num episódio de 40 (caso real: primeira
+        # metade de um fundido). Entram só os da janela, já deslocados.
+        if in_opts:
+            cmd2 += ["-map_chapters", "2"] if ch_file else ["-map_chapters", "-1"]
+        else:
+            cmd2 += ["-map_chapters", "0"]
         # intercalação DIMENSIONADA (merger.MUX_BUFFER_GB): num 1080p sai em
         # dezenas de minutos (na prática, estrita — sem ela o muxer "força
         # saída" nas faixas esparsas e players travam); num REMUX 4K limita a
@@ -264,6 +276,46 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
     # deslocamento aplicado aos tempos b (0 sem b_window): quem for anexar
     # legendas externas precisa dele
     return {"b_shift": float(in_opts[1]) if in_opts else 0.0}
+
+
+def _ffmeta_escape(text: str) -> str:
+    """Valor no formato ffmetadata: '=', ';', '#' e '\\' são especiais."""
+    out = text.replace("\\", "\\\\")
+    for ch in "=;#":
+        out = out.replace(ch, "\\" + ch)
+    return out.replace("\n", " ")
+
+
+def _window_chapters(probe_orig: dict, kf: float, w1: float,
+                     tmp_dir: Path) -> Path | None:
+    """Arquivo ffmetadata com os capítulos do original que caem na janela
+    [kf, w1], deslocados para o tempo do arquivo cortado. None se nenhum
+    sobrar (aí o mux vai sem capítulos)."""
+    lines = [";FFMETADATA1"]
+    total = 0
+    for c in probe_orig.get("chapters") or []:
+        try:
+            start = float(c.get("start_time"))
+            end = float(c.get("end_time"))
+        except (TypeError, ValueError):
+            continue
+        if end <= kf or start >= w1:
+            continue
+        s = max(0.0, start - kf)
+        e = min(w1 - kf, end - kf)
+        if e - s < 0.5:
+            continue     # raspa de capítulo vizinho cortado: não é capítulo
+        lines += ["[CHAPTER]", "TIMEBASE=1/1000",
+                  f"START={int(round(s * 1000))}", f"END={int(round(e * 1000))}"]
+        title = ((c.get("tags") or {}).get("title") or "").strip()
+        if title:
+            lines.append(f"title={_ffmeta_escape(title)}")
+        total += 1
+    if not total:
+        return None
+    f = tmp_dir / "chapters.ffmeta"
+    f.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return f
 
 
 _MKV_PROGRESS = re.compile(r"Progress:\s*(\d+(?:\.\d+)?)%")

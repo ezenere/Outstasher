@@ -258,13 +258,13 @@ def test_render_janela_no_comeco_corta_o_fim(tmp_path):
                       log=lambda m: None, b_window=(0.0, 30.0))
     info = _probe(out)
     dur = float(info["format"]["duration"])
+    # a duração DECLARADA importa tanto quanto a real: capítulo além do fim
+    # inflava o cabeçalho (player mostrava 81 min num episódio de 40 — o
+    # recorte de capítulos pelo -t varia entre versões do ffmpeg, então os
+    # capítulos da janela entram por ffmetadata, nunca por -map_chapters 0)
     assert 29.0 <= dur <= 31.5, dur
-    # capítulo do 2º episódio: some, ou fica vazio colado no fim (start == -t,
-    # que o ffmpeg mantém por "≤") — nunca com conteúdo dentro da saída
-    for c in info["chapters"]:
-        if c["tags"]["title"] == "Ep2":
-            assert float(c["start_time"]) >= 29.5, c
-    assert info["chapters"][0]["tags"]["title"] == "Ep1"
+    titles = [c["tags"]["title"] for c in info["chapters"]]
+    assert titles == ["Ep1"], titles
 
 
 def _srt(path, cues):
