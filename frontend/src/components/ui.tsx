@@ -208,25 +208,30 @@ export function ClampText({ children, className = '' }: {
 }) {
   const [expanded, setExpanded] = useState(false)
   const [overflows, setOverflows] = useState(false)
-  const boxRef = useRef<HTMLDivElement>(null)
-  const mirrorRef = useRef<HTMLSpanElement>(null)
-  // Mede num espelho fora da tela, não no span visível: expandido ele não trunca
-  // mais (scrollWidth == clientWidth) e a medição se perderia. Compara a largura
-  // real do texto com a do container; o ResizeObserver remede no resize.
+  const textRef = useRef<HTMLSpanElement>(null)
+  // Mede o PRÓPRIO span colapsado (truncate = overflow hidden): scrollWidth é a
+  // largura real do texto, clientWidth a da caixa. Expandido não dá para medir
+  // (o texto quebra em linhas), então a medição é pulada e o valor anterior
+  // vale — voltar a colapsar remede, por isso `expanded` entra nas deps.
+  // Já houve aqui um espelho invisível fora da tela para medir: `invisible` não
+  // tira o elemento da área rolável e o texto inteiro (um comando ffmpeg tem
+  // milhares de px) esticava a PÁGINA na horizontal sempre que o botão aparecia.
   useEffect(() => {
-    const box = boxRef.current
-    const mirror = mirrorRef.current
-    if (!box || !mirror) return
-    const measure = () => setOverflows(mirror.scrollWidth > box.clientWidth + 1)
+    const el = textRef.current
+    if (!el) return
+    const measure = () => {
+      if (!expanded) setOverflows(el.scrollWidth > el.clientWidth + 1)
+    }
     measure()
     const ro = new ResizeObserver(measure)
-    ro.observe(box)
+    ro.observe(el)
     return () => ro.disconnect()
-  }, [children])
+  }, [children, expanded])
   return (
-    <div ref={boxRef} className={`relative ${className}`}>
+    <div className={className}>
       <div className="flex items-start gap-2">
-        <span className={`min-w-0 flex-1 ${expanded ? 'whitespace-pre-wrap wrap-break-word' : 'truncate whitespace-nowrap'}`}>
+        <span ref={textRef}
+          className={`min-w-0 flex-1 ${expanded ? 'whitespace-pre-wrap wrap-break-word' : 'truncate whitespace-nowrap'}`}>
           {children}
         </span>
         {overflows && (
@@ -242,14 +247,6 @@ export function ClampText({ children, className = '' }: {
           </button>
         )}
       </div>
-      {/* espelho invisível, largura livre: dá o tamanho real do texto em 1 linha */}
-      <span
-        ref={mirrorRef}
-        aria-hidden
-        className="pointer-events-none invisible absolute block h-0 w-max whitespace-nowrap"
-      >
-        {children}
-      </span>
     </div>
   )
 }
