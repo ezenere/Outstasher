@@ -261,3 +261,49 @@ def test_bordas_de_recap_no_meio_encaixam_no_silencio(tmp_path):
     # o gap continua no EDL, descrevendo o que foi descartado do dublado
     assert g.a_start == a.a_end and abs(g.a_end - b.a_start) < 1e-6
     assert g.b_start == g.b_end == a.b_end
+
+
+def test_replaced_confere_o_vizinho_de_DEPOIS_tambem(tmp_path):
+    """Caso real de campo (5 episódios seguidos mandados para revisão): há uma
+    junção DENTRO do trecho suspeito, então o offset muda de um lado para o
+    outro (+0,00 antes, -0,30 depois) e o áudio do trecho é contínuo com o de
+    DEPOIS. Comparar só com o vizinho anterior recusava por ~300 ms — a
+    diferença exata entre os dois vizinhos."""
+    orig = _audio(tmp_path / "orig.wav", 90, seed=31,
+                  gaps=[(29.7, 30.1), (33.0, 33.4), (60.0, 60.4)])
+    # dublado = original com 300 ms REMOVIDOS aos 30 s: antes offset 0,
+    # depois o dublado adianta 0,3 s (b = a + 0,3)
+    dub = _dub_with_edit(orig, tmp_path / "dub.wav", cut_at=30.0, drop=0.300)
+    segs = [
+        Segment("match", 0.0, 29.0, 0.0, 29.0, offset=0.0),
+        # o vídeo marcou como "substituída" a janela que contém a junção
+        Segment("replaced", 29.0, 32.0, 29.0, 32.0, residual=22.0),
+        Segment("match", 32.0, 89.0, 32.3, 89.3, offset=0.3),
+    ]
+    logs = []
+    out = refine._resolve_replaced_by_audio(segs, str(dub), 0, str(orig), 0,
+                                            log=logs.append)
+    assert [s.kind for s in out] == ["match", "match", "match"], logs
+    resolvido = out[1]
+    # ficou com o offset do vizinho de DEPOIS (a junção está antes do trecho)
+    assert abs(resolvido.offset - 0.3) < 0.05, (resolvido.offset, logs)
+    assert any("vira match" in l for l in logs), logs
+
+
+def test_replaced_curto_ainda_e_medido(tmp_path):
+    """Trecho de 0,97 s (caso real) tinha áudio casando a 0,2 ms e ia para
+    revisão sem nem ser medido — a guarda era 1,0 s. Quem barra medição ruim
+    é o pico, não a duração."""
+    orig = _audio(tmp_path / "orig.wav", 60, seed=33)
+    same = tmp_path / "dub.wav"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", str(orig), "-c:a", "pcm_s16le", str(same)], check=True)
+    segs = [
+        Segment("match", 0.0, 29.0, 0.0, 29.0, offset=0.0),
+        Segment("replaced", 29.0, 29.97, 29.0, 29.97, residual=29.0),
+        Segment("match", 29.97, 59.0, 29.97, 59.0, offset=0.0),
+    ]
+    logs = []
+    out = refine._resolve_replaced_by_audio(segs, str(same), 0, str(orig), 0,
+                                            log=logs.append)
+    assert out[1].kind == "match", logs

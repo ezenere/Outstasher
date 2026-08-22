@@ -373,6 +373,11 @@ def _split_by_profile(seg: Segment, pts, dub_path, dub_a, orig_path, orig_a,
 
 
 REPLACED_AUDIO_TOL_S = 0.10   # áudio no mesmo offset dos vizinhos = mesma cena
+REPLACED_MIN_DUR_S = 0.5      # janela mínima para medir: abaixo disto o
+                              # GCC-PHAT não tem sinal. Quem barra medição
+                              # ruim é o pico (MIN_PEAK_QUALITY), não a
+                              # duração — 1,0 s deixava passar para revisão
+                              # trecho de 0,97 s que o áudio casava a 0,2 ms
 STRAY_MATCH_S = 3.0           # match isolado curto com offset longe dos vizinhos
 STRAY_AUDIO_MAX_S = 10.0      # até aqui, offset destoante precisa do aval do áudio
 STRAY_OFF_S = 1.0
@@ -402,25 +407,37 @@ def _resolve_replaced_by_audio(segs, dub_path, dub_a, orig_path, orig_a, log):
         if near is None:
             continue
         dur = seg.a_end - seg.a_start
-        if dur < 1.0:
+        if dur < REPLACED_MIN_DUR_S:
             continue
         # o offset do vizinho vem do VÍDEO (grade de 0,25 s: erro até 125 ms —
         # maior que a tolerância). A referência tem que ser o offset REAL do
         # vizinho, medido pelo áudio colado na fronteira (caso real de campo, S01E03
-        # 14:20: vídeo -5,00, áudio -5,14 → recusado por 41 ms de folga)
-        ref = _neighbor_audio_offset(segs, i, dub_path, dub_a, orig_path, orig_a)
-        if ref is None:
-            ref = near
-        try:
-            tau, q = _measure(dub_path, dub_a, orig_path, orig_a,
-                              seg.a_start, seg.a_start + ref, dur)
-        except merger.MergeError:
+        # 14:20: vídeo -5,00, áudio -5,14 → recusado por 41 ms de folga).
+        # Os DOIS vizinhos entram: se há uma junção dentro do trecho, o áudio
+        # dele é contínuo com o lado de DEPOIS, não com o de antes.
+        refs = _neighbor_audio_offsets(segs, i, dub_path, dub_a, orig_path, orig_a)
+        if not refs:
+            refs = [near]
+        melhor = None    # (|desvio|, off, ref, q) da referência que mais aproxima
+        for ref in refs:
+            try:
+                tau, q = _measure(dub_path, dub_a, orig_path, orig_a,
+                                  seg.a_start, seg.a_start + ref, dur)
+            except merger.MergeError:
+                continue
+            if melhor is None or abs(tau) < melhor[0]:
+                melhor = (abs(tau), ref + tau, ref, q)
+            if q >= MIN_PEAK_QUALITY and abs(tau) <= REPLACED_AUDIO_TOL_S:
+                melhor = (abs(tau), ref + tau, ref, q)
+                break
+        if melhor is None:
             continue
-        off = ref + tau
+        _, off, ref, q = melhor
         if q < MIN_PEAK_QUALITY or abs(off - ref) > REPLACED_AUDIO_TOL_S:
             log(f"  'cena substituída' {seg.a_start:.1f}-{seg.a_end:.1f}s: áudio "
                 f"NÃO confirma continuidade (offset {off * 1000:+.0f} ms vs "
-                f"vizinho {ref * 1000:+.0f} ms, pico {q:.0f}) — fica para revisão")
+                f"vizinho(s) {', '.join(f'{r * 1000:+.0f}' for r in refs)} ms, "
+                f"pico {q:.0f}) — fica para revisão")
         else:
             log(f"  'cena substituída' {seg.a_start:.1f}-{seg.a_end:.1f}s: áudio "
                 f"contínuo (offset {off * 1000:+.0f} ms, pico {q:.0f}) — vira match")
@@ -436,10 +453,16 @@ def _resolve_replaced_by_audio(segs, dub_path, dub_a, orig_path, orig_a, log):
     return segs
 
 
-def _neighbor_audio_offset(segs, i, dub_path, dub_a, orig_path, orig_a,
-                           win: float = 6.0) -> float | None:
-    """Offset REAL (áudio) do match vizinho, medido numa janela colada na
-    fronteira com segs[i] — antes, senão depois. None se nada confiável."""
+def _neighbor_audio_offsets(segs, i, dub_path, dub_a, orig_path, orig_a,
+                            win: float = 6.0) -> list[float]:
+    """Offsets REAIS (áudio) dos matches vizinhos de segs[i], medidos em
+    janelas coladas nas fronteiras: o de ANTES e o de DEPOIS, nessa ordem.
+
+    Os dois importam. Quando o offset muda ao longo do trecho suspeito (há uma
+    junção ali), o áudio do trecho é contínuo com um dos lados — e não é
+    necessariamente o anterior. Devolver só o primeiro confiável fazia cena
+    igual ser recusada por ~300 ms, que era exatamente a diferença entre os
+    dois vizinhos (caso real de campo: 5 episódios seguidos em revisão)."""
     cands = []
     for j in range(i - 1, -1, -1):
         if segs[j].kind in ("match", "pal", "drift") and segs[j].offset is not None:
@@ -453,6 +476,7 @@ def _neighbor_audio_offset(segs, i, dub_path, dub_a, orig_path, orig_a,
             a1 = min(segs[j].a_end, a0 + win)
             cands.append((a0, a1 - a0, segs[j].offset))
             break
+    out: list[float] = []
     for a0, dur, guess in cands:
         if dur < 1.0:
             continue
@@ -461,8 +485,8 @@ def _neighbor_audio_offset(segs, i, dub_path, dub_a, orig_path, orig_a,
         except merger.MergeError:
             continue
         if q >= MIN_PEAK_QUALITY:
-            return guess + tau
-    return None
+            out.append(guess + tau)
+    return out
 
 
 def _drop_stray_matches(segs: list[Segment], log, dub_path=None, dub_a=None,
