@@ -65,18 +65,19 @@ async def _pause_for_drift(job: dict, files: dict, e: "merger.VersionMismatch"):
     Antes de parar, mede o offset a cada 5 min — o perfil inteiro diz se é
     drift (muda aos poucos) ou corte (salto entre patamares)."""
     job["progress"]["merge"] = None
-    job["drift_confirm"] = {
+    gate = {
         "video_file": str(files["video"]), "audio_file": str(files["audio"]),
         "tau1_ms": e.tau1_ms, "tau2_ms": e.tau2_ms,
     }
+    job["drift_confirm"] = gate
     _set(job, "awaiting",
          f"⚠️ Possível versão/corte diferente (offset {e.tau1_ms:+.0f} → "
          f"{e.tau2_ms:+.0f} ms). Medindo o perfil do offset...")
     try:
         profile, verdict = await asyncio.to_thread(
             _offset_profile, str(files["video"]), str(files["audio"]))
-        job["drift_confirm"]["profile"] = profile
-        job["drift_confirm"]["verdict"] = verdict
+        gate["profile"] = profile
+        gate["verdict"] = verdict
         label = {"drift": "drift (muda aos poucos)", "cut": "corte (salto entre patamares)",
                  "flat": "constante nas janelas medidas", "mixed": "misto"}.get(verdict, "indefinido")
         _event(job, "merge", f"Perfil do offset em {len(profile)} janela(s): {label} — "
@@ -86,9 +87,14 @@ async def _pause_for_drift(job: dict, files: dict, e: "merger.VersionMismatch"):
         raise
     except Exception as ex:  # noqa: BLE001 — o perfil é informativo
         _event(job, "merge", f"⚠️ perfil do offset não medido ({ex})")
-    _set(job, "awaiting",
-         f"⚠️ Possível versão/corte diferente (offset {e.tau1_ms:+.0f} → "
-         f"{e.tau2_ms:+.0f} ms). Conversão pausada.")
+    # o usuário pode ter DECIDIDO durante a medição (proceed/troca de torrent):
+    # o gate já saiu do job e o status é do fluxo novo — reescrever "awaiting"
+    # aqui atropelava o alinhamento em andamento (caso real de campo: status
+    # "awaiting" com o fingerprint rodando, e um segundo proceed aceito)
+    if job.get("drift_confirm") is gate:
+        _set(job, "awaiting",
+             f"⚠️ Possível versão/corte diferente (offset {e.tau1_ms:+.0f} → "
+             f"{e.tau2_ms:+.0f} ms). Conversão pausada.")
 
 
 async def proceed(job_id: str, mode: str = "offset") -> dict | None:

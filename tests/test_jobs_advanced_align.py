@@ -140,3 +140,53 @@ def test_resolve_review_filme_skip_falha(drift_env):
         assert out["status"] == "error"
         assert "pulada" in (store.get_job("adv1")["detail"] or "")
     asyncio.run(go())
+
+
+def test_decisao_durante_a_medicao_nao_e_atropelada(drift_env, monkeypatch):
+    """Caso real de campo: o usuário deu proceed ENQUANTO o perfil ainda era
+    medido. Ao terminar, o handler reescrevia o status para 'awaiting' por
+    cima do alinhamento em andamento — e a UI aceitava um SEGUNDO proceed."""
+    vf, af = drift_env
+    import threading
+    liberar = threading.Event()
+
+    def perfil_lento(v, a):
+        # bloqueia a thread até o teste liberar (simula os 25 min de janelas)
+        liberar.wait(timeout=10)
+        return ([{"t": 30, "offset_ms": -100, "quality": 50.0}] * 3, "cut")
+    monkeypatch.setattr(jobs.advanced, "_offset_profile", perfil_lento)
+
+    perfil_ok = asyncio.Event()
+
+    async def fake_advanced(job, video_file, audio_file):
+        jobs._set(job, "merging", "Alinhando por conteúdo...")
+        # segura o "alinhamento" até o handler do perfil ter a chance de
+        # atropelar o status (é o que este teste pune)
+        liberar.set()
+        await asyncio.wait_for(perfil_ok.wait(), 5)
+        await asyncio.sleep(0.05)
+    monkeypatch.setattr(jobs.advanced, "_run_advanced", fake_advanced)
+
+    async def go():
+        out = await jobs.create_manual(3, "pt", str(vf), str(af))
+        jid = out["id"]
+        job = jobs._jobs[jid]
+        pausa = jobs._tasks[jid]     # a task da pausa (medindo o perfil)
+        try:
+            for _ in range(300):     # espera o gate abrir
+                if job["status"] == "awaiting" and job.get("drift_confirm"):
+                    break
+                await asyncio.sleep(0.01)
+            assert job["status"] == "awaiting"
+            # usuário decide DURANTE a medição
+            assert await jobs.proceed(jid, "advanced") is not None
+            await pausa              # medição termina (e tenta atropelar)
+            perfil_ok.set()
+            await jobs._tasks[jid]   # o "alinhamento" conclui
+            assert job["status"] != "awaiting", (job["status"], job["detail"])
+            # e um segundo proceed é recusado (gate já consumido)
+            assert await jobs.proceed(jid, "advanced") is None
+        finally:
+            liberar.set()
+            perfil_ok.set()
+    asyncio.run(go())
