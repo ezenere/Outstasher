@@ -235,3 +235,37 @@ def test_progresso_do_fingerprint(tmp_path):
     for step in (1, 2):
         pcts = [i["pct"] for i in infos if i["step"] == step]
         assert pcts == sorted(pcts), pcts
+
+
+def test_crop_params_acha_barras_sujas(tmp_path):
+    """Caso real de campo (REMUX 4K HDR): as barras do letterbox têm ruído
+    acima do limiar padrão do cropdetect (24) e só aparecem com limiar >= 64.
+    Sem isso, um lado era hasheado COM barras e o outro sem — distância ~14
+    em cena idêntica e o DP desistia de blocos de 10+ min. O crop_params
+    escala o limiar quando detecta "quadro inteiro", aceitando o resultado
+    só se tiver formato de barras."""
+    from services.series.align import fingerprint
+    sujo = tmp_path / "sujo.mkv"
+    # conteúdo 320x134 entre barras CINZA-ESCURO (luma ~40: "sujas")
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc2=size=320x134:rate=10:duration=40",
+         "-vf", "pad=320:180:0:23:color=0x282828",
+         "-c:v", "libx264", "-preset", "ultrafast", str(sujo)], check=True)
+    crop = fingerprint.crop_params(str(sujo), duration=40.0)
+    assert crop is not None
+    w, h, x, y = (int(v) for v in crop.split(":"))
+    assert w >= 310 and 128 <= h <= 140, crop     # largura cheia, altura do miolo
+    assert 18 <= y <= 28, crop                    # barra de cima fora
+
+    limpo = tmp_path / "limpo.mkv"
+    # controle: conteúdo que ENCHE o quadro não pode ganhar crop nos limiares
+    # altos (recorte irregular é descartado)
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10:duration=40",
+         "-c:v", "libx264", "-preset", "ultrafast", str(limpo)], check=True)
+    crop2 = fingerprint.crop_params(str(limpo), duration=40.0)
+    if crop2 is not None:
+        w2, h2, x2, y2 = (int(v) for v in crop2.split(":"))
+        assert w2 >= 310 and h2 >= 172, crop2     # continua quadro inteiro
