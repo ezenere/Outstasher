@@ -171,6 +171,7 @@ async def _load_movie(job: dict) -> dict:
 async def _search(job: dict):
     """Busca no Jackett e preenche job["search"] com os candidatos viáveis."""
     lang = job["language"]
+    label = config.LANGUAGES[lang]["label"]
     movie = await _load_movie(job)
     original, localized, year = movie["original_title"], movie["localized_title"], movie["year"]
 
