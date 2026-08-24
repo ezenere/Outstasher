@@ -554,6 +554,18 @@ async def catalog_rename_file(req: RenameFileRequest):
     return {"ok": True, "rel": new_rel}
 
 
+@app.get("/api/catalog/file/probe")
+async def catalog_file_probe(folder: str, rel: str,
+                             destination_id: int | None = None):
+    """Detalhe completo (ffprobe) de UM arquivo do item — chamado pela UI
+    quando a linha expande. O item de série vem leve, sem sondagem."""
+    try:
+        return await asyncio.to_thread(
+            catalog.probe_one, destination_id, folder, rel)
+    except catalog.CatalogError as e:
+        raise HTTPException(404, str(e))
+
+
 @app.delete("/api/catalog/item")
 async def catalog_delete_folder(folder: str, destination_id: int | None = None):
     try:

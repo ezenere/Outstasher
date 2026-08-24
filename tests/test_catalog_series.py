@@ -75,3 +75,41 @@ def test_season_of_dir():
     assert catalog.season_of_dir("Season 12") == 12
     assert catalog.season_of_dir("Temporada 01") is None
     assert catalog.season_of_dir("Extras") is None
+
+
+def test_item_detail_de_serie_nao_roda_ffprobe(temp_db, tmp_path, monkeypatch):
+    """Série grande travava a tela: item_detail sondava TODOS os episódios
+    (100+ ffprobes) antes de responder. Série agora vem leve (só stat) e o
+    probe roda por arquivo, sob demanda (probe_one). Filme segue completo."""
+    chamadas = []
+    monkeypatch.setattr(catalog, "ffprobe_json",
+                        lambda p: chamadas.append(p) or {"format": {}, "streams": []})
+    dest_id = _dest(temp_db, tmp_path)
+    _make_series(tmp_path, "Serie Exemplo (2008) [tmdbid-4242]", {1: [1, 2, 3]})
+
+    d = catalog.item_detail(dest_id, "Serie Exemplo (2008) [tmdbid-4242]")
+    assert chamadas == []                       # nenhuma sondagem no detalhe
+    f = d["seasons"][0]["files"][0]
+    assert "streams" not in f and "duration" not in f
+    assert f["category"] == "video" and f["size"] == 1
+
+    # sob demanda: um arquivo, uma sondagem
+    info = catalog.probe_one(dest_id, "Serie Exemplo (2008) [tmdbid-4242]", f["rel"])
+    assert len(chamadas) == 1
+    assert info["rel"] == f["rel"] and "streams" in info
+
+    # filme: detalhe continua completo (poucos arquivos, sondagem barata)
+    chamadas.clear()
+    (tmp_path / "Um Filme (2020)").mkdir()
+    ((tmp_path / "Um Filme (2020)") / "Um Filme (2020).mkv").write_bytes(b"x")
+    catalog.item_detail(dest_id, "Um Filme (2020)")
+    assert len(chamadas) == 1
+
+
+def test_probe_one_barra_caminho_fora_da_pasta(temp_db, tmp_path):
+    dest_id = _dest(temp_db, tmp_path)
+    _make_series(tmp_path, "Serie Exemplo (2008) [tmdbid-4242]", {1: [1]})
+    import pytest
+    with pytest.raises(catalog.CatalogError):
+        catalog.probe_one(dest_id, "Serie Exemplo (2008) [tmdbid-4242]",
+                          "../../etc/passwd")

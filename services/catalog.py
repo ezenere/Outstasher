@@ -241,7 +241,8 @@ def _parse_stream(s: dict) -> dict:
     return common
 
 
-def _probe_file(path: Path) -> dict:
+def _stat_file(path: Path) -> dict:
+    """A parte BARATA do detalhe de um arquivo (só stat — sem ffprobe)."""
     info: dict = {
         "name": path.name,
         "ext": path.suffix.lower(),
@@ -253,12 +254,17 @@ def _probe_file(path: Path) -> dict:
         info["size_human"] = human_size(info["size"])
     except OSError:
         pass
-
     is_media = path.suffix.lower() in MEDIA_EXTENSIONS
     is_sub = path.suffix.lower() in SUBTITLE_EXTENSIONS
     info["category"] = "video" if path.suffix.lower() in VIDEO_EXTENSIONS else (
         "subtitle" if is_sub else ("media" if is_media else "other"))
+    return info
 
+
+def _probe_file(path: Path) -> dict:
+    info = _stat_file(path)
+
+    is_media = path.suffix.lower() in MEDIA_EXTENSIONS
     if not (is_media or path.suffix.lower() in {".vtt", ".srt", ".ass", ".ssa"}):
         return info
 
@@ -292,16 +298,19 @@ def item_detail(destination_id: int | None, folder: str) -> dict:
         raise CatalogError("Pasta do filme não encontrada")
 
     title, year = _title_and_year(folder)
+    # série NÃO sonda os arquivos aqui: 100+ episódios = 100+ ffprobes e a
+    # tela levava idades para abrir — a UI pede o probe POR ARQUIVO quando a
+    # linha é expandida (probe_one). Filme (poucos arquivos) segue completo.
+    is_series = _is_series_dir(item_dir)
+    describe = _stat_file if is_series else _probe_file
     files = []
     total = 0
     for f in sorted(item_dir.rglob("*"), key=lambda p: p.name.casefold()):
         if f.is_file():
-            info = _probe_file(f)
+            info = describe(f)
             info["rel"] = f.relative_to(item_dir).as_posix()
             total += info["size"]
             files.append(info)
-
-    is_series = _is_series_dir(item_dir)
     out = {
         "destination": dest,
         "folder": folder,
@@ -328,6 +337,19 @@ def item_detail(destination_id: int | None, folder: str) -> dict:
                                 key=lambda kv: (kv[0] is None, kv[0] or 0))
         ]
     return out
+
+
+def probe_one(destination_id: int | None, folder: str, rel: str) -> dict:
+    """Detalhe COMPLETO (ffprobe) de um único arquivo do item — o lado caro
+    que o item_detail de série deixa para quando a UI expande a linha."""
+    dest = _resolve_dest(destination_id)
+    root = Path(dest["path"])
+    target = _safe_join(root, folder, rel)
+    if not target.is_file():
+        raise CatalogError("Arquivo não encontrado")
+    info = _probe_file(target)
+    info["rel"] = rel
+    return info
 
 
 # -------------------- remocao --------------------

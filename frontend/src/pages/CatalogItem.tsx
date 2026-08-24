@@ -19,6 +19,11 @@ export default function CatalogItem() {
   const [detail, setDetail] = useState<CatalogDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [open, setOpen] = useState<Set<string>>(new Set())
+  // série: temporadas são dropdowns FECHADOS por padrão (abrir tudo de uma
+  // vez era o que travava a tela em séries grandes)
+  const [openSeasons, setOpenSeasons] = useState<Set<string>>(new Set())
+  // série vem leve do backend (sem ffprobe): sondamos POR ARQUIVO na expansão
+  const [probing, setProbing] = useState<Set<string>>(new Set())
   const [recompress, setRecompress] = useState<CatalogFile | null>(null)
   // lote (temporada/série): lista de arquivos + rótulo do escopo
   const [batch, setBatch] = useState<{ files: CatalogFile[]; label: string } | null>(null)
@@ -42,11 +47,50 @@ export default function CatalogItem() {
   }, [reload])
 
   function toggle(rel: string) {
+    const opening = !open.has(rel)
     setOpen((prev) => {
       const next = new Set(prev)
       next.has(rel) ? next.delete(rel) : next.add(rel)
       return next
     })
+    if (opening) void probeFile(rel)
+  }
+
+  function toggleSeason(key: string) {
+    setOpenSeasons((prev) => {
+      const next = new Set(prev)
+      next.has(key) ? next.delete(key) : next.add(key)
+      return next
+    })
+  }
+
+  // sonda um arquivo que veio leve (série) na primeira expansão da linha
+  async function probeFile(rel: string) {
+    const f = detail?.files.find((x) => x.rel === rel)
+    if (!f || f.streams !== undefined || f.probe_error !== undefined) return
+    if (f.category === 'other' || probing.has(rel)) return
+    setProbing((prev) => new Set(prev).add(rel))
+    try {
+      const full = await api<CatalogFile>(
+        `/api/catalog/file/probe?${qs}&rel=${encodeURIComponent(rel)}`)
+      setDetail((cur) => {
+        if (!cur) return cur
+        const merge = (x: CatalogFile) => (x.rel === rel ? { ...x, ...full } : x)
+        return {
+          ...cur,
+          files: cur.files.map(merge),
+          seasons: cur.seasons?.map((sg) => ({ ...sg, files: sg.files.map(merge) })),
+        }
+      })
+    } catch {
+      // sondagem é conveniência: falha vira a mensagem padrão de "sem tracks"
+    } finally {
+      setProbing((prev) => {
+        const next = new Set(prev)
+        next.delete(rel)
+        return next
+      })
+    }
   }
 
   async function removeFile(f: CatalogFile) {
@@ -209,34 +253,48 @@ export default function CatalogItem() {
           const label = sg.season != null
             ? `Temporada ${String(sg.season).padStart(2, '0')}` : 'Outros arquivos'
           const vids = sg.files.filter((f) => f.category === 'video')
+          const openSg = openSeasons.has(label)
+          const sgSize = sg.files.reduce((acc, f) => acc + f.size, 0)
           return (
             <div key={label}>
-              <div className="mt-6 mb-2 flex items-center gap-3">
-                <h2 className="text-sm font-semibold text-zinc-400">
-                  {label} <span className="font-normal text-zinc-500">· {sg.files.length} arquivo(s)</span>
-                </h2>
+              <div className="mt-4 flex items-center gap-2">
+                <button
+                  onClick={() => toggleSeason(label)}
+                  className="flex min-w-0 flex-1 items-center gap-2 rounded-xl bg-zinc-900 px-4 py-2.5 text-left hover:bg-zinc-800/70"
+                >
+                  {openSg
+                    ? <NavArrowDown width={16} height={16} className="shrink-0 text-zinc-500" />
+                    : <NavArrowRight width={16} height={16} className="shrink-0 text-zinc-500" />}
+                  <span className="text-sm font-semibold text-zinc-300">{label}</span>
+                  <span className="text-xs text-zinc-500">
+                    · {sg.files.length} arquivo(s){sgSize ? ` · ${humanSize(sgSize)}` : ''}
+                  </span>
+                </button>
                 {sg.season != null && vids.length > 0 && (
                   <button
                     onClick={() => setBatch({ files: vids, label: label.toLowerCase() })}
-                    className="rounded-lg border border-zinc-700 px-2 py-0.5 text-xs text-zinc-400 hover:border-purple-700 hover:text-purple-300"
+                    className="shrink-0 rounded-lg border border-zinc-700 px-2 py-1 text-xs text-zinc-400 hover:border-purple-700 hover:text-purple-300"
                   >
                     Recomprimir temporada
                   </button>
                 )}
               </div>
-              <div className="flex flex-col gap-2">
-                {sg.files.map((f) => (
-                  <FileRow
-                    key={f.rel}
-                    file={f}
-                    open={open.has(f.rel)}
-                    onToggle={() => toggle(f.rel)}
-                    onRename={() => renameFile(f)}
-                    onRemove={() => removeFile(f)}
-                    onRecompress={f.category === 'video' ? () => setRecompress(f) : undefined}
-                  />
-                ))}
-              </div>
+              {openSg && (
+                <div className="mt-2 flex flex-col gap-2">
+                  {sg.files.map((f) => (
+                    <FileRow
+                      key={f.rel}
+                      file={f}
+                      open={open.has(f.rel)}
+                      probing={probing.has(f.rel)}
+                      onToggle={() => toggle(f.rel)}
+                      onRename={() => renameFile(f)}
+                      onRemove={() => removeFile(f)}
+                      onRecompress={f.category === 'video' ? () => setRecompress(f) : undefined}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
           )
         })
@@ -294,9 +352,10 @@ export default function CatalogItem() {
   )
 }
 
-function FileRow({ file, open, onToggle, onRename, onRemove, onRecompress }: {
+function FileRow({ file, open, probing = false, onToggle, onRename, onRemove, onRecompress }: {
   file: CatalogFile
   open: boolean
+  probing?: boolean
   onToggle: () => void
   onRename: () => void
   onRemove: () => void
@@ -346,6 +405,9 @@ function FileRow({ file, open, onToggle, onRename, onRemove, onRecompress }: {
 
       {open && (
         <div className="border-t border-zinc-800 px-4 py-3 text-sm">
+          {probing && (
+            <div className="text-xs text-zinc-500">Lendo informações da mídia…</div>
+          )}
           {file.probe_error && (
             <div className="mb-2 text-xs text-amber-400">ffprobe: {file.probe_error}</div>
           )}
@@ -361,12 +423,21 @@ function FileRow({ file, open, onToggle, onRename, onRemove, onRecompress }: {
               {file.streams.map((s) => <StreamCard key={s.index} s={s} />)}
             </div>
           ) : (
-            !file.probe_error && <div className="text-xs text-zinc-500">Sem tracks (arquivo não-mídia).</div>
+            !file.probe_error && !probing &&
+            <div className="text-xs text-zinc-500">Sem tracks (arquivo não-mídia).</div>
           )}
         </div>
       )}
     </div>
   )
+}
+
+function humanSize(n: number): string {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let v = n
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  return `${v >= 100 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`
 }
 
 const TYPE_STYLE: Record<string, string> = {
