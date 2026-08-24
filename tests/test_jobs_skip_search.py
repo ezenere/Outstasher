@@ -161,3 +161,63 @@ def test_serie_com_skip_search_gateia_manual_sem_buscar(temp_db, monkeypatch):
     assert job["awaiting"]["reason"] == "manual_pick"
     # a lista vem vazia: é no gate que o usuário cola os magnets
     assert job["awaiting"]["payload"]["by_torrent"] == {"original": [], "dubbed": []}
+
+
+# -------------------- duplicata e cancel de duplicado --------------------
+
+def test_create_manual_recusa_par_duplicado_ativo(temp_db, tmp_path, monkeypatch):
+    """Duas automações criando o job do MESMO par (caso real): o segundo tem
+    que ser recusado — os dois registrariam a mesma saída e cancelar um
+    apagava o filme entregue pelo outro."""
+    from services.jobs import movies as movies_mod
+    vf, af = tmp_path / "v.mkv", tmp_path / "a.mkv"
+    vf.write_bytes(b"x")
+    af.write_bytes(b"x")
+    temp_db.add_destination("Filmes", str(tmp_path / "out"), True)
+    monkeypatch.setattr(movies_mod, "_probe_manual_file", lambda p, r: None)
+
+    async def fake_details(tmdb_id, lang):
+        return {"original_title": "Filme Exemplo", "localized_title": "Filme Exemplo",
+                "year": "2014", "poster": None}
+    monkeypatch.setattr(movies_mod.tmdb, "details", fake_details)
+
+    async def parado(job, video_file, audio_file):
+        await asyncio.sleep(30)
+    monkeypatch.setattr(movies_mod, "_run_manual", parado)
+
+    async def go():
+        j1 = await movies_mod.create_manual(9, "pt", str(vf), str(af))
+        with pytest.raises(ValueError, match="Já existe um job ativo"):
+            await movies_mod.create_manual(9, "pt", str(vf), str(af))
+        # cancelado/terminado libera a recriação
+        jobs._jobs[j1["id"]]["status"] = "cancelled"
+        j2 = await movies_mod.create_manual(9, "pt", str(vf), str(af))
+        assert j2["id"] != j1["id"]
+        for jid in (j1["id"], j2["id"]):
+            t = jobs._tasks.pop(jid, None)
+            if t: t.cancel()
+    asyncio.run(go())
+
+
+def test_cancel_nao_apaga_saida_de_outro_job(temp_db, tmp_path):
+    """O arquivo no caminho de saída é mais antigo que o merge deste job =
+    foi outro job que o entregou; cancelar este NÃO pode apagá-lo."""
+    import os, time
+    from services.jobs import runtime
+    out = tmp_path / "Filme (2014)" / "Filme (2014) [pt+orig].mkv"
+    out.parent.mkdir(parents=True)
+    out.write_bytes(b"filme pronto de ontem")
+    antigo = time.time() - 3600
+    os.utime(out, (antigo, antigo))
+    job = {"id": "c1", "tmdb_id": 1, "language": "pt", "status": "cancelled",
+           "detail": "", "output": str(out), "events": [],
+           "created_at": "2026-01-01T00:00:00",
+           "merge_started_at": __import__("datetime").datetime.now()
+               .isoformat(timespec="seconds")}
+    runtime._delete_output(job)
+    assert out.is_file(), "arquivo de outro job foi apagado"
+
+    # já um arquivo escrito DEPOIS do início do merge é parcial deste job: sai
+    out.write_bytes(b"parcial deste job")
+    runtime._delete_output(job)
+    assert not out.exists()

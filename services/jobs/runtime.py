@@ -159,13 +159,31 @@ def _kill_ffmpeg(job_id: str):
 def _delete_output(job: dict):
     """Apaga o arquivo final (parcial ou pronto) e a subpasta do filme se ficar
     vazia. Usado ao cancelar durante a conversão: o .mkv em construção fica
-    corrompido/incompleto e não deve sobrar no destino."""
+    corrompido/incompleto e não deve sobrar no destino.
+
+    SÓ apaga o que ESTE job escreveu: o caminho de saída é registrado no
+    começo do merge, antes de qualquer escrita — se o arquivo ali é mais
+    antigo que o início do merge, ele veio de OUTRO job (duplicado do mesmo
+    filme) e cancelar este não pode destruí-lo. Caso real de campo: cancelar
+    um job duplicado apagou o filme pronto do job anterior (159 GiB)."""
     out = job.get("output")
     if not out:
         return
     p = Path(out)
     try:
         if p.is_file():
+            started = job.get("merge_started_at")
+            if started:
+                from datetime import datetime
+                try:
+                    t0 = datetime.fromisoformat(started).timestamp()
+                    if p.stat().st_mtime < t0 - 1.0:
+                        _event(job, "info",
+                               f"Arquivo final preservado (é de outro job, "
+                               f"anterior a este merge): {p}")
+                        return
+                except (ValueError, OSError):
+                    pass
             p.unlink()
             _event(job, "info", f"Arquivo final removido: {p}")
         # remove a subpasta do filme se esvaziou (só a criamos para este filme)

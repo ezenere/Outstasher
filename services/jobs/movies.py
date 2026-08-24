@@ -12,8 +12,8 @@ from pathlib import Path
 from services import merger, store, tmdb, transcode
 from services.jobs import advanced, delivery, downloads, search
 from services.jobs.runtime import (
-    KINDS, _event, _fail, _get_merge_lock, _jobs, _needed_torrents, _public,
-    _set, _spawn)
+    KINDS, _TERMINAL_STATUSES, _event, _fail, _get_merge_lock, _jobs,
+    _needed_torrents, _public, _set, _spawn)
 
 
 async def create(tmdb_id: int, language: str, mode: str = "auto",
@@ -139,6 +139,19 @@ async def create_manual(tmdb_id: int, language: str, video_path: str, audio_path
             raise ValueError(f"Arquivo de {label} não existe: {p}")
     if vf.resolve() == af.resolve():
         raise ValueError("Os dois caminhos apontam para o mesmo arquivo")
+    # duplicata: já existe um job ATIVO com este mesmo par de arquivos?
+    # Criar outro só disputa os locks e — pior — os dois registram o MESMO
+    # caminho de saída: cancelar um apagava o filme entregue pelo outro
+    # (caso real de campo, com duas instâncias de automação criando o mesmo
+    # job). Quem quer repetir de propósito cancela o ativo primeiro.
+    for outro in _jobs.values():
+        mf = outro.get("manual_files") or {}
+        if (outro.get("status") not in _TERMINAL_STATUSES
+                and mf.get("video") == str(vf) and mf.get("audio") == str(af)):
+            raise ValueError(
+                f"Já existe um job ativo com estes mesmos arquivos "
+                f"({outro['id']}, {outro['status']}) — cancele-o antes de "
+                f"criar outro")
     # ffprobe nos dois em paralelo: rejeita na hora o que não é mídia
     await asyncio.gather(asyncio.to_thread(_probe_manual_file, vf, "video"),
                          asyncio.to_thread(_probe_manual_file, af, "audio"))
