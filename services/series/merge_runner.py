@@ -249,26 +249,31 @@ async def _render_from_edl(job: dict, key: str, ep: dict):
     log, on_progress = jobs._ffmpeg_hooks(job, jobs.runtime.PHASE_EDL)
     if ep["edl"].get("note"):
         log(ep["edl"]["note"])
+    # legendas externas entram no PRÓPRIO mux do render (remapeadas lá, com a
+    # janela e os cortes reais) — anexar depois reescrevia o episódio inteiro
+    m = job.get("movie") or {}
+    ext = ep.get("subs") or {}
+    externas = {
+        "orig": [p for p in ext.get("original") or [] if Path(p).exists()],
+        "dub": [p for p in ext.get("dubbed") or [] if Path(p).exists()],
+        "orig_lang": merger.canonical_lang(merger.LANG_ISO.get(
+            m.get("original_language") or "", m.get("original_language") or "und")),
+        "dub_lang": merger.canonical_lang(merger.LANG_ISO.get(
+            job["language"], job["language"])),
+    }
     try:
         info = await asyncio.to_thread(
             render_mod.render, segs, ep["src"]["dubbed"],
             ep["src"]["original"], str(output), job["language"],
             log, on_progress, jobs._register_proc(job["id"]),
-            ep["edl"].get("b_window"))
+            ep["edl"].get("b_window"), externas)
     finally:
         jobs._ffmpeg_procs.pop(job["id"], None)
     ep["output"] = str(output)
-    # legendas externas: as do original deslocam pela janela e, se o render
-    # cortou cenas (cut_video), seguem o mapa de cortes (cue de cena removida
-    # some); as do dublado seguem a EDL (mesmos cortes que o áudio dublado)
-    b_shift = float((info or {}).get("b_shift") or 0.0)
-    b_cuts = (info or {}).get("b_cuts") or []
-    orig_fn = (subs.cuts_fn(b_cuts, -b_shift) if b_cuts
-               else subs.shift_fn(-b_shift))
-    await _attach_subs(
-        job, key, ep, str(output),
-        orig_fn=orig_fn,
-        dub_fn=subs.edl_fn(ep["edl"].get("segments") or [], b_shift), log=log)
+    if externas["orig"] or externas["dub"]:
+        n = (info or {}).get("subs_muxed") or 0
+        jobs._event(job, "merge",
+                    f"{key}: {n} legenda(s) externa(s) no mux final")
 
 
 class NeedsContentAlign(Exception):
@@ -351,6 +356,7 @@ async def _attach_subs(job: dict, key: str, ep: dict, output: str,
     dub_subs = [p for p in ext.get("dubbed") or [] if Path(p).exists()]
     if not orig_subs and not dub_subs:
         return
+    job["detail"] = f"{key}: anexando legendas externas..."
     m = job.get("movie") or {}
     orig_lang = merger.canonical_lang(merger.LANG_ISO.get(
         m.get("original_language") or "", m.get("original_language") or "und"))

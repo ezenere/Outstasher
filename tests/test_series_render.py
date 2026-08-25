@@ -489,3 +489,66 @@ def test_cut_video_sem_mkvmerge_cai_no_preenchimento(tmp_path, monkeypatch):
     dur = float(_probe(out)["format"]["duration"])
     assert 29.0 <= dur <= 31.0, dur          # nada foi cortado
     assert any("não há mkvmerge" in l for l in logs), logs
+
+
+def _srt_de(path, cues):
+    path.write_text("\n".join(
+        f"{i}\n{a} --> {b}\n{t}\n" for i, (a, b, t) in enumerate(cues, 1)),
+        encoding="utf-8")
+    return path
+
+
+@pytest.mark.ffmpeg
+def test_render_legendas_externas_no_mux_final(tmp_path):
+    """As legendas externas entram no PRÓPRIO mux do render — sem a segunda
+    reescrita do arquivo (num REMUX eram dezenas de GB de novo). A do lado
+    dublado é remapeada pela EDL: com o dublado 10 s adiantado, a cue de
+    00:05 tem que sair em 00:15 na timeline final."""
+    orig = _media(tmp_path / "orig.mkv", 40, seed=1)
+    dub = _media(tmp_path / "dub.mkv", 30, seed=2)
+    sub_orig = _srt_de(tmp_path / "orig.eng.srt",
+                       [("00:00:02,000", "00:00:04,000", "original line")])
+    sub_dub = _srt_de(tmp_path / "dub.legenda.srt",
+                      [("00:00:05,000", "00:00:07,000", "fala dublada")])
+    # dublado 10 s adiantado: dub t=0 corresponde a orig t=10
+    segs = [
+        Segment("gap_orig", 0.0, 0.0, 0.0, 10.0),
+        Segment("match", 0.0, 30.0, 10.0, 40.0, offset=10.0),
+    ]
+    out = tmp_path / "out.mkv"
+    logs = []
+    info = render_mod.render(
+        segs, str(dub), str(orig), str(out), "pt", log=logs.append,
+        external_subs={"orig": [str(sub_orig)], "dub": [str(sub_dub)],
+                       "orig_lang": "eng", "dub_lang": "por"})
+    assert info.get("subs_muxed") == 2, logs
+    probe = _probe(out)
+    subs = [s for s in probe["streams"] if s["codec_type"] == "subtitle"]
+    langs = sorted((s.get("tags") or {}).get("language") for s in subs)
+    assert langs == ["eng", "por"], langs
+    assert any("mux final" in l for l in logs), logs
+
+
+@pytest.mark.ffmpeg
+def test_render_legenda_dublada_remapeada_pela_edl(tmp_path):
+    """Só a legenda do dublado, com offset de +10 s na EDL: a cue de 5 s tem
+    que aparecer aos ~15 s da saída (composição EDL feita DENTRO do render)."""
+    orig = _media(tmp_path / "orig.mkv", 40, seed=1)
+    dub = _media(tmp_path / "dub.mkv", 30, seed=2)
+    sub_dub = _srt_de(tmp_path / "dub.legenda.srt",
+                      [("00:00:05,000", "00:00:07,000", "fala dublada")])
+    segs = [
+        Segment("gap_orig", 0.0, 0.0, 0.0, 10.0),
+        Segment("match", 0.0, 30.0, 10.0, 40.0, offset=10.0),
+    ]
+    out = tmp_path / "out.mkv"
+    info = render_mod.render(
+        segs, str(dub), str(orig), str(out), "pt", log=lambda m: None,
+        external_subs={"dub": [str(sub_dub)], "dub_lang": "por"})
+    assert info.get("subs_muxed") == 1
+    p = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "s:0", "-show_packets",
+         "-show_entries", "packet=pts_time", "-of", "csv=p=0", str(out)],
+        capture_output=True, text=True)
+    pts = [float(x.split(",")[0]) for x in p.stdout.split() if x.strip(",")]
+    assert pts and abs(pts[0] - 15.0) < 0.2, (pts, p.stdout)

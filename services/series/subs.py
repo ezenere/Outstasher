@@ -451,40 +451,57 @@ def sidecar(output: str, items: list[dict], log=print) -> int:
     return n
 
 
+def prepare(orig_subs: list, dub_subs: list, orig_fn, dub_fn,
+            embedded: set[tuple[str, str]], tmp_dir,
+            orig_video: str | None = None, dub_video: str | None = None,
+            orig_lang: str = "und", dub_lang: str = "und",
+            log=print) -> list[dict]:
+    """Planeja e REMAPEIA as legendas externas, sem muxar: os .srt prontos
+    ficam em `tmp_dir` (vida controlada pelo chamador). É o que permite ao
+    render incluí-las no MUX FINAL em vez de reescrever o arquivo inteiro
+    depois só para anexá-las. Retorna os itens prontos ({path, side, lang,
+    flavor, srt}); falha de UMA legenda só a pula."""
+    items, skipped = plan(orig_subs, dub_subs, embedded,
+                          orig_video, dub_video, orig_lang, dub_lang)
+    for s in skipped:
+        log(f"legenda ignorada — {s}")
+    ready = []
+    for i, it in enumerate(items):
+        fn = orig_fn if it["side"] == "orig" else dub_fn
+        if fn is None:
+            log(f"legenda ignorada — {Path(it['path']).name}: sem referência "
+                f"de tempo para o lado {it['side']}")
+            continue
+        try:
+            cues = remap(load_cues(it["path"]), fn)
+        except Exception as e:  # noqa: BLE001 — uma legenda ruim não derruba o episódio
+            log(f"⚠️ legenda {Path(it['path']).name} ignorada: {e}")
+            continue
+        if not cues:
+            log(f"legenda ignorada — {Path(it['path']).name}: nenhuma cue "
+                f"sobrou depois do remapeamento")
+            continue
+        srt = Path(tmp_dir) / f"sub{i}.srt"
+        write_srt(cues, srt)
+        ready.append({**it, "srt": str(srt)})
+    return ready
+
+
 def attach(output: str, orig_subs: list, dub_subs: list, orig_fn, dub_fn,
            orig_video: str | None = None, dub_video: str | None = None,
            orig_lang: str = "und", dub_lang: str = "und", log=print,
            mode: str = "mux") -> int:
     """Ponta a ponta: planeja, remapeia (orig_fn/dub_fn: tempo→tempo ou
     None para 'lado indisponível') e muxa (mode='mux') ou grava sidecars
-    (mode='sidecar'). Falha de UMA legenda só a pula."""
+    (mode='sidecar'). Reescreve o container: quando a saída ainda vai ser
+    montada, prefira `prepare()` + legendas no próprio mux final."""
     if not orig_subs and not dub_subs:
         return 0
     probe = merger.ffprobe_json(output)
-    items, skipped = plan(orig_subs, dub_subs, embedded_text_keys(probe),
-                          orig_video, dub_video, orig_lang, dub_lang)
-    for s in skipped:
-        log(f"legenda ignorada — {s}")
-    ready = []
     with tempfile.TemporaryDirectory(prefix="subs_mux_") as td:
-        for i, it in enumerate(items):
-            fn = orig_fn if it["side"] == "orig" else dub_fn
-            if fn is None:
-                log(f"legenda ignorada — {Path(it['path']).name}: sem referência "
-                    f"de tempo para o lado {it['side']}")
-                continue
-            try:
-                cues = remap(load_cues(it["path"]), fn)
-            except Exception as e:  # noqa: BLE001 — uma legenda ruim não derruba o episódio
-                log(f"⚠️ legenda {Path(it['path']).name} ignorada: {e}")
-                continue
-            if not cues:
-                log(f"legenda ignorada — {Path(it['path']).name}: nenhuma cue "
-                    f"sobrou depois do remapeamento")
-                continue
-            srt = Path(td) / f"sub{i}.srt"
-            write_srt(cues, srt)
-            ready.append({**it, "srt": str(srt)})
+        ready = prepare(orig_subs, dub_subs, orig_fn, dub_fn,
+                        embedded_text_keys(probe), td,
+                        orig_video, dub_video, orig_lang, dub_lang, log)
         if mode == "sidecar":
             return sidecar(output, ready, log)
         return mux(output, ready, log)

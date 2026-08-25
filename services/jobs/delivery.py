@@ -114,6 +114,10 @@ async def _attach_external_subs(job: dict, output: str, files: dict,
             asyncio.to_thread(_find, "video"), asyncio.to_thread(_find, "audio"))
         if not v_subs and not a_subs:
             return
+        # a barra padrão diria "Conversão" — mas isto é remux para anexar
+        # legendas, não conversão; o detail conta a verdade
+        if job.get("status") == "merging":
+            job["detail"] = "Anexando legendas externas..."
         movie = job.get("movie") or {}
         orig_lang = merger.canonical_lang(merger.LANG_ISO.get(
             movie.get("original_language") or "", movie.get("original_language") or "und"))

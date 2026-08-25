@@ -184,8 +184,14 @@ def _apply_video_cuts(segs, orig_path: str, tmp_dir: Path, log):
 
 def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
            target_lang: str, log=print, on_progress=None, on_start=None,
-           b_window: tuple[float, float] | list | None = None):
+           b_window: tuple[float, float] | list | None = None,
+           external_subs: dict | None = None):
     """Renderiza a EDL num MKV final. Bloqueante (roda ffmpeg).
+
+    external_subs: {"orig": [paths], "dub": [paths], "orig_lang", "dub_lang"}
+    — legendas externas dos torrents, remapeadas AQUI (com a janela e os
+    cortes reais) e incluídas no PRÓPRIO mux final: anexar depois obrigava a
+    reescrever o arquivo inteiro uma segunda vez (num REMUX, dezenas de GB).
 
     b_window: (início, fim) em segundos ABSOLUTOS do original quando ele é um
     arquivo FUNDIDO (dois episódios) — o vídeo é cortado nessa janela. O corte
@@ -198,7 +204,12 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
     # cut_video ANTES de tudo: o original pode ser trocado pela versão cortada
     # (cenas sem dublagem removidas), e o resto do render nem fica sabendo —
     # só trabalha com um arquivo mais curto e uma EDL já remapeada
-    segs, _cortado, b_cuts = _apply_video_cuts(segs, orig_path, tmp_dir, log)
+    if b_window and any(sg.extra.get("action") == "cut_video" for sg in segs):
+        log("⚠️ cut_video + janela de fundido no mesmo episódio não é "
+            "suportado — os trechos ficam com áudio original")
+        _cortado, b_cuts = None, []
+    else:
+        segs, _cortado, b_cuts = _apply_video_cuts(segs, orig_path, tmp_dir, log)
     if _cortado:
         orig_path = _cortado
 
@@ -303,6 +314,34 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
     # o áudio dublado remontado num .mka e depois só MUXAR cópias elimina a
     # condição por construção.
     dub_mka = tmp_dir / "dub.mka"
+
+    # legendas externas: remapeadas AGORA (janela e cortes já são conhecidos)
+    # e incluídas no mux final — anexar depois reescreveria o arquivo inteiro
+    subs_prontas: list[dict] = []
+    if external_subs and (external_subs.get("orig") or external_subs.get("dub")):
+        from services.series import subs as ext_subs
+        kf_shift = float(in_opts[1]) if in_opts else 0.0
+        orig_fn = (ext_subs.cuts_fn(b_cuts) if b_cuts
+                   else ext_subs.shift_fn(-kf_shift))
+        # o lado dublado segue a EDL — os segmentos daqui já estão com os
+        # cortes aplicados (b remapeado), então a composição sai de graça
+        seg_dicts = [{"kind": sg.kind, "a_start": sg.a_start, "a_end": sg.a_end,
+                      "b_start": sg.b_start, "b_end": sg.b_end,
+                      "offset": sg.offset,
+                      "action": sg.extra.get("action")} for sg in segs]
+        dub_fn = ext_subs.edl_fn(seg_dicts, kf_shift)
+        try:
+            subs_prontas = ext_subs.prepare(
+                external_subs.get("orig") or [], external_subs.get("dub") or [],
+                orig_fn, dub_fn, ext_subs.embedded_text_keys(probe_orig),
+                tmp_dir, external_subs.get("orig_video") or orig_path,
+                external_subs.get("dub_video") or dub_path,
+                external_subs.get("orig_lang") or "und",
+                external_subs.get("dub_lang") or "und", log)
+        except Exception as e:  # noqa: BLE001 — legenda é acessório
+            log(f"⚠️ legendas externas ignoradas ({e})")
+            subs_prontas = []
+
     try:
         # passo 1: só a faixa dublada remontada (áudio, sem vídeo)
         cmd1 = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -320,14 +359,16 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         # muxer do ffmpeg simplesmente não existe nele.
         if has_mkvmerge() and not in_opts:
             cmd2 = _mkvmerge_cmd(str(output), orig_path, str(dub_mka),
-                                 iso, probe_orig)
+                                 iso, probe_orig, subs_prontas)
             p2 = _run_mkvmerge(cmd2, on_progress)
             if p2.returncode >= 2:   # 1 = só avisos; 2 = erro de verdade
                 raise merger.MergeError(
                     "mux final (mkvmerge) falhou: "
                     + merger.describe_exit(p2.returncode, p2.stdout or p2.stderr))
             _check_mux_duration(output, duration_b)
-            return {"b_shift": 0.0, "b_cuts": b_cuts}
+            _log_subs(subs_prontas, log)
+            return {"b_shift": 0.0, "b_cuts": b_cuts,
+                    "subs_muxed": len(subs_prontas)}
 
         # loglevel WARNING (não error): é em nível de aviso que o ffmpeg diz
         # "forcing output" — o sinal de que a intercalação saiu frouxa. Com
@@ -341,6 +382,9 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
             ch_file = _window_chapters(probe_orig, kf, w1, tmp_dir)
             if ch_file is not None:
                 cmd2 += ["-f", "ffmetadata", "-i", str(ch_file)]
+        sub_in0 = 2 + (1 if ch_file is not None else 0)
+        for it in subs_prontas:
+            cmd2 += ["-i", it["srt"]]
         cmd2 += ["-map", "0:v:0", "-c:v", "copy"]
         # áudios do original (todas as línguas), depois o dublado
         n_orig_a = len(merger.get_streams(probe_orig, "audio"))
@@ -351,8 +395,17 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
                  f"-disposition:a:{n_orig_a}", "default"]
         # legendas do original intactas — TODAS: legenda comum é o motivo
         # de existirem, e é a intercalação que se adapta a elas (abaixo)
-        if merger.get_streams(probe_orig, "subtitle"):
+        n_orig_s = len(merger.get_streams(probe_orig, "subtitle"))
+        if n_orig_s:
             cmd2 += ["-map", "0:s?", "-c:s", "copy"]
+        for k, it in enumerate(subs_prontas):
+            idx = n_orig_s + k
+            titulo = {"forced": "Forçada", "sdh": "SDH"}.get(it["flavor"], "")
+            cmd2 += ["-map", f"{sub_in0 + k}:0", f"-c:s:{idx}", "srt",
+                     f"-metadata:s:s:{idx}", f"language={it['lang']}",
+                     f"-metadata:s:s:{idx}", f"title={titulo}",
+                     f"-disposition:s:{idx}",
+                     "forced" if it["flavor"] == "forced" else "0"]
         # capítulos do original, sempre. Com JANELA, não vale copiar do
         # arquivo (-map_chapters 0): o ffmpeg mantém capítulos além do -t, e
         # a duração DECLARADA do MKV vira a do capítulo mais distante — o
@@ -391,7 +444,9 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
             pass
     # deslocamento aplicado aos tempos b (0 sem b_window): quem for anexar
     # legendas externas precisa dele
-    return {"b_shift": float(in_opts[1]) if in_opts else 0.0, "b_cuts": b_cuts}
+    _log_subs(subs_prontas, log)
+    return {"b_shift": float(in_opts[1]) if in_opts else 0.0, "b_cuts": b_cuts,
+            "subs_muxed": len(subs_prontas)}
 
 
 def _ffmeta_escape(text: str) -> str:
@@ -434,6 +489,14 @@ def _window_chapters(probe_orig: dict, kf: float, w1: float,
     return f
 
 
+def _log_subs(prontas: list[dict], log) -> None:
+    if prontas:
+        log("Legendas externas no mux final: " + ", ".join(
+            f"{Path(it['path']).name} → {it['lang']}"
+            + (f" ({it['flavor']})" if it['flavor'] != 'normal' else "")
+            for it in prontas))
+
+
 _MKV_PROGRESS = re.compile(r"Progress:\s*(\d+(?:\.\d+)?)%")
 
 
@@ -444,7 +507,8 @@ def has_mkvmerge() -> bool:
 
 
 def _mkvmerge_cmd(output: str, orig_path: str, dub_mka: str, iso: str,
-                  probe_orig: dict) -> list[str]:
+                  probe_orig: dict,
+                  extra_subs: list[dict] | None = None) -> list[str]:
     """Comando do mkvmerge para o mux final: tudo do original (vídeo, áudios,
     legendas, capítulos, anexos) + a faixa dublada remontada, que entra com o
     idioma alvo e como faixa padrão (os áudios do original perdem o padrão).
@@ -458,6 +522,14 @@ def _mkvmerge_cmd(output: str, orig_path: str, dub_mka: str, iso: str,
             "--language", f"0:{iso}",
             "--default-track-flag", "0:yes",
             dub_mka]
+    for it in extra_subs or []:
+        titulo = {"forced": "Forçada", "sdh": "SDH"}.get(it["flavor"], "")
+        cmd += ["--language", f"0:{it['lang']}",
+                "--track-name", f"0:{titulo}",
+                "--default-track-flag", "0:no",
+                "--forced-display-flag",
+                "0:" + ("yes" if it["flavor"] == "forced" else "no"),
+                it["srt"]]
     return cmd
 
 

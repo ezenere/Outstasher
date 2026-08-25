@@ -190,37 +190,44 @@ async def _render_advanced(job: dict):
         log, on_progress = _ffmpeg_hooks(job, runtime.PHASE_EDL)
         if adv["edl"].get("note"):
             log(adv["edl"]["note"])
+        # legendas externas dos DOIS torrents entram no próprio mux do render
+        # (o do original com a janela, o do dublado pela EDL): anexar depois
+        # reescrevia o filme inteiro — num REMUX, dezenas de GB de novo
+        def _achar(lado: str, arquivo: str) -> list[str]:
+            roots = job.get("src_roots") or {}
+            try:
+                raiz = _map_qbit_path(job, roots[lado]) if roots.get(lado) \
+                    else Path(arquivo).parent
+            except Exception:  # noqa: BLE001
+                raiz = Path(arquivo).parent
+            return [str(p) for p in ext_subs.find_for_movie(raiz, arquivo)]
+
+        movie = job.get("movie") or {}
+        v_subs, a_subs = await asyncio.gather(
+            asyncio.to_thread(_achar, "video", adv["video_file"]),
+            asyncio.to_thread(_achar, "audio", adv["audio_file"]))
+        externas = {
+            "orig": v_subs, "dub": a_subs,
+            "orig_video": adv["video_file"], "dub_video": adv["audio_file"],
+            "orig_lang": merger.canonical_lang(merger.LANG_ISO.get(
+                movie.get("original_language") or "",
+                movie.get("original_language") or "und")),
+            "dub_lang": merger.canonical_lang(merger.LANG_ISO.get(
+                job["language"], job["language"])),
+        }
         try:
             info = await asyncio.to_thread(
                 render_mod.render, segs, adv["audio_file"], adv["video_file"],
                 str(output), job["language"], log, on_progress,
-                _register_proc(job["id"]), adv["edl"].get("b_window"))
+                _register_proc(job["id"]), adv["edl"].get("b_window"),
+                externas)
         finally:
             _ffmpeg_procs.pop(job["id"], None)
         job["progress"]["merge"] = None
-        b_shift = float((info or {}).get("b_shift") or 0.0)
-        # legendas externas: do original só a janela; do dublado, a EDL
-        await delivery._attach_external_subs(
-            job, str(output),
-            {"video": Path(adv["video_file"]), "audio": Path(adv["audio_file"])},
-            (-b_shift, None), log)
-        # o lado dublado precisa da EDL, não de um deslocamento constante:
-        # segunda passada só para ele
-        try:
-            roots = job.get("src_roots") or {}
-            root = _map_qbit_path(job, roots["audio"]) if roots.get("audio") \
-                else Path(adv["audio_file"]).parent
-            a_subs = [str(p) for p in ext_subs.find_for_movie(root, adv["audio_file"])]
-            if a_subs:
-                dub_lang = merger.canonical_lang(merger.LANG_ISO.get(job["language"], job["language"]))
-                n = await asyncio.to_thread(
-                    ext_subs.attach, str(output), [], a_subs, None,
-                    ext_subs.edl_fn(adv["edl"].get("segments") or [], b_shift),
-                    None, adv["audio_file"], "und", dub_lang, log)
-                if n:
-                    _event(job, "merge", f"{n} legenda(s) externa(s) do dublado anexada(s) pela EDL")
-        except Exception as e:  # noqa: BLE001
-            _event(job, "merge", f"⚠️ legendas do dublado não anexadas ({e})")
+        if v_subs or a_subs:
+            _event(job, "merge",
+                   f"{(info or {}).get('subs_muxed') or 0} legenda(s) "
+                   f"externa(s) no mux final")
     job["output"] = str(output)
     _set(job, "done", f"Concluído (alinhamento avançado): {output}")
     await delivery._cleanup_torrents(job)
