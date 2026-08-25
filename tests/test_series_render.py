@@ -32,6 +32,9 @@ def _media(path, dur, seed, size="320x180", chapters=None):
         cmd += ["-i", str(meta), "-map_chapters", "2"]
     cmd += ["-map", "0:v", "-map", "1:a",
             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            # keyframe a cada 2 s, como release de streaming: cut_video corta
+            # em keyframes e o GOP default do x264 (~10 s) não daria onde
+            "-g", "48", "-keyint_min", "48",
             "-c:a", "ac3", "-b:a", "128k", "-ac", "2",
             "-metadata:s:a:0", "language=eng", str(path)]
     subprocess.run(cmd, check=True)
@@ -233,7 +236,9 @@ def test_render_corta_original_fundido_na_janela(tmp_path):
     # keyframe anterior ao início pode adiantar alguns segundos: 30 ≤ dur ≤ 42
     # — e NUNCA o arquivo inteiro (60 s): o corte da janela tem que valer
     assert 29.0 <= dur <= 42.0, dur
-    assert abs(dur - (60.0 - info_r["b_shift"])) < 1.0, (dur, info_r)
+    # ffmpeg 7.x passa do -t em até um GOP no stream copy (o 9.x corta seco):
+    # a folga cobre as duas gerações
+    assert -1.0 < dur - (60.0 - info_r["b_shift"]) < 2.5, (dur, info_r)
     audios = [s for s in info["streams"] if s["codec_type"] == "audio"]
     assert len(audios) == 2
     shift = info_r["b_shift"]
