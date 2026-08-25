@@ -35,11 +35,13 @@ const ACTIONS_FOR: Record<string, { value: ReviewAction; label: string }[]> = {
   gap_orig: [
     { value: 'fill_original', label: 'Preencher com áudio original' },
     { value: 'silence', label: 'Silêncio' },
+    { value: 'cut_video', label: 'Cortar do vídeo (a cena some)' },
   ],
   replaced: [
     { value: 'fill_original', label: 'Áudio original (seguro)' },
     { value: 'use_dub', label: 'Usar a dublagem mesmo assim' },
     { value: 'silence', label: 'Silêncio' },
+    { value: 'cut_video', label: 'Cortar do vídeo (a cena some)' },
   ],
   gap_dub: [{ value: 'accept', label: 'Ok, descartar este trecho' }],
 }

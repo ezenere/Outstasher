@@ -258,12 +258,16 @@ async def _render_from_edl(job: dict, key: str, ep: dict):
     finally:
         jobs._ffmpeg_procs.pop(job["id"], None)
     ep["output"] = str(output)
-    # legendas externas: as do original só deslocam pela janela; as do
-    # dublado seguem a EDL (mesmos cortes que o áudio dublado)
+    # legendas externas: as do original deslocam pela janela e, se o render
+    # cortou cenas (cut_video), seguem o mapa de cortes (cue de cena removida
+    # some); as do dublado seguem a EDL (mesmos cortes que o áudio dublado)
     b_shift = float((info or {}).get("b_shift") or 0.0)
+    b_cuts = (info or {}).get("b_cuts") or []
+    orig_fn = (subs.cuts_fn(b_cuts, -b_shift) if b_cuts
+               else subs.shift_fn(-b_shift))
     await _attach_subs(
         job, key, ep, str(output),
-        orig_fn=subs.shift_fn(-b_shift),
+        orig_fn=orig_fn,
         dub_fn=subs.edl_fn(ep["edl"].get("segments") or [], b_shift), log=log)
 
 

@@ -301,6 +301,25 @@ def shift_fn(delta: float):
     return lambda t: t + delta
 
 
+def cuts_fn(cuts: list[tuple[float, float]], delta: float = 0.0):
+    """Tempo do ORIGINAL → timeline de saída quando o vídeo levou CORTES
+    (cut_video): o que cai dentro de um trecho removido vira None (a legenda
+    daquela cena não existe mais); o resto desloca pela soma dos cortes
+    anteriores (+ delta, o b_shift de janela)."""
+    ordenados = sorted(cuts)
+
+    def fn(t: float):
+        removido = 0.0
+        for c0, c1 in ordenados:
+            if t < c0:
+                break
+            if t < c1:
+                return None
+            removido += c1 - c0
+        return t - removido + delta
+    return fn
+
+
 def edl_fn(segments: list[dict], b_shift: float = 0.0):
     """Tempo do lado DUBLADO (a) → timeline de saída (b − b_shift), pela EDL.
 

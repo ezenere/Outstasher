@@ -11,14 +11,20 @@ Regra: {"when": {"kind", "position": "start|end|middle|any",
         "action": "fill_original" | "silence" | "use_dub" | "accept"}
 
 Ações por tipo de segmento:
-- gap_orig  (vídeo sem dublagem):   fill_original (default) | silence
-- replaced  (conteúdo divergente):  fill_original | use_dub | silence
+- gap_orig  (vídeo sem dublagem):   fill_original (default) | silence |
+                                    cut_video (a cena SAI do vídeo)
+- replaced  (conteúdo divergente):  fill_original | use_dub | silence |
+                                    cut_video (a cena sai; a dublagem daquele
+                                    trecho, que dublava OUTRA cena, é descartada)
 - gap_dub   (dublado sem vídeo):    sempre descartado (a timeline é a do
                                     original); "accept" só o marca revisado
+
+cut_video corta em keyframes por stream copy (mkvmerge): raspas de até um
+GOP (~2 s) ficam nas bordas com áudio original — nada é recodificado.
 """
 from services.series.align.classify import Segment
 
-VALID_ACTIONS = ("fill_original", "silence", "use_dub", "accept")
+VALID_ACTIONS = ("fill_original", "silence", "use_dub", "cut_video", "accept")
 # fração da duração do episódio que conta como "início"/"fim" para position
 EDGE_FRACTION = 0.15
 

@@ -431,3 +431,56 @@ def test_mux_final_reporta_progresso(tmp_path, monkeypatch):
                       str(dub), str(orig), str(tmp_path / "b.mkv"), "pt",
                       log=lambda m: None, on_progress=on_progress)
     assert vistos and vistos[-1] == 100.0
+
+
+@pytest.mark.skipif(not render_mod.has_mkvmerge(), reason="sem mkvmerge no PATH")
+def test_cut_video_remove_a_cena_sem_dublagem(tmp_path):
+    """Ação cut_video (revisão): o original de 60 s tem uma cena [30-40] que
+    não existe no dublado (50 s). Em vez de preencher com áudio original, a
+    cena SAI do vídeo: a saída fica ~50 s, o corte cai em keyframe e o áudio
+    dublado continua alinhado dos dois lados da junção."""
+    orig = _media(tmp_path / "orig.mkv", 60, seed=1,
+                  chapters=[(0, 30, "Antes"), (30, 40, "Extra"), (40, 60, "Depois")])
+    dub = _media(tmp_path / "dub.mkv", 50, seed=2)
+    segs = [
+        Segment("match", 0.0, 30.0, 0.0, 30.0, offset=0.0),
+        Segment("gap_orig", 30.0, 30.0, 30.0, 40.0,
+                extra={"action": "cut_video"}),
+        Segment("match", 30.0, 50.0, 40.0, 60.0, offset=10.0),
+    ]
+    out = tmp_path / "out.mkv"
+    logs = []
+    info = render_mod.render(segs, str(dub), str(orig), str(out), "pt",
+                             log=logs.append)
+    probe = _probe(out)
+    dur = float(probe["format"]["duration"])
+    # a cena de 10 s saiu (as raspas de keyframe podem deixar ~2 s)
+    assert 49.0 <= dur <= 53.0, (dur, logs)
+    assert any("cut_video" in l for l in logs), logs
+    # o mapa de cortes volta para quem for anexar legendas externas
+    assert info.get("b_cuts"), info
+    c0, c1 = info["b_cuts"][0]
+    assert 29.0 <= c0 <= 31.5 and 38.5 <= c1 <= 40.5, info["b_cuts"]
+    # capítulo da cena removida saiu junto (mkvmerge reajusta)
+    titulos = [c.get("tags", {}).get("title") for c in probe.get("chapters", [])]
+    assert "Extra" not in titulos, titulos
+
+
+def test_cut_video_sem_mkvmerge_cai_no_preenchimento(tmp_path, monkeypatch):
+    """Sem mkvmerge o corte não existe: o trecho fica no vídeo com áudio
+    original (comportamento antigo), com aviso — nunca erro."""
+    monkeypatch.setattr(render_mod, "has_mkvmerge", lambda: False)
+    orig = _media(tmp_path / "orig.mkv", 30, seed=1)
+    dub = _media(tmp_path / "dub.mkv", 20, seed=2)
+    segs = [
+        Segment("match", 0.0, 10.0, 0.0, 10.0, offset=0.0),
+        Segment("gap_orig", 10.0, 10.0, 10.0, 20.0,
+                extra={"action": "cut_video"}),
+        Segment("match", 10.0, 20.0, 20.0, 30.0, offset=10.0),
+    ]
+    out = tmp_path / "out.mkv"
+    logs = []
+    render_mod.render(segs, str(dub), str(orig), str(out), "pt", log=logs.append)
+    dur = float(_probe(out)["format"]["duration"])
+    assert 29.0 <= dur <= 31.0, dur          # nada foi cortado
+    assert any("não há mkvmerge" in l for l in logs), logs

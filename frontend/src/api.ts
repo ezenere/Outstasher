@@ -193,7 +193,7 @@ export function resolveGate(jobId: string, reason: GateReason | 'force_continue'
 // ---------- EDL (revisão de alinhamento) ----------
 
 export type SegmentKind = 'match' | 'gap_dub' | 'gap_orig' | 'replaced' | 'pal' | 'drift'
-export type ReviewAction = 'fill_original' | 'silence' | 'use_dub' | 'accept'
+export type ReviewAction = 'fill_original' | 'silence' | 'use_dub' | 'cut_video' | 'accept'
 
 /** Segmento da EDL (tempos em s; a = dublado, b = original). */
 export interface EdlSegment {

@@ -75,6 +75,113 @@ def _keyframe_at_or_before(path: str, t: float) -> float | None:
     return None
 
 
+def _keyframe_at_or_after(path: str, t: float) -> float | None:
+    """Menor keyframe de vídeo >= t (janelas crescentes para frente)."""
+    for ahead in (10.0, 30.0, 90.0):
+        p = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-skip_frame", "nokey", "-show_entries", "frame=pts_time",
+             "-of", "csv=p=0", "-read_intervals", f"{max(0.0, t - 0.5):.3f}%{t + ahead:.3f}",
+             path], capture_output=True, text=True, timeout=120)
+        kfs = []
+        for line in p.stdout.splitlines():
+            try:
+                v = float(line.strip().split(",")[0])
+            except ValueError:
+                continue
+            if v >= t - 1e-3:
+                kfs.append(v)
+        if kfs:
+            return min(kfs)
+    return None
+
+
+def _apply_video_cuts(segs, orig_path: str, tmp_dir: Path, log):
+    """Ação cut_video: remove do ORIGINAL os trechos b marcados, por stream
+    copy (mkvmerge --split parts:, que também reajusta legendas embutidas e
+    capítulos). Cortes caem em KEYFRAMES: as raspas de até um GOP que sobram
+    nas bordas ficam como gap_orig minúsculo (áudio original), nada é
+    recodificado.
+
+    Retorna (segs_remapeados, caminho_do_cortado | None, cortes_reais).
+    Sem mkvmerge, loga e devolve tudo intacto (os trechos caem no
+    preenchimento padrão)."""
+    alvos = [seg for seg in segs
+             if seg.extra.get("action") == "cut_video"
+             and seg.kind in ("gap_orig", "replaced")
+             and (seg.b_end or 0) - (seg.b_start or 0) >= 1.0]
+    if not alvos:
+        return segs, None, []
+    if not has_mkvmerge():
+        log("⚠️ cut_video pedido mas não há mkvmerge — trechos ficam com "
+            "áudio original")
+        return segs, None, []
+
+    cortes: list[tuple[float, float]] = []
+    for seg in alvos:
+        k0 = _keyframe_at_or_after(orig_path, seg.b_start)
+        k1 = _keyframe_at_or_before(orig_path, seg.b_end)
+        if k0 is None or k1 is None or k1 - k0 < 0.5:
+            log(f"  cut_video {seg.b_start:.1f}-{seg.b_end:.1f}s: sem "
+                f"keyframes úteis — fica o preenchimento")
+            continue
+        cortes.append((k0, k1))
+    cortes.sort()
+    if not cortes:
+        return segs, None, []
+
+    dur = float(merger.ffprobe_json(orig_path)["format"]["duration"])
+    mantidos, pos = [], 0.0
+    for c0, c1 in cortes:
+        if c0 - pos > 0.05:
+            mantidos.append((pos, c0))
+        pos = c1
+    if dur - pos > 0.05:
+        mantidos.append((pos, dur))
+
+    def ts(t):
+        h, resto = divmod(max(0.0, t), 3600)
+        m, sec = divmod(resto, 60)
+        return f"{int(h):02d}:{int(m):02d}:{sec:09.6f}"
+
+    spec = ",".join(("+" if i else "") + f"{ts(a)}-{ts(b)}"
+                    for i, (a, b) in enumerate(mantidos))
+    cortado = tmp_dir / "orig_cortado.mkv"
+    p = _run_mkvmerge(["mkvmerge", "-o", str(cortado),
+                       "--split", f"parts:{spec}", orig_path], None)
+    if p.returncode >= 2 or not cortado.exists():
+        log("⚠️ corte do vídeo falhou (mkvmerge) — trechos ficam com áudio "
+            "original: " + (p.stdout or p.stderr)[-200:])
+        return segs, None, []
+    total = sum(c1 - c0 for c0, c1 in cortes)
+    log(f"cut_video: {len(cortes)} trecho(s), {total:.1f}s removidos do vídeo "
+        f"(cortes em keyframe)")
+
+    def mapa(t):
+        if t is None:
+            return None
+        removido = 0.0
+        for c0, c1 in cortes:
+            if t <= c0:
+                break
+            removido += min(t, c1) - c0
+        return t - removido
+
+    ids_alvo = {id(x) for x in alvos}
+    for seg in segs:
+        seg.b_start = mapa(seg.b_start)
+        seg.b_end = mapa(seg.b_end)
+        if id(seg) in ids_alvo:
+            # o que sobrou são as raspas das bordas: preenchidas com o
+            # original como qualquer gap_orig; a dublagem do trecho (se era
+            # replaced, dublava OUTRA cena) é descartada
+            seg.kind = "gap_orig"
+            seg.a_end = seg.a_start
+            seg.extra.pop("action", None)
+            seg.note = "cena cortada do vídeo (cut_video)"
+    return segs, str(cortado), cortes
+
+
 def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
            target_lang: str, log=print, on_progress=None, on_start=None,
            b_window: tuple[float, float] | list | None = None):
@@ -87,6 +194,14 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
     sync não muda; sobra no máximo um GOP do episódio vizinho no começo,
     preenchido com áudio original como qualquer trecho sem dublagem.
     """
+    tmp_dir = Path(tempfile.mkdtemp(prefix="edl_render_"))
+    # cut_video ANTES de tudo: o original pode ser trocado pela versão cortada
+    # (cenas sem dublagem removidas), e o resto do render nem fica sabendo —
+    # só trabalha com um arquivo mais curto e uma EDL já remapeada
+    segs, _cortado, b_cuts = _apply_video_cuts(segs, orig_path, tmp_dir, log)
+    if _cortado:
+        orig_path = _cortado
+
     probe_orig = merger.ffprobe_json(orig_path)
     probe_dub = merger.ffprobe_json(dub_path)
     merger.annotate_type_indexes(probe_orig)
@@ -187,7 +302,6 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
     # episódios anteriores só passaram por sorte de escalonamento). Separar
     # o áudio dublado remontado num .mka e depois só MUXAR cópias elimina a
     # condição por construção.
-    tmp_dir = Path(tempfile.mkdtemp(prefix="edl_render_"))
     dub_mka = tmp_dir / "dub.mka"
     try:
         # passo 1: só a faixa dublada remontada (áudio, sem vídeo)
@@ -213,7 +327,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
                     "mux final (mkvmerge) falhou: "
                     + merger.describe_exit(p2.returncode, p2.stdout or p2.stderr))
             _check_mux_duration(output, duration_b)
-            return {"b_shift": 0.0}
+            return {"b_shift": 0.0, "b_cuts": b_cuts}
 
         # loglevel WARNING (não error): é em nível de aviso que o ffmpeg diz
         # "forcing output" — o sinal de que a intercalação saiu frouxa. Com
@@ -269,13 +383,15 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         _check_mux_duration(output, duration_b)
     finally:
         dub_mka.unlink(missing_ok=True)
+        if _cortado:
+            Path(_cortado).unlink(missing_ok=True)
         try:
             tmp_dir.rmdir()
         except OSError:
             pass
     # deslocamento aplicado aos tempos b (0 sem b_window): quem for anexar
     # legendas externas precisa dele
-    return {"b_shift": float(in_opts[1]) if in_opts else 0.0}
+    return {"b_shift": float(in_opts[1]) if in_opts else 0.0, "b_cuts": b_cuts}
 
 
 def _ffmeta_escape(text: str) -> str:
