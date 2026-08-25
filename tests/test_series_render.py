@@ -459,9 +459,16 @@ def test_cut_video_remove_a_cena_sem_dublagem(tmp_path):
                              log=logs.append)
     probe = _probe(out)
     dur = float(probe["format"]["duration"])
-    # a cena de 10 s saiu (as raspas de keyframe podem deixar ~2 s)
-    assert 49.0 <= dur <= 53.0, (dur, logs)
+    # corte exato nos keyframes (30 e 40 s): 60 - 10 = 50, sem sobreposição
+    assert abs(dur - 50.0) < 0.6, (dur, logs)
     assert any("cut_video" in l for l in logs), logs
+    # a dublagem DEPOIS do corte tem que vir do lugar certo do dublado: o
+    # trecho b=40-60 (dub a=30-50) virou b=30-50 na saída. Mede a faixa pt
+    # da saída contra o dublado: aos 40 s da saída deve estar o dub de 40 s
+    # (offset remapeado); sem o remapeio vinha o dub de 50 s
+    from services.series.align import refine
+    tau, q = refine._measure(str(out), 1, str(dub), 0, 40.0, 40.0, 6.0, radius=2.0)
+    assert q > 20 and abs(tau) < 0.05, (tau, q, logs)
     # o mapa de cortes volta para quem for anexar legendas externas
     assert info.get("b_cuts"), info
     c0, c1 = info["b_cuts"][0]

@@ -144,14 +144,37 @@ def _apply_video_cuts(segs, orig_path: str, tmp_dir: Path, log):
         m, sec = divmod(resto, 60)
         return f"{int(h):02d}:{int(m):02d}:{sec:09.6f}"
 
-    spec = ",".join(("+" if i else "") + f"{ts(a)}-{ts(b)}"
-                    for i, (a, b) in enumerate(mantidos))
-    cortado = tmp_dir / "orig_cortado.mkv"
-    p = _run_mkvmerge(["mkvmerge", "-o", str(cortado),
+    # Cada trecho mantido vira um ARQUIVO do mkvmerge (corte preciso no
+    # keyframe, timestamps limpos) e o concat demuxer do ffmpeg os emenda com
+    # a duração EXPLÍCITA de cada um. O modo "+" do mkvmerge, que junta
+    # direto, sobrepunha ~0,44 s de vídeo E áudio em cada emenda (caso real:
+    # 11 cortes = dublagem até 4 s fora do lugar depois do remapeamento).
+    spec = ",".join(f"{ts(a)}-{ts(b)}" for a, b in mantidos)
+    base = tmp_dir / "orig_parte.mkv"
+    p = _run_mkvmerge(["mkvmerge", "-o", str(base),
                        "--split", f"parts:{spec}", orig_path], None)
-    if p.returncode >= 2 or not cortado.exists():
+    partes = sorted(tmp_dir.glob("orig_parte-*.mkv")) or (
+        [base] if base.exists() else [])
+    if p.returncode >= 2 or len(partes) != len(mantidos):
         log("⚠️ corte do vídeo falhou (mkvmerge) — trechos ficam com áudio "
             "original: " + (p.stdout or p.stderr)[-200:])
+        return segs, None, []
+    lista = tmp_dir / "orig_partes.txt"
+    # (caminhos do tmp_dir: sem aspas para escapar)
+    lista.write_text("".join(f"file '{pt}'\nduration {b - a:.6f}\n"
+                             for pt, (a, b) in zip(partes, mantidos)),
+                     encoding="utf-8")
+    cortado = tmp_dir / "orig_cortado.mkv"
+    pc = subprocess.run(["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error",
+                         "-y", "-f", "concat", "-safe", "0", "-i", str(lista),
+                         "-map", "0", "-c", "copy", str(cortado)],
+                        capture_output=True, text=True, encoding="utf-8",
+                        errors="replace")
+    for pt in partes:
+        pt.unlink(missing_ok=True)
+    if pc.returncode != 0 or not cortado.exists():
+        log("⚠️ emenda dos trechos falhou (ffmpeg concat) — trechos ficam com "
+            "áudio original: " + pc.stderr[-200:])
         return segs, None, []
     total = sum(c1 - c0 for c0, c1 in cortes)
     log(f"cut_video: {len(cortes)} trecho(s), {total:.1f}s removidos do vídeo "
@@ -171,6 +194,12 @@ def _apply_video_cuts(segs, orig_path: str, tmp_dir: Path, log):
     for seg in segs:
         seg.b_start = mapa(seg.b_start)
         seg.b_end = mapa(seg.b_end)
+        # o offset é b - a: com b remapeado ele muda junto. Esquecer isto
+        # posicionava a fatia dublada (src = b - offset) minutos antes do
+        # lugar — e negativa no começo do arquivo, que é o atrim vazio que
+        # derrubava o passo 1 com "Invalid data" (caso real: 11 cortes)
+        if seg.offset is not None and seg.b_start is not None:
+            seg.offset = seg.b_start - seg.a_start
         if id(seg) in ids_alvo:
             # o que sobrou são as raspas das bordas: preenchidas com o
             # original como qualquer gap_orig; a dublagem do trecho (se era
@@ -212,6 +241,10 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         segs, _cortado, b_cuts = _apply_video_cuts(segs, orig_path, tmp_dir, log)
     if _cortado:
         orig_path = _cortado
+        # a timeline agora é a do CORTADO: sem isto o planejador ganhava a
+        # duração do original inteiro e emitia um preenchimento final além do
+        # EOF (atrim vazio → o concat do passo 1 morria com "Invalid data")
+        duration_b = float(merger.ffprobe_json(orig_path)["format"]["duration"])
 
     probe_orig = merger.ffprobe_json(orig_path)
     probe_dub = merger.ffprobe_json(dub_path)
