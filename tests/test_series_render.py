@@ -308,6 +308,52 @@ def test_render_leva_todas_as_legendas(tmp_path):
     assert sorted(got) == sorted(langs), got
 
 
+@pytest.mark.ffmpeg
+def test_render_leva_audio_extra_e_legenda_embutida_do_dublado(tmp_path):
+    """Dublado com por + spa e legenda por EMBUTIDA; original só eng. A saída
+    leva o spa (mesma montagem da EDL) e a legenda por remapeada: dublado
+    sem [20,30) do original → cue em 25 s do dublado sai em 35 s."""
+    orig = _media(tmp_path / "orig.mkv", 60, seed=1)
+    base = _media(tmp_path / "dub_base.mkv", 50, seed=2)
+    srt = _srt(tmp_path / "emb.srt", [("00:00:05,000 --> 00:00:06,000", "um"),
+                                       ("00:00:25,000 --> 00:00:26,000", "dois")])
+    dub = tmp_path / "dub.mkv"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", str(base), "-f", "lavfi", "-i",
+                    "anoisesrc=color=pink:seed=3:duration=50", "-i", str(srt),
+                    "-map", "0:v", "-map", "0:a", "-map", "1:a", "-map", "2:0",
+                    "-c:v", "copy", "-c:a:0", "copy", "-c:a:1", "ac3", "-b:a:1", "128k",
+                    "-ac:a:1", "2", "-c:s", "srt",
+                    "-metadata:s:a:0", "language=por", "-metadata:s:a:1", "language=spa",
+                    "-metadata:s:s:0", "language=por", str(dub)], check=True)
+    segs = [
+        Segment("match", 0.0, 20.0, 0.0, 20.0, offset=0.0),
+        Segment("gap_orig", 20.0, 20.0, 20.0, 30.0),
+        Segment("match", 20.0, 50.0, 30.0, 60.0, offset=10.0),
+    ]
+    out = tmp_path / "out.mkv"
+    logs = []
+    render_mod.render(segs, str(dub), str(orig), str(out), "pt", log=logs.append)
+    probe = _probe(out)
+    audios = [s.get("tags", {}).get("language") for s in probe["streams"]
+              if s["codec_type"] == "audio"]
+    assert audios == ["eng", "por", "spa"], audios
+    subs = [s for s in probe["streams"] if s["codec_type"] == "subtitle"]
+    assert [s.get("tags", {}).get("language") for s in subs] == ["por"], subs
+    txt = subprocess.run(["ffmpeg", "-v", "error", "-i", str(out), "-map",
+                          f"0:{subs[0]['index']}", "-f", "srt", "-"],
+                         capture_output=True, text=True, check=True).stdout
+    # tempos das cues (o mux pode rebasear o container em alguns ms)
+    import re as _re
+    starts = [int(h) * 3600 + int(m) * 60 + int(sec) + int(ms) / 1000
+              for h, m, sec, ms in _re.findall(r"(\d\d):(\d\d):(\d\d),(\d\d\d) -->", txt)]
+    assert len(starts) == 2 and abs(starts[0] - 5.0) < 0.06 and abs(starts[1] - 35.0) < 0.06, txt
+    assert any("spa" in l and "dublado" in l for l in logs), logs
+    # spa tem a mesma duração da saída (montado pela EDL, não copiado)
+    spa = [s for s in probe["streams"] if s.get("tags", {}).get("language") == "spa"][0]
+    assert abs(float(spa.get("duration") or probe["format"]["duration"]) - 60.0) < 1.0
+
+
 def test_intercalacao_dimensionada_pelo_orcamento():
     """O delta de intercalação vem de um ORÇAMENTO de bytes: num 1080p sai
     enorme (na prática, estrito); num REMUX 4K limita a memória do muxer por

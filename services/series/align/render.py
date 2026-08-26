@@ -404,7 +404,8 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
            external_subs: dict | None = None,
            original_lang: str | None = None,
            fill_with_original: bool = True,
-           video_reencode: dict | None = None):
+           video_reencode: dict | None = None,
+           dub_extras: bool = True):
     """Renderiza a EDL num MKV final. Bloqueante (roda ffmpeg).
 
     external_subs: {"orig": [paths], "dub": [paths], "orig_lang", "dub_lang"}
@@ -515,41 +516,27 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
     if not slices:
         raise merger.MergeError("EDL sem nenhum trecho renderizável")
 
-    chains, labels = [], []
-    norm = f"aresample=48000,aformat=sample_rates=48000:channel_layouts={layout}"
-    for i, sl in enumerate(slices):
-        lbl = f"c{i}"
-        dur = sl["b_end"] - sl["b_start"]
-        if sl["src"] == "silence":
-            chains.append(
-                f"anullsrc=r=48000:cl={layout},atrim=end={dur:.3f},"
-                f"asetpts=PTS-STARTPTS[{lbl}]")
-        else:
-            inp = f"[1:a:{dub_a}]" if sl["src"] == "dub" else f"[0:a:{orig_a}]"
-            start, end = sl["src_start"], sl["src_end"]
-            steps = [f"atrim=start={max(0.0, start):.3f}:end={max(0.0, end):.3f}",
-                     "asetpts=PTS-STARTPTS", norm]
-            if sl.get("tempo") and abs(sl["tempo"] - 1.0) > 0.001:
-                # tempo = duração_saída/duração_entrada (PAL: ~1.0427 — o
-                # dublado acelerado precisa ESTICAR). rubberband usa fator de
-                # VELOCIDADE (inverso) e corrige o pitch junto.
-                t = sl["tempo"]
-                if has_rubberband():
-                    steps.append(f"rubberband=tempo={1 / t:.5f}:pitch={1 / t:.5f}")
-                else:
-                    # asetrate desacelera duração E pitch juntos (o speedup
-                    # PAL alterou os dois juntos) — qualidade um pouco pior
-                    steps.append(f"asetrate={int(48000 / t)},aresample=48000")
-            # apad+atrim: cada fatia sai EXATAMENTE do tamanho do buraco que
-            # preenche — o concat não pode escorregar
-            steps += ["apad", f"atrim=end={dur:.3f}", "asetpts=PTS-STARTPTS"]
-            chains.append(f"{inp}{','.join(steps)}[{lbl}]")
-        labels.append(f"[{lbl}]")
-    chains.append(f"{''.join(labels)}concat=n={len(labels)}:v=0:a=1[dub_out]")
+    # a faixa alvo e, pela MESMA cadeia de fatias, os outros idiomas que só o
+    # dublado tem (política do caminho rápido: melhor áudio por idioma entre
+    # os dois arquivos — caso real: dublado com por+spa, original só rus/eng,
+    # e o spa sumia)
+    orig_inp = f"[0:a:{orig_a}]" if orig_a is not None else None
+    codec, bitrate = merger.filtered_codec_and_bitrate(channels)
+    chains, out_main = _dub_chains(slices, f"[1:a:{dub_a}]", orig_inp, layout, "dub")
+    outs = [(out_main, codec, bitrate)]
+    extras = _extra_dub_audio(probe_orig, probe_dub, iso) if dub_extras else []
+    for j, ex in enumerate(extras):
+        lay = _layout(ex["channels"])
+        cdc, br = merger.filtered_codec_and_bitrate(ex["channels"])
+        ch, o = _dub_chains(slices, f"[1:a:{ex['type_index']}]", orig_inp, lay, f"x{j}")
+        chains += ch
+        outs.append((o, cdc, br))
+    if extras:
+        log("Áudios do dublado além do alvo (mesma montagem): "
+            + ", ".join(ex["lang"] for ex in extras))
     filter_complex = ";".join(chains)
 
     Path(output).parent.mkdir(parents=True, exist_ok=True)
-    codec, bitrate = merger.filtered_codec_and_bitrate(channels)
     log(f"Renderizando EDL: {len(slices)} fatia(s), {len(fills)} preenchimento(s)"
         + ("" if has_rubberband() else " (sem rubberband: fallback asetrate)"))
 
@@ -565,7 +552,12 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
     # legendas externas: remapeadas AGORA (janela e cortes já são conhecidos)
     # e incluídas no mux final — anexar depois reescreveria o arquivo inteiro
     subs_prontas: list[dict] = []
-    if external_subs and (external_subs.get("orig") or external_subs.get("dub")):
+    # legendas de TEXTO embutidas no dublado: estão na linha do tempo dele,
+    # então passam pelo mesmo remapeamento das externas (caso real: por/spa
+    # do dublado sumiam; a saída só levava as do original)
+    dub_emb = _extract_dub_text_subs(dub_path, probe_dub, tmp_dir, log) if dub_extras else []
+    external_subs = external_subs or {}
+    if external_subs.get("orig") or external_subs.get("dub") or dub_emb:
         from services.series import subs as ext_subs
         kf_shift = float(in_opts[1]) if in_opts else 0.0
         orig_fn = (ext_subs.cuts_fn(b_cuts) if b_cuts
@@ -584,7 +576,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
                 tmp_dir, external_subs.get("orig_video") or orig_path,
                 external_subs.get("dub_video") or dub_path,
                 external_subs.get("orig_lang") or "und",
-                external_subs.get("dub_lang") or "und", log)
+                external_subs.get("dub_lang") or "und", log, extra=dub_emb)
         except Exception as e:  # noqa: BLE001 — legenda é acessório
             log(f"⚠️ legendas externas ignoradas ({e})")
             subs_prontas = []
@@ -594,9 +586,10 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         cmd1 = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                 "-progress", "pipe:1",
                 *in_opts, "-i", orig_path, "-i", dub_path,
-                "-filter_complex", filter_complex,
-                "-map", "[dub_out]", "-c:a", codec, "-b:a", bitrate,
-                "-vn", "-sn", "-map_chapters", "-1", *out_opts, str(dub_mka)]
+                "-filter_complex", filter_complex]
+        for k, (o, cdc, br) in enumerate(outs):
+            cmd1 += ["-map", f"[{o}]", f"-c:a:{k}", cdc, f"-b:a:{k}", br]
+        cmd1 += ["-vn", "-sn", "-map_chapters", "-1", *out_opts, str(dub_mka)]
         merger._run_ffmpeg_progress(cmd1, duration_b, on_progress, on_start)
 
         # passo 2: mux com stream copy de tudo (rápido). Com mkvmerge no
@@ -606,7 +599,8 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         # muxer do ffmpeg simplesmente não existe nele.
         if has_mkvmerge() and not in_opts:
             cmd2 = _mkvmerge_cmd(str(output), orig_path, str(dub_mka),
-                                 iso, probe_orig, subs_prontas)
+                                 iso, probe_orig, subs_prontas,
+                                 [ex["lang"] for ex in extras])
             p2 = _run_mkvmerge(cmd2, on_progress)
             if p2.returncode >= 2:   # 1 = só avisos; 2 = erro de verdade
                 raise merger.MergeError(
@@ -640,6 +634,10 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         cmd2 += ["-map", "1:a:0", "-c:a", "copy",
                  f"-metadata:s:a:{n_orig_a}", f"language={iso}",
                  f"-disposition:a:{n_orig_a}", "default"]
+        for k, ex in enumerate(extras, start=1):
+            cmd2 += ["-map", f"1:a:{k}",
+                     f"-metadata:s:a:{n_orig_a + k}", f"language={ex['lang']}",
+                     f"-disposition:a:{n_orig_a + k}", "0"]
         # legendas do original intactas — TODAS: legenda comum é o motivo
         # de existirem, e é a intercalação que se adapta a elas (abaixo)
         n_orig_s = len(merger.get_streams(probe_orig, "subtitle"))
@@ -694,6 +692,99 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
     _log_subs(subs_prontas, log)
     return {"b_shift": float(in_opts[1]) if in_opts else 0.0, "b_cuts": b_cuts,
             "subs_muxed": len(subs_prontas)}
+
+
+def _dub_chains(slices: list[dict], dub_inp: str, orig_inp: str | None,
+                layout: str, tag: str) -> tuple[list[str], str]:
+    """Cadeia de filtros (atrim/asetpts/concat) de UMA faixa do dublado
+    seguindo as fatias da EDL. Devolve (cadeias, rótulo de saída)."""
+    chains, labels = [], []
+    norm = f"aresample=48000,aformat=sample_rates=48000:channel_layouts={layout}"
+    for i, sl in enumerate(slices):
+        lbl = f"{tag}c{i}"
+        dur = sl["b_end"] - sl["b_start"]
+        if sl["src"] == "silence" or (sl["src"] == "orig" and orig_inp is None):
+            chains.append(
+                f"anullsrc=r=48000:cl={layout},atrim=end={dur:.3f},"
+                f"asetpts=PTS-STARTPTS[{lbl}]")
+        else:
+            inp = dub_inp if sl["src"] == "dub" else orig_inp
+            start, end = sl["src_start"], sl["src_end"]
+            steps = [f"atrim=start={max(0.0, start):.3f}:end={max(0.0, end):.3f}",
+                     "asetpts=PTS-STARTPTS", norm]
+            if sl.get("tempo") and abs(sl["tempo"] - 1.0) > 0.001:
+                # tempo = duração_saída/duração_entrada (PAL: ~1.0427 — o
+                # dublado acelerado precisa ESTICAR). rubberband usa fator de
+                # VELOCIDADE (inverso) e corrige o pitch junto.
+                t = sl["tempo"]
+                if has_rubberband():
+                    steps.append(f"rubberband=tempo={1 / t:.5f}:pitch={1 / t:.5f}")
+                else:
+                    # asetrate desacelera duração E pitch juntos (o speedup
+                    # PAL alterou os dois juntos) — qualidade um pouco pior
+                    steps.append(f"asetrate={int(48000 / t)},aresample=48000")
+            # apad+atrim: cada fatia sai EXATAMENTE do tamanho do buraco que
+            # preenche — o concat não pode escorregar
+            steps += ["apad", f"atrim=end={dur:.3f}", "asetpts=PTS-STARTPTS"]
+            chains.append(f"{inp}{','.join(steps)}[{lbl}]")
+        labels.append(f"[{lbl}]")
+    out = f"{tag}_out"
+    chains.append(f"{''.join(labels)}concat=n={len(labels)}:v=0:a=1[{out}]")
+    return chains, out
+
+
+def _extra_dub_audio(probe_orig: dict, probe_dub: dict, iso: str) -> list[dict]:
+    """Idiomas de áudio que SÓ o dublado tem (fora o alvo e 'und'): o melhor
+    stream de cada um — política do caminho rápido (melhor áudio por idioma
+    entre os dois arquivos; idioma que o original também tem fica com o do
+    original, intocado)."""
+    merger.annotate_type_indexes(probe_dub)
+    have = {merger.canonical_lang(merger.raw_lang_of(s))
+            for s in merger.get_streams(probe_orig, "audio")}
+    best: dict[str, dict] = {}
+    for st in merger.get_streams(probe_dub, "audio"):
+        lang = merger.canonical_lang(merger.raw_lang_of(st))
+        if lang in (iso, "und") or lang in have:
+            continue
+        if lang not in best or merger.audio_score(st) > merger.audio_score(best[lang]):
+            best[lang] = st
+    return [{"lang": lang, "type_index": int(st["_type_index"]),
+             "channels": int(st.get("channels") or 2)}
+            for lang, st in sorted(best.items())]
+
+
+def _extract_dub_text_subs(dub_path: str, probe_dub: dict, tmp_dir: Path,
+                           log) -> list[dict]:
+    """Legendas de TEXTO embutidas no dublado, extraídas em .srt (idioma e
+    sabor das tags do stream) para serem remapeadas pela EDL como as
+    externas. Falha de uma só a pula."""
+    from services.series import subs as ext_subs
+    items: list[dict] = []
+    for k, st in enumerate(merger.get_streams(probe_dub, "subtitle")):
+        if (st.get("codec_name") or "").lower() not in ext_subs.TEXT_CODECS:
+            continue
+        lang = merger.canonical_lang(merger.raw_lang_of(st))
+        title = ((st.get("tags") or {}).get("title") or "").lower()
+        if merger.is_forced(st):
+            flavor = "forced"
+        elif any(t in title for t in ("sdh", "cc", "hearing")):
+            flavor = "sdh"
+        else:
+            flavor = "normal"
+        srt = tmp_dir / f"dub_emb{k}.{lang}.srt"
+        p = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                            "-i", dub_path, "-map", f"0:{int(st['index'])}",
+                            "-c:s", "srt", str(srt)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+        if p.returncode != 0 or not srt.exists() or srt.stat().st_size == 0:
+            log(f"legenda embutida do dublado ignorada ({lang}): "
+                f"{(p.stderr or 'vazia').strip()[-120:]}")
+            srt.unlink(missing_ok=True)
+            continue
+        items.append({"path": str(srt), "side": "dub", "lang": lang,
+                      "flavor": flavor, "name": f"legenda {lang} do dublado"})
+    return items
 
 
 def _ffmeta_escape(text: str) -> str:
@@ -755,7 +846,8 @@ def has_mkvmerge() -> bool:
 
 def _mkvmerge_cmd(output: str, orig_path: str, dub_mka: str, iso: str,
                   probe_orig: dict,
-                  extra_subs: list[dict] | None = None) -> list[str]:
+                  extra_subs: list[dict] | None = None,
+                  extra_langs: list[str] | None = None) -> list[str]:
     """Comando do mkvmerge para o mux final: tudo do original (vídeo, áudios,
     legendas, capítulos, anexos) + a faixa dublada remontada, que entra com o
     idioma alvo e como faixa padrão (os áudios do original perdem o padrão).
@@ -767,8 +859,10 @@ def _mkvmerge_cmd(output: str, orig_path: str, dub_mka: str, iso: str,
         cmd += ["--default-track-flag", f"{int(st['index'])}:no"]
     cmd += [orig_path,
             "--language", f"0:{iso}",
-            "--default-track-flag", "0:yes",
-            dub_mka]
+            "--default-track-flag", "0:yes"]
+    for k, lang in enumerate(extra_langs or [], start=1):
+        cmd += ["--language", f"{k}:{lang}", "--default-track-flag", f"{k}:no"]
+    cmd.append(dub_mka)
     for it in extra_subs or []:
         titulo = {"forced": "Forçada", "sdh": "SDH"}.get(it["flavor"], "")
         cmd += ["--language", f"0:{it['lang']}",

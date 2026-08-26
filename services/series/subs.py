@@ -361,33 +361,42 @@ def embedded_text_keys(probe: dict) -> set[tuple[str, str]]:
 
 def plan(orig_subs: list, dub_subs: list, embedded: set[tuple[str, str]],
          orig_video: str | None = None, dub_video: str | None = None,
-         orig_lang: str = "und", dub_lang: str = "und") -> tuple[list[dict], list[str]]:
-    """Decide quais legendas externas entram. Retorna (itens, motivos de
-    descarte). Item: {path, side, lang, flavor}."""
+         orig_lang: str = "und", dub_lang: str = "und",
+         extra: list[dict] | None = None) -> tuple[list[dict], list[str]]:
+    """Decide quais legendas entram. Retorna (itens, motivos de descarte).
+    Item: {path, side, lang, flavor}. `extra`: itens já identificados
+    (legendas EMBUTIDAS no dublado, extraídas — idioma/sabor vêm das tags do
+    stream, não do nome do arquivo); entram depois das externas, com a
+    mesma deduplicação."""
     items: list[dict] = []
     skipped: list[str] = []
     seen: set[tuple[str, str]] = set()
+
+    def admit(name: str, side: str, path: str, lang: str, flavor: str) -> None:
+        key = (lang, "forced" if flavor == "forced" else "normal")
+        if key in embedded:
+            skipped.append(f"{name}: já existe legenda {lang}"
+                           f"{' forçada' if flavor == 'forced' else ''} embutida")
+            return
+        if key in seen and flavor != "sdh":
+            skipped.append(f"{name}: duplicada ({lang}) — mantida a do "
+                           f"{'original' if side == 'dub' else 'mesmo lado'}")
+            return
+        if flavor == "sdh" and (lang, "sdh") in seen:
+            skipped.append(f"{name}: duplicada ({lang} SDH)")
+            return
+        seen.add((lang, "sdh") if flavor == "sdh" else key)
+        items.append({"path": path, "side": side, "lang": lang, "flavor": flavor})
+
     for side, subs, video, fb in (("orig", orig_subs, orig_video, orig_lang),
                                   ("dub", dub_subs, dub_video, dub_lang)):
         for sp in subs:
             sp = Path(sp)
-            lang = guess_language(sp, video, fallback=fb)
-            flavor = flavor_of(sp, video)
-            key = (lang, "forced" if flavor == "forced" else "normal")
-            if key in embedded:
-                skipped.append(f"{sp.name}: já existe legenda {lang}"
-                               f"{' forçada' if flavor == 'forced' else ''} embutida")
-                continue
-            if key in seen and flavor != "sdh":
-                skipped.append(f"{sp.name}: duplicada ({lang}) — mantida a do "
-                               f"{'original' if side == 'dub' else 'mesmo lado'}")
-                continue
-            if flavor == "sdh" and (lang, "sdh") in seen:
-                skipped.append(f"{sp.name}: duplicada ({lang} SDH)")
-                continue
-            seen.add((lang, "sdh") if flavor == "sdh" else key)
-            items.append({"path": str(sp), "side": side, "lang": lang,
-                          "flavor": flavor})
+            admit(sp.name, side, str(sp), guess_language(sp, video, fallback=fb),
+                  flavor_of(sp, video))
+    for it in extra or []:
+        admit(it.get("name") or Path(it["path"]).name, it.get("side", "dub"),
+              it["path"], it["lang"], it.get("flavor", "normal"))
     return items, skipped
 
 
@@ -455,14 +464,14 @@ def prepare(orig_subs: list, dub_subs: list, orig_fn, dub_fn,
             embedded: set[tuple[str, str]], tmp_dir,
             orig_video: str | None = None, dub_video: str | None = None,
             orig_lang: str = "und", dub_lang: str = "und",
-            log=print) -> list[dict]:
+            log=print, extra: list[dict] | None = None) -> list[dict]:
     """Planeja e REMAPEIA as legendas externas, sem muxar: os .srt prontos
     ficam em `tmp_dir` (vida controlada pelo chamador). É o que permite ao
     render incluí-las no MUX FINAL em vez de reescrever o arquivo inteiro
     depois só para anexá-las. Retorna os itens prontos ({path, side, lang,
     flavor, srt}); falha de UMA legenda só a pula."""
     items, skipped = plan(orig_subs, dub_subs, embedded,
-                          orig_video, dub_video, orig_lang, dub_lang)
+                          orig_video, dub_video, orig_lang, dub_lang, extra)
     for s in skipped:
         log(f"legenda ignorada — {s}")
     ready = []
