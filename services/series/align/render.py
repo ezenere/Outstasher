@@ -19,6 +19,7 @@ na EDL do job, não na mídia. Num original FUNDIDO (b_window) o ffmpeg desloca
 e recorta os capítulos junto com o -ss/-to.
 """
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -809,13 +810,10 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         # um episódio faltando o final na estante
         _check_mux_duration(output, duration_b)
     finally:
-        dub_mka.unlink(missing_ok=True)
-        if _cortado:
-            Path(_cortado).unlink(missing_ok=True)
-        try:
-            tmp_dir.rmdir()
-        except OSError:
-            pass
+        # a pasta INTEIRA: o .mka, o original cortado, o re-encodado (que só o
+        # rmdir de pasta vazia nunca alcançava — 55 sobras de ~1,5 GB, 78 GB de
+        # disco, num lote de campo) e os .srt já muxados
+        shutil.rmtree(tmp_dir, ignore_errors=True)
     # deslocamento aplicado aos tempos b (0 sem b_window): quem for anexar
     # legendas externas precisa dele
     _log_subs(subs_prontas, log)

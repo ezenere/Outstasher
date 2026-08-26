@@ -886,3 +886,18 @@ def test_cut_video_reencode_com_opcoes_de_conversao(tmp_path):
     v = [s for s in probe["streams"] if s["codec_type"] == "video"][0]
     assert v["codec_name"] == "h264"
     assert any("libx264" in l for l in logs), logs
+
+
+@pytest.mark.ffmpeg
+def test_render_nao_deixa_temporario_para_tras(tmp_path):
+    """A pasta temporária do render some por inteiro — inclusive o vídeo
+    re-encodado, que o rmdir de pasta vazia nunca alcançava (55 sobras de
+    ~1,5 GB, 78 GB de disco, num lote de campo)."""
+    import glob
+    orig = _media(tmp_path / "orig.mkv", 20, seed=1)
+    dub = _media(tmp_path / "dub.mkv", 20, seed=2)
+    antes = set(glob.glob("/tmp/edl_render_*"))
+    render_mod.render([Segment("match", 0.0, 20.0, 0.0, 20.0, offset=0.0)],
+                      str(dub), str(orig), str(tmp_path / "out.mkv"), "pt",
+                      log=lambda m: None)
+    assert set(glob.glob("/tmp/edl_render_*")) == antes
