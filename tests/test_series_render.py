@@ -559,3 +559,33 @@ def test_render_legenda_dublada_remapeada_pela_edl(tmp_path):
         capture_output=True, text=True)
     pts = [float(x.split(",")[0]) for x in p.stdout.split() if x.strip(",")]
     assert pts and abs(pts[0] - 15.0) < 0.2, (pts, p.stdout)
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.skipif(not render_mod.has_mkvmerge(), reason="sem mkvmerge no PATH")
+def test_cut_video_reencode_corta_exato(tmp_path):
+    """Com re-encode (keyframe forçado nos pontos de corte) o corte é exato
+    no frame, sem depender do GOP: cena [31.3, 42.7) de um original de 60 s
+    some por inteiro — nada de raspa de até um GOP nas bordas."""
+    orig = _media(tmp_path / "orig.mkv", 60, seed=1)
+    dub = _media(tmp_path / "dub.mkv", 49, seed=2)
+    gap = Segment("gap_orig", 31.3, 31.3, 31.3, 42.7)
+    gap.extra["action"] = "cut_video"
+    segs = [
+        Segment("match", 0.0, 31.3, 0.0, 31.3, offset=0.0),
+        gap,
+        Segment("match", 31.3, 48.6, 42.7, 60.0, offset=11.4),
+    ]
+    out = tmp_path / "out.mkv"
+    logs = []
+    info = render_mod.render(segs, str(dub), str(orig), str(out), "pt",
+                             log=logs.append,
+                             video_reencode={"codec": "av1", "crf": 35,
+                                             "preset": "veryfast"})
+    probe = _probe(out)
+    dur = float(probe["format"]["duration"])
+    assert abs(dur - 48.6) < 0.15, (dur, logs)          # 60 - 11.4, exato
+    v = [s for s in probe["streams"] if s["codec_type"] == "video"][0]
+    assert v["codec_name"] == "av1", v["codec_name"]
+    assert any("Re-encodando" in l for l in logs), logs
+    assert info["b_cuts"] and abs(info["b_cuts"][0][0] - 31.3) < 0.1, info

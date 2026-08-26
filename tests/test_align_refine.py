@@ -307,3 +307,84 @@ def test_replaced_curto_ainda_e_medido(tmp_path):
     out = refine._resolve_replaced_by_audio(segs, str(same), 0, str(orig), 0,
                                             log=logs.append)
     assert out[1].kind == "match", logs
+
+
+def test_gap_dub_que_casa_com_o_vizinho_e_recuperado(tmp_path):
+    """Caso real (5,4 s rotulados gap_dub casando com pico 982 no offset do
+    match seguinte): o DP pôs a fronteira cedo demais. Dublado = original sem
+    [25, 34): a verdade é dub 0-25 ↔ 0-25 e dub 25-50 ↔ 34-59. O vídeo
+    entregou o gap_dub 25-30 + gap_orig 25-39 + match a 30-50. O áudio tem
+    que devolver os 5 s ao match seguinte e encolher o buraco para 25-34."""
+    orig = _audio(tmp_path / "orig.wav", 60, seed=41)
+    dub = _dub_with_edit(orig, tmp_path / "dub.wav", cut_at=25.0, drop=9.0)
+    segs = [
+        Segment("match", 0.0, 25.0, 0.0, 25.0, offset=0.0),
+        Segment("gap_dub", 25.0, 30.0, 25.0, 25.0),
+        Segment("gap_orig", 30.0, 30.0, 25.0, 39.0),
+        Segment("match", 30.0, 50.0, 39.0, 59.0, offset=9.0),
+    ]
+    logs = []
+    out = refine._reclaim_gap_dub(segs, str(dub), 0, str(orig), 0, log=logs.append)
+    assert [s.kind for s in out] == ["match", "gap_orig", "match"], (out, logs)
+    a, g, b = out
+    assert abs(b.a_start - 25.0) < 1e-6 and abs(b.b_start - 34.0) < 1e-6
+    assert abs(g.b_start - 25.0) < 1e-6 and abs(g.b_end - 34.0) < 0.05
+    assert any("recuperada" in l for l in logs), logs
+
+
+def test_gap_dub_que_casa_com_o_anterior_e_recuperado(tmp_path):
+    """Espelho: o gap_dub é a CAUDA do match anterior (dub 25-30 ↔ orig
+    25-30, offset 0); o buraco real do original começa só em 30."""
+    orig = _audio(tmp_path / "orig.wav", 60, seed=43)
+    dub = _dub_with_edit(orig, tmp_path / "dub.wav", cut_at=30.0, drop=9.0)
+    segs = [
+        Segment("match", 0.0, 25.0, 0.0, 25.0, offset=0.0),
+        Segment("gap_dub", 25.0, 30.0, 25.0, 25.0),
+        Segment("gap_orig", 30.0, 30.0, 25.0, 39.0),
+        Segment("match", 30.0, 50.0, 39.0, 59.0, offset=9.0),
+    ]
+    out = refine._reclaim_gap_dub(segs, str(dub), 0, str(orig), 0, log=lambda m: None)
+    assert [s.kind for s in out] == ["match", "gap_orig", "match"], out
+    a, g, b = out
+    assert abs(a.a_end - 30.0) < 1e-6 and abs(a.b_end - 30.0) < 1e-6
+    assert abs(g.b_start - 30.0) < 0.05 and abs(g.b_end - 39.0) < 1e-6
+
+
+def test_gap_dub_de_verdade_fica(tmp_path):
+    """gap_dub cujo áudio NÃO casa com nenhum vizinho (recap: conteúdo de
+    outro lugar) continua gap_dub."""
+    orig = _audio(tmp_path / "orig.wav", 60, seed=45)
+    recap = _audio(tmp_path / "recap.wav", 6, seed=99)
+    dub = tmp_path / "dub.wav"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", str(orig), "-i", str(recap), "-filter_complex",
+                    "[0:a]atrim=0:25,asetpts=PTS-STARTPTS[p1];"
+                    "[0:a]atrim=25,asetpts=PTS-STARTPTS[p2];"
+                    "[p1][1:a][p2]concat=n=3:v=0:a=1[a]",
+                    "-map", "[a]", "-c:a", "pcm_s16le", str(dub)], check=True)
+    segs = [
+        Segment("match", 0.0, 25.0, 0.0, 25.0, offset=0.0),
+        Segment("gap_dub", 25.0, 31.0, 25.0, 25.0),
+        Segment("match", 31.0, 60.0, 25.0, 54.0, offset=-6.0),
+    ]
+    out = refine._reclaim_gap_dub(segs, str(dub), 0, str(orig), 0, log=lambda m: None)
+    assert [s.kind for s in out] == ["match", "gap_dub", "match"], out
+
+
+def test_juncao_guarda_ponto_exato_alem_do_encaixe_em_silencio(tmp_path):
+    """A junção de cena cortada guarda `junction_a` (posição CRUA, precisa)
+    além da fronteira encaixada no silêncio: o cut_video corta ali, onde o
+    dublado pula — o silêncio pode estar segundos longe (ligação contínua)."""
+    orig = _audio(tmp_path / "orig.wav", 60, seed=61,
+                  gaps=[(12.0, 12.3), (50.0, 50.3)])   # silêncios LONGE do corte
+    dub = _dub_with_scene_cut(orig, tmp_path / "dub.wav", cut_at=30.2, drop=10.0)
+    segs = [
+        Segment("match", 0.0, 28.0, 0.0, 28.0, offset=0.0),
+        Segment("gap_orig", 28.0, 28.0, 28.0, 38.0),
+        Segment("match", 28.0, 49.5, 38.0, 59.5, offset=10.0),
+    ]
+    out = refine.refine_offsets(segs, str(dub), 0, str(orig), 0, log=lambda m: None)
+    g = next(x for x in out if x.kind == "gap_orig" and (x.b_end - x.b_start) > 1)
+    ja = g.extra.get("junction_a")
+    assert ja is not None, out
+    assert abs(ja - 30.2) < 0.4, ja        # bissecção fina: ~0,2 s do corte real

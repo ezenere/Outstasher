@@ -96,7 +96,53 @@ def _keyframe_at_or_after(path: str, t: float) -> float | None:
     return None
 
 
-def _apply_video_cuts(segs, orig_path: str, tmp_dir: Path, log):
+def _reencode_for_cuts(orig_path: str, tmp_dir: Path, times: list[float],
+                       spec: dict, duration: float, log, on_progress=None,
+                       on_start=None) -> str:
+    """Re-encoda o VÍDEO do original com keyframe forçado em cada ponto de
+    corte (áudios/legendas em cópia): o corte por stream copy vira exato no
+    frame. É o preço de não ter raspas (até um GOP de cena sem dublagem)
+    nem mudo/crack nas junções. spec: {"codec": "av1", "crf": 20,
+    "preset": "default"}."""
+    from services import transcode
+    codec = spec.get("codec", "av1")
+    crf = int(spec.get("crf", 20))
+    enc = transcode.CODECS[codec][1][0] if hasattr(transcode, "CODECS") else "libsvtav1"
+    if codec == "av1":
+        enc = "libsvtav1"
+    args = ["-c:v", enc]
+    if enc == "libsvtav1":
+        preset = transcode._PRESETS[enc].get(spec.get("preset", "default"), "6")
+        args += ["-preset", preset, "-crf", str(crf)]
+        la = transcode.svtav1_lookahead()
+        if la is not None:
+            args += ["-svtav1-params", f"lookahead={la}"]
+    else:
+        args += ["-crf", str(crf)]
+    probe = merger.ffprobe_json(orig_path)
+    fps = 24.0
+    for st in merger.get_streams(probe, "video"):
+        try:
+            n, d = st.get("r_frame_rate", "24/1").split("/")
+            fps = float(n) / float(d)
+        except (ValueError, ZeroDivisionError):
+            pass
+        break
+    args += ["-g", str(int(round(fps * transcode.GOP_SECONDS)))]
+    kfs = ",".join(f"{t:.3f}" for t in sorted(set(times)))
+    out = tmp_dir / "orig_reenc.mkv"
+    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+           "-progress", "pipe:1", "-i", orig_path, "-map", "0", "-c", "copy",
+           *args, "-force_key_frames", kfs, str(out)]
+    log(f"Re-encodando o vídeo em {codec.upper()} (CRF {crf}) com keyframe "
+        f"forçado em {len(set(times))} ponto(s) de corte...")
+    merger._run_ffmpeg_progress(cmd, duration, on_progress, on_start)
+    return str(out)
+
+
+def _apply_video_cuts(segs, orig_path: str, tmp_dir: Path, log,
+                      reencode: dict | None = None, on_progress=None,
+                      on_start=None):
     """Ação cut_video: remove do ORIGINAL os trechos b marcados, por stream
     copy (mkvmerge --split parts:, que também reajusta legendas embutidas e
     capítulos). Cortes caem em KEYFRAMES: as raspas de até um GOP que sobram
@@ -117,10 +163,44 @@ def _apply_video_cuts(segs, orig_path: str, tmp_dir: Path, log):
             "áudio original")
         return segs, None, []
 
+    # junção com dublado CONTÍNUO (refine guardou junction_a): o corte vai
+    # exatamente onde o dublado pula, e os dois matches encostam nesse ponto
+    # — o áudio dublado fica sem emenda nenhuma
+    for idx, seg in enumerate(segs):
+        ja = seg.extra.get("junction_a")
+        if seg not in alvos or ja is None:
+            continue
+        prev = next((segs[k] for k in range(idx - 1, -1, -1)
+                     if segs[k].kind in ("match", "drift")), None)
+        nxt = next((segs[k] for k in range(idx + 1, len(segs))
+                    if segs[k].kind in ("match", "drift")), None)
+        if prev is None or nxt is None or prev.offset is None or nxt.offset is None:
+            continue
+        b0, b1 = ja + prev.offset, ja + nxt.offset
+        if b1 - b0 < 0.5 or ja <= prev.a_start + 0.5 or ja >= nxt.a_end - 0.5:
+            continue
+        prev.a_end, prev.b_end = ja, b0
+        nxt.a_start, nxt.b_start = ja, b1
+        seg.a_start = seg.a_end = ja
+        seg.b_start, seg.b_end = b0, b1
+
+    dur = float(merger.ffprobe_json(orig_path)["format"]["duration"])
+    if reencode:
+        pontos = [t for seg in alvos for t in (seg.b_start, seg.b_end)
+                  if 0.5 < t < dur - 0.5]
+        orig_path = _reencode_for_cuts(orig_path, tmp_dir, pontos, reencode,
+                                       dur, log, on_progress, on_start)
+
     cortes: list[tuple[float, float]] = []
     for seg in alvos:
         k0 = _keyframe_at_or_after(orig_path, seg.b_start)
-        k1 = _keyframe_at_or_before(orig_path, seg.b_end)
+        # re-encodado: o keyframe forçado cai no 1º frame >= t (pode ser t +
+        # um frame), então o fim também é "at or after"; sem re-encode fica
+        # "at or before" (raspa para dentro, nunca come conteúdo dublado)
+        k1 = (_keyframe_at_or_after(orig_path, seg.b_end) if reencode
+              else _keyframe_at_or_before(orig_path, seg.b_end))
+        if reencode and k1 is not None and k1 - seg.b_end > 0.25:
+            k1 = _keyframe_at_or_before(orig_path, seg.b_end)
         if k0 is None or k1 is None or k1 - k0 < 0.5:
             log(f"  cut_video {seg.b_start:.1f}-{seg.b_end:.1f}s: sem "
                 f"keyframes úteis — fica o preenchimento")
@@ -130,7 +210,6 @@ def _apply_video_cuts(segs, orig_path: str, tmp_dir: Path, log):
     if not cortes:
         return segs, None, []
 
-    dur = float(merger.ffprobe_json(orig_path)["format"]["duration"])
     mantidos, pos = [], 0.0
     for c0, c1 in cortes:
         if c0 - pos > 0.05:
@@ -214,7 +293,10 @@ def _apply_video_cuts(segs, orig_path: str, tmp_dir: Path, log):
 def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
            target_lang: str, log=print, on_progress=None, on_start=None,
            b_window: tuple[float, float] | list | None = None,
-           external_subs: dict | None = None):
+           external_subs: dict | None = None,
+           original_lang: str | None = None,
+           fill_with_original: bool = True,
+           video_reencode: dict | None = None):
     """Renderiza a EDL num MKV final. Bloqueante (roda ffmpeg).
 
     external_subs: {"orig": [paths], "dub": [paths], "orig_lang", "dub_lang"}
@@ -238,7 +320,9 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
             "suportado — os trechos ficam com áudio original")
         _cortado, b_cuts = None, []
     else:
-        segs, _cortado, b_cuts = _apply_video_cuts(segs, orig_path, tmp_dir, log)
+        segs, _cortado, b_cuts = _apply_video_cuts(
+            segs, orig_path, tmp_dir, log, reencode=video_reencode,
+            on_progress=on_progress, on_start=on_start)
     if _cortado:
         orig_path = _cortado
         # a timeline agora é a do CORTADO: sem isto o planejador ganhava a
@@ -289,15 +373,37 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
     dub_a = dub_stream[1]["_type_index"]
     channels = int(dub_stream[1].get("channels") or 2)
     layout = _layout(channels)
-    # áudio original para os preenchimentos: o melhor de qualquer língua ≠ alvo
+    # áudio original para os preenchimentos: o idioma ORIGINAL DA OBRA, nunca
+    # "o primeiro que não é o alvo" — num release com faixas rus,rus,eng isso
+    # dava RUSSO em todo preenchimento (caso real de campo). Sem saber o
+    # idioma original, ou sem faixa dele, o preenchimento vira SILÊNCIO: uma
+    # língua aleatória no meio do episódio é pior que um trecho mudo.
     orig_best = merger.choose_best_audio_per_language([probe_orig], {})
-    orig_pick = next((v for k, v in orig_best.items() if k != iso),
-                     next(iter(orig_best.values()), None))
-    if orig_pick is None:
-        raise merger.MergeError(f"nenhum áudio no arquivo original ({orig_path})")
-    orig_a = orig_pick[1]["_type_index"]
+    orig_pick = None
+    if original_lang:
+        want = merger.canonical_lang(
+            merger.LANG_ISO.get(original_lang, original_lang))
+        if want != iso:
+            orig_pick = orig_best.get(want)
+        if orig_pick is None:
+            log(f"⚠️ o original não tem faixa em {want} — preenchimentos ficam "
+                f"em silêncio")
+    elif len(orig_best) == 1:
+        orig_pick = next(iter(orig_best.values()))
+    else:
+        log("⚠️ idioma original não informado e o arquivo tem várias faixas — "
+            "preenchimentos ficam em silêncio")
+    orig_a = orig_pick[1]["_type_index"] if orig_pick else None
 
     slices, fills = _plan_slices(segs, duration_b)
+    # "sem dublagem, sem áudio": o usuário pode preferir o trecho MUDO a
+    # ouvir o idioma original no meio do episódio
+    if not fill_with_original:
+        orig_a = None
+    if orig_a is None:
+        for sl in slices:
+            if sl["src"] == "orig":
+                sl["src"] = "silence"
     if not slices:
         raise merger.MergeError("EDL sem nenhum trecho renderizável")
 

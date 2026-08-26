@@ -384,6 +384,85 @@ STRAY_OFF_S = 1.0
 MERGE_OFF_TOL_S = 0.005       # matches vizinhos com offset igual (5 ms) fundem
 
 
+RECLAIM_MIN_S = 1.0      # gap_dub menor que isto não tem áudio para medir
+RECLAIM_TOL_S = 0.10     # casa com o vizinho se o desvio fica no lip sync
+
+
+def _reclaim_gap_dub(segs: list[Segment], dub_path, dub_a, orig_path, orig_a,
+                     log) -> list[Segment]:
+    """gap_dub ("só no dublado" segundo o VÍDEO) cujo ÁUDIO casa com o
+    original no offset de um vizinho é dublagem válida que o DP descartou —
+    ela entra no vizinho, e o gap_orig ao lado encolhe na mesma medida.
+
+    Caso real de campo: 5,4 s rotulados gap_dub casavam com pico 982 no
+    offset do match SEGUINTE. O DP tinha posto a fronteira 5,4 s cedo
+    demais: a dublagem foi jogada fora e o "buraco sem dublagem" ao lado
+    (que virou preenchimento em outra língua) era 9 s, não 14."""
+    out = list(segs)
+    i = 0
+    while i < len(out):
+        g = out[i]
+        if g.kind != "gap_dub" or g.a_end - g.a_start < RECLAIM_MIN_S:
+            i += 1
+            continue
+        jp = i - 1
+        while jp >= 0 and out[jp].kind == "gap_orig":
+            jp -= 1
+        jn = i + 1
+        while jn < len(out) and out[jn].kind == "gap_orig":
+            jn += 1
+        prev = out[jp] if jp >= 0 and out[jp].kind in ("match", "drift") \
+            and out[jp].offset is not None else None
+        nxt = out[jn] if jn < len(out) and out[jn].kind in ("match", "drift") \
+            and out[jn].offset is not None else None
+        dur = g.a_end - g.a_start
+        best = None
+        for cand in (nxt, prev):
+            if cand is None:
+                continue
+            try:
+                tau, q = _measure(dub_path, dub_a, orig_path, orig_a,
+                                  g.a_start, g.a_start + cand.offset, dur)
+            except merger.MergeError:
+                continue
+            if q >= MIN_PEAK_QUALITY and abs(tau) <= RECLAIM_TOL_S \
+                    and (best is None or q > best[0]):
+                best = (q, cand)
+        if best is None:
+            i += 1
+            continue
+        q, cand = best
+        lo = jp + 1 if jp >= 0 else 0
+        hi = jn if jn <= len(out) else len(out)
+        if cand is nxt:
+            novo_b = g.a_start + nxt.offset
+            if prev is not None and novo_b < prev.b_end - 0.05:
+                i += 1
+                continue          # sobreporia o original: não é este o caso
+            nxt.a_start, nxt.b_start = g.a_start, novo_b
+            for k in range(lo, hi):
+                if out[k].kind == "gap_orig":
+                    out[k].b_end = min(out[k].b_end, novo_b)
+            lado = "seguinte"
+        else:
+            novo_b = g.a_end + prev.offset
+            if nxt is not None and novo_b > nxt.b_start + 0.05:
+                i += 1
+                continue
+            prev.a_end, prev.b_end = g.a_end, novo_b
+            for k in range(lo, hi):
+                if out[k].kind == "gap_orig":
+                    out[k].b_start = max(out[k].b_start, novo_b)
+            lado = "anterior"
+        log(f"  gap_dub {g.a_start:.1f}-{g.a_end:.1f}s: áudio casa com o match "
+            f"{lado} (pico {q:.0f}) — dublagem recuperada, não descartada")
+        del out[i]
+        out = [s for s in out
+               if not (s.kind == "gap_orig" and (s.b_end - s.b_start) <= 0.05)]
+        i = 0   # a estrutura mudou: recomeça (raro; lista curta)
+    return out
+
+
 def _neighbor_offset(segs: list[Segment], i: int) -> float | None:
     """Offset do match mais próximo (antes, senão depois)."""
     for j in range(i - 1, -1, -1):
@@ -624,7 +703,8 @@ EDGE_MIN_MATCH_S = 1.5 # match menor que isto não tem borda para mexer
 
 def _bisect_junction(dub_path, dub_a, orig_path, orig_a,
                      t_lo: float, t_hi: float,
-                     off_a: float, off_b: float) -> float | None:
+                     off_a: float, off_b: float,
+                     win: float = CUT_WIN_S) -> float | None:
     """Ponto (tempo `a`) onde o dub deixa de correlacionar em off_a e passa a
     correlacionar em off_b — a junção de uma cena CORTADA do dublado, onde o
     áudio dublado é contínuo e só o alvo no original salta.
@@ -635,16 +715,16 @@ def _bisect_junction(dub_path, dub_a, orig_path, orig_a,
     """
     lo, hi = t_lo, t_hi
     decisive = False
-    for _ in range(5):
-        if hi - lo <= CUT_WIN_S / 4:
+    for _ in range(6):
+        if hi - lo <= win / 4:
             break
         mid = (lo + hi) / 2
-        a0 = mid - CUT_WIN_S / 2
+        a0 = mid - win / 2
         try:
             tau_a, q_a = _measure(dub_path, dub_a, orig_path, orig_a,
-                                  a0, a0 + off_a, CUT_WIN_S)
+                                  a0, a0 + off_a, win)
             tau_b, q_b = _measure(dub_path, dub_a, orig_path, orig_a,
-                                  a0, a0 + off_b, CUT_WIN_S)
+                                  a0, a0 + off_b, win)
         except merger.MergeError:
             break
         ga = q_a >= MIN_PEAK_QUALITY and abs(tau_a) <= 0.15
@@ -693,8 +773,25 @@ def _refine_cut_junctions(segs: list[Segment], dub_path, dub_a,
         if cut is None:
             cut = video_cut   # indecisivo: fica o palpite do vídeo
         else:
+            # passadas FINAS (janelas de 1,5 s e 0,75 s) em volta do achado:
+            # precisão de ~0,2 s. É este o ponto onde o DUBLADO pula de um
+            # offset para o outro — e é exatamente onde o vídeo tem que ser
+            # cortado se a cena sem dublagem for removida (cut_video): a
+            # dublagem é contínua ali, qualquer outro ponto come conversa de
+            # um lado e deixa sobra do outro (caso real: ligação telefônica)
+            for w in (1.5, 0.75):
+                fino = _bisect_junction(dub_path, dub_a, orig_path, orig_a,
+                                        max(a.a_start + 0.5, cut - 2 * w),
+                                        min(b.a_end - 0.5, cut + 2 * w),
+                                        a.offset, b.offset, win=w)
+                if fino is not None:
+                    cut = fino
             log(f"  junção de cena cortada ~{video_cut:.1f}s: áudio localizou "
                 f"o corte em {cut:.2f}s")
+        # guarda a junção EXATA antes do encaixe em silêncio: o encaixe serve
+        # ao preenchimento (não cortar palavra ao trocar de fonte); para o
+        # corte do vídeo vale a posição crua
+        g.extra["junction_a"] = round(cut, 3)
         cut = _snap_to_silence(dub_path, dub_a, cut, log, radius=CUT_SNAP_S)
         cut = min(max(cut, a.a_start + 0.5), b.a_end - 0.5)
         a.a_end = cut
@@ -784,6 +881,7 @@ def refine_offsets(segs: list[Segment], dub_path: str, dub_a: int,
     lista NOVA de segmentos (a estrutura pode mudar)."""
     segs = collapse_wobbles(segs, dub_path, dub_a, orig_path, orig_a, log)
     segs = _resolve_replaced_by_audio(segs, dub_path, dub_a, orig_path, orig_a, log)
+    segs = _reclaim_gap_dub(segs, dub_path, dub_a, orig_path, orig_a, log)
     # substituídas resolvidas podem abrir novos wobbles
     segs = collapse_wobbles(segs, dub_path, dub_a, orig_path, orig_a, log)
     out: list[Segment] = []
