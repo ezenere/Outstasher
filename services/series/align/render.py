@@ -186,16 +186,17 @@ def _reencode_for_cuts(orig_path: str, tmp_dir: Path, times: list[float],
         kfs = ",".join(f"{t:.3f}" for t in sorted(set(times)))
         out = tmp_dir / "orig_reenc.mkv"
 
-        def monta(in_args):
+        def monta(in_args, args=None):
             return ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error",
                     "-y", "-progress", "pipe:1", *in_args, "-i", orig_path,
-                    "-map", "0", "-c", "copy", *plan.args,
+                    "-map", "0", "-c", "copy", *(args or plan.args),
                     "-force_key_frames", kfs, str(out)]
 
         log(f"Re-encodando o vídeo ({plan.encoder}) com keyframe forçado em "
             f"{len(set(times))} ponto(s) de corte: " + "; ".join(plan.notes))
         _run_reencode(monta, list(plan.input_args), duration, log,
-                      on_progress, on_start)
+                      on_progress, on_start,
+                      _sw_args(plan.encoder, opts, probe, vstream, orig_path))
         return str(out)
     codec = spec.get("codec", "av1")
     crf = int(spec.get("crf", 20))
@@ -235,31 +236,74 @@ def _reencode_for_cuts(orig_path: str, tmp_dir: Path, times: list[float],
     args += ["-g", str(int(round(fps * transcode.GOP_SECONDS)))]
     kfs = ",".join(f"{t:.3f}" for t in sorted(set(times)))
     out = tmp_dir / "orig_reenc.mkv"
-    def monta(in_args):
+    def monta(in_args, ar=None):
         return ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
                 "-progress", "pipe:1", *in_args, "-i", orig_path, "-map", "0",
-                "-c", "copy", *args, "-force_key_frames", kfs, str(out)]
+                "-c", "copy", *(ar or args), "-force_key_frames", kfs, str(out)]
 
     log(f"Re-encodando o vídeo em {codec.upper()} ({enc}, qualidade {crf}) com "
         f"keyframe forçado em {len(set(times))} ponto(s) de corte...")
-    _run_reencode(monta, pre_in, duration, log, on_progress, on_start)
+    sw = None
+    if enc.endswith("_qsv") or enc.endswith("_nvenc") or enc.endswith("_vaapi"):
+        sw_enc = {"av1": "libsvtav1", "hevc": "libx265", "h265": "libx265"}.get(
+            codec, "libx264")
+        sw = ["-c:v", sw_enc, "-crf", str(crf),
+              "-g", str(int(round(fps * transcode.GOP_SECONDS)))]
+        if sw_enc == "libsvtav1":
+            sw += ["-preset", transcode._PRESETS[sw_enc].get("default", "6")]
+            la = transcode.svtav1_lookahead()
+            if la is not None:
+                sw += ["-svtav1-params", f"lookahead={la}"]
+    _run_reencode(monta, pre_in, duration, log, on_progress, on_start, sw)
     return str(out)
 
 
 def _run_reencode(monta, in_args: list[str], duration: float, log,
-                  on_progress, on_start) -> None:
-    """Roda o re-encode; se ele falhar COM decode por GPU, repete decodificando
-    em software. O encoder QSV recusa frames que o decode VAAPI entrega em
-    certos arquivos ('Invalid FrameType:0', caso real) — o encode continua na
-    GPU, só a decodificação muda."""
+                  on_progress, on_start, sw_args: list[str] | None = None) -> None:
+    """Roda o re-encode com dois degraus de desistência da GPU.
+
+    1. como pedido (decode e encode na GPU);
+    2. decode em SOFTWARE, encode ainda na GPU — o encoder QSV recusa frames
+       que o decode VAAPI entrega em certos arquivos ('Invalid FrameType:0');
+    3. tudo em software (`sw_args`), quando o encoder da GPU quebra num frame
+       específico do meio do arquivo (caso real: falha sempre no mesmo frame,
+       2m39s, com ou sem decode por GPU) — lento, mas entrega o episódio.
+    """
     try:
         merger._run_ffmpeg_progress(monta(in_args), duration, on_progress, on_start)
+        return
     except merger.MergeError as e:
-        if not in_args:
+        if not in_args and not sw_args:
             raise
-        log(f"⚠️ re-encode falhou com decode pela GPU ({str(e)[:120]}) — "
+        erro = str(e)
+    if in_args:
+        log(f"⚠️ re-encode falhou com decode pela GPU ({erro[:120]}) — "
             f"repetindo com decode em software")
-        merger._run_ffmpeg_progress(monta([]), duration, on_progress, on_start)
+        try:
+            merger._run_ffmpeg_progress(monta([]), duration, on_progress, on_start)
+            return
+        except merger.MergeError as e2:
+            if not sw_args:
+                raise
+            erro = str(e2)
+    log(f"⚠️ o encoder da GPU não deu conta deste arquivo ({erro[:120]}) — "
+        f"re-encodando em software (mais lento)")
+    merger._run_ffmpeg_progress(monta([], sw_args), duration, on_progress, on_start)
+
+
+def _sw_args(encoder: str, opts, probe: dict, vstream: dict,
+             src: str) -> list[str] | None:
+    """Args de vídeo do MESMO codec em SOFTWARE, para quando o encoder da GPU
+    quebra no arquivo. None quando o plano já é software."""
+    from services import transcode
+    if not any(encoder.endswith(x) for x in ("_qsv", "_nvenc", "_vaapi", "_amf")):
+        return None
+    try:
+        sw = transcode.validate({**opts.to_dict(), "hw_accel": "none"})
+        plan = transcode.plan_video(probe, vstream, sw, src=src)
+    except Exception:  # noqa: BLE001 — o fallback é best-effort
+        return None
+    return list(plan.args) if plan.encode else None
 
 
 def _apply_video_cuts(segs, orig_path: str, tmp_dir: Path, log,

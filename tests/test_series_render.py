@@ -732,14 +732,32 @@ def test_reencode_cai_para_decode_em_software(monkeypatch, tmp_path):
     monkeypatch.setattr(m, "_run_ffmpeg_progress", falso)
     logs = []
     render_mod._run_reencode(
-        lambda ia: ["ffmpeg", *ia, "-i", "x.mkv", "-c:v", "av1_qsv"],
+        lambda ia, ar=None: ["ffmpeg", *ia, "-i", "x.mkv", "-c:v", "av1_qsv"],
         ["-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128"],
         60.0, logs.append, None, None)
     assert len(chamadas) == 2, chamadas
     assert "-hwaccel" in chamadas[0] and "-hwaccel" not in chamadas[1]
     assert "av1_qsv" in chamadas[1]
     assert any("decode em software" in l for l in logs), logs
-    # sem decode por GPU não há o que repetir: o erro sobe
+    # a GPU quebrando nos dois casos cai para o encoder de SOFTWARE
+    chamadas.clear()
+    logs.clear()
+
+    def so_software(cmd, dur, on_progress=None, on_start=None):
+        chamadas.append(cmd)
+        if "av1_qsv" in cmd:
+            raise m.MergeError("Invalid FrameType:0")
+
+    monkeypatch.setattr(m, "_run_ffmpeg_progress", so_software)
+    render_mod._run_reencode(
+        lambda ia, ar=None: ["ffmpeg", *ia, "-i", "x.mkv",
+                             *(ar or ["-c:v", "av1_qsv"])],
+        ["-hwaccel", "vaapi"], 60.0, logs.append, None, None,
+        ["-c:v", "libsvtav1", "-crf", "20"])
+    assert len(chamadas) == 3, chamadas
+    assert "libsvtav1" in chamadas[2] and "av1_qsv" not in chamadas[2]
+    assert any("em software (mais lento)" in l for l in logs), logs
+    # sem decode por GPU nem software não há o que repetir: o erro sobe
     chamadas.clear()
 
     def sempre_falha(cmd, dur, on_progress=None, on_start=None):
@@ -748,7 +766,7 @@ def test_reencode_cai_para_decode_em_software(monkeypatch, tmp_path):
 
     monkeypatch.setattr(m, "_run_ffmpeg_progress", sempre_falha)
     with pytest.raises(m.MergeError):
-        render_mod._run_reencode(lambda ia: ["ffmpeg", *ia], [], 60.0,
+        render_mod._run_reencode(lambda ia, ar=None: ["ffmpeg", *ia], [], 60.0,
                                  logs.append, None, None)
     assert len(chamadas) == 1, chamadas
 
