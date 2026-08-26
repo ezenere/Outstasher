@@ -3,11 +3,12 @@ import { Link } from 'react-router-dom'
 import { Check, Download, MediaVideo, Search, SoundHigh, Xmark } from 'iconoir-react'
 import {
   api, MOVIE_STATE_LABEL, post,
-  type ConvertOptions, type Destination, type Job, type Language, type Movie,
+  type AdvancedMergeConfig, type ConvertOptions, type Destination, type Job, type Language, type Movie,
   type MovieState, type MoviePage, type TorrentTarget,
 } from '../api'
 import { useJobsSummary } from '../jobsSummary'
 import AdvancedOptions from '../components/AdvancedOptions'
+import AdvancedMergePolicy from '../components/AdvancedMergePolicy'
 import { useDialog } from '../components/Dialog'
 import SeriesModal from '../components/SeriesModal'
 import { DiskFree, Empty, MovieStateBadge, MovieStateIcon, useScrollLock } from '../components/ui'
@@ -30,6 +31,8 @@ export default function Movies() {
   const [manual, setManual] = useState(false)
   // manual + pular busca: o usuário já tem o magnet e não quer o indexador
   const [skipSearch, setSkipSearch] = useState(false)
+  // política do merge avançado só para este job (null = global)
+  const [advMerge, setAdvMerge] = useState<AdvancedMergeConfig | null>(null)
   const [downloadOnly, setDownloadOnly] = useState(false)
   const [advanced, setAdvanced] = useState<ConvertOptions | null>(null)
   const [destinations, setDestinations] = useState<Destination[]>([])
@@ -164,6 +167,7 @@ export default function Movies() {
         language,
         mode: manual ? 'manual' : 'auto',
         skip_search: manual && skipSearch,
+        advanced_merge: downloadOnly ? null : advMerge,
         kind,
         // apenas baixar: não há arquivo final, então destino não se aplica
         destination_id: downloadOnly ? null : destId,
@@ -447,6 +451,11 @@ export default function Movies() {
                 ? 'Apenas baixar: os arquivos não passam por conversão, então as opções avançadas não se aplicam.'
                 : null}
             />
+            {!downloadOnly && (
+              <div className="mt-3">
+                <AdvancedMergePolicy value={advMerge} onChange={setAdvMerge} title="Se precisar do merge avançado (cortes diferentes)" />
+              </div>
+            )}
 
             {/* ações */}
             <div className="mt-4 flex flex-wrap items-center justify-end gap-2">

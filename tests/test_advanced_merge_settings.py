@@ -72,3 +72,21 @@ def test_api_roundtrip(temp_db, monkeypatch):
     monkeypatch.setattr(main.auth, "require_auth", lambda *a, **k: None, raising=False)
     r = c.get("/api/advanced-merge")
     assert r.status_code in (200, 401)
+
+
+def test_override_por_job(temp_db, monkeypatch):
+    from services import transcode
+    monkeypatch.setattr(transcode, "hw_encoder_works", lambda enc: False)
+    advanced_merge.set({"undubbed": "cut", "cut_min_s": 1.0, "reencode": None})
+    # job sem override: a global
+    assert advanced_merge.for_job({})["undubbed"] == "cut"
+    # override parcial: só o que veio muda, o resto herda
+    over = advanced_merge.validate_override({"undubbed": "silence"})
+    assert over == {"undubbed": "silence"}
+    eff = advanced_merge.for_job({"advanced_merge": over})
+    assert eff["undubbed"] == "silence" and eff["cut_min_s"] == 1.0
+    # vazio/None = global
+    assert advanced_merge.validate_override({}) is None
+    assert advanced_merge.validate_override(None) is None
+    with pytest.raises(ValueError):
+        advanced_merge.validate_override({"undubbed": "xyz"})

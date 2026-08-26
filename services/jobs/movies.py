@@ -21,9 +21,12 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
                  torrent_target_id: int | None = None,
                  kind: str = "both", download_only: bool = False,
                  convert: dict | None = None,
-                 skip_search: bool = False) -> dict:
+                 skip_search: bool = False,
+                 advanced_merge: dict | None = None) -> dict:
+    from services import advanced_merge as adv_merge
     if kind not in KINDS:
         raise ValueError(f"kind inválido: {kind!r}")
+    advanced_merge = adv_merge.validate_override(advanced_merge)
     if skip_search and mode != "manual":
         raise ValueError("Pular a busca só faz sentido no modo manual")
     if download_only:
@@ -63,6 +66,7 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
         "mode": mode,
         "kind": kind,
         "skip_search": skip_search,
+        "advanced_merge": advanced_merge,   # override da política (None = global)
         "download_only": download_only,
         "convert": convert,
         "status": "searching",

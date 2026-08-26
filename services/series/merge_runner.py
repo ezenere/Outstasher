@@ -249,7 +249,7 @@ async def _render_from_edl(job: dict, key: str, ep: dict):
     # decisões do usuário (segmento com ação explícita não é tocado)
     from services import advanced_merge
     from services.series.align import rules as rules_mod
-    politica = advanced_merge.get()
+    politica = advanced_merge.for_job(job)
     dur_a = float((ep["edl"].get("source_dub") or {}).get("duration") or 0.0)
     segs, _ = rules_mod.apply_rules(segs, advanced_merge.default_rules(politica), dur_a)
     tem_cortes = any(sg.extra.get("action") == "cut_video" for sg in segs)

@@ -71,7 +71,10 @@ async def create_series(tmdb_id: int, language: str,
                         destination_id: int | None = None,
                         torrent_target_id: int | None = None,
                         convert: dict | None = None,
-                        skip_search: bool = False) -> dict:
+                        skip_search: bool = False,
+                        advanced_merge: dict | None = None) -> dict:
+    from services import advanced_merge as adv_merge
+    advanced_merge = adv_merge.validate_override(advanced_merge)
     """Cria um job de série cobrindo temporadas inteiras e/ou episódios
     avulsos ({"3": [1, 5]}). Sempre baixa os DOIS lados (original + dublado)
     de cada episódio — é a razão de ser do serviço."""
@@ -111,6 +114,7 @@ async def create_series(tmdb_id: int, language: str,
         "mode": mode,
         "kind": "series",
         "skip_search": skip_search,
+        "advanced_merge": advanced_merge,   # override da política (None = global)
         "download_only": False,
         "convert": convert,
         "status": "searching",

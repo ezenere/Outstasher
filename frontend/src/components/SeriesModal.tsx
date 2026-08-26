@@ -2,12 +2,13 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Calendar, Check, Download, NavArrowDown, NavArrowRight, Xmark } from 'iconoir-react'
 import {
-  api, post,
+  api, type AdvancedMergeConfig, post,
   type ConvertOptions, type Destination, type EpisodeInfo, type Job,
   type Language, type Movie, type SeasonDetail, type SeriesDetail,
   type TorrentTarget,
 } from '../api'
 import AdvancedOptions from './AdvancedOptions'
+import AdvancedMergePolicy from './AdvancedMergePolicy'
 import { useDialog } from './Dialog'
 import { DiskFree, Empty, useScrollLock } from './ui'
 
@@ -59,6 +60,8 @@ export default function SeriesModal({
   const [targets, setTargets] = useState<TorrentTarget[]>([])
   const [targetId, setTargetId] = useState<number | null>(null)
   const [manual, setManual] = useState(false)
+  // política do merge avançado só para este job (null = global)
+  const [advMerge, setAdvMerge] = useState<AdvancedMergeConfig | null>(null)
   // manual + pular busca: o usuário já tem os magnets e não quer o indexador
   const [skipSearch, setSkipSearch] = useState(false)
   const [advanced, setAdvanced] = useState<ConvertOptions | null>(null)
@@ -178,6 +181,7 @@ export default function SeriesModal({
         episodes: selection.episodes,
         mode: manual ? 'manual' : 'auto',
         skip_search: manual && skipSearch,
+        advanced_merge: advMerge,
         destination_id: destId,
         torrent_target_id: targetId,
         convert: advanced,
@@ -417,6 +421,11 @@ export default function SeriesModal({
 
         {/* opções avançadas de conversão (aplicadas episódio a episódio) */}
         <AdvancedOptions value={advanced} onChange={setAdvanced} />
+
+        {/* se algum episódio precisar do alinhamento por conteúdo */}
+        <div className="mt-3">
+          <AdvancedMergePolicy value={advMerge} onChange={setAdvMerge} title="Se precisar do merge avançado (montagens diferentes)" />
+        </div>
 
         {/* ações */}
         <div className="mt-4 flex flex-wrap items-center justify-end gap-2">

@@ -14,6 +14,7 @@ import {
 import { DiskBar, Empty } from '../components/ui'
 import { useDialog } from '../components/Dialog'
 import AdvancedOptions, { CONVERT_DEFAULTS } from '../components/AdvancedOptions'
+import AdvancedMergePolicy from '../components/AdvancedMergePolicy'
 
 // abas da tela de Configurações (cada uma é uma sub-rota)
 const SETTINGS_TABS: { to: string; label: string; icon: typeof Folder }[] = [
@@ -1019,67 +1020,16 @@ export function AdvancedMergeSection() {
   }
 
   if (!cfg) return <div className="text-sm text-zinc-500">{msg?.text ?? 'Carregando…'}</div>
-  const field = 'rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm outline-none focus:border-blue-500'
-
   return (
     <div className="max-w-2xl">
       <h2 className="mb-1 font-semibold">Merge avançado</h2>
-      <p className="mb-5 text-sm text-zinc-500">
-        Vale quando os dois arquivos têm montagens diferentes e o merge passa pelo
-        alinhamento por conteúdo (EDL). Decisões da revisão de um job sempre vencem
-        estes padrões.
+      <p className="mb-4 text-sm text-zinc-500">
+        Padrão global para quando os dois arquivos têm montagens diferentes e o merge passa
+        pelo alinhamento por conteúdo. Cada job pode trocar no modal de download (série e
+        filme) ou na hora de pedir o merge avançado; decisões da revisão sempre vencem.
       </p>
-
-      <section className="mb-6">
-        <h3 className="mb-2 text-sm font-semibold text-zinc-300">Trecho do vídeo sem dublagem</h3>
-        <div className="flex flex-col gap-2 text-sm text-zinc-300">
-          <label className="flex items-start gap-2">
-            <input type="radio" name="undubbed" checked={cfg.undubbed === 'cut'}
-              onChange={() => setCfg({ ...cfg, undubbed: 'cut' })} className="mt-1" />
-            <span><b>A cena sai do vídeo</b> — o resultado só tem o que existe nos dois lados.
-              <span className="block text-xs text-zinc-500">Trechos menores que o limite abaixo ficam mudos em vez de cortados (evita pulos por raspas de menos de um segundo).</span></span>
-          </label>
-          {cfg.undubbed === 'cut' && (
-            <label className="ml-6 flex items-center gap-2 text-xs text-zinc-400">
-              Cortar a partir de
-              <input type="number" min={0} step={0.5} value={cfg.cut_min_s}
-                onChange={(e) => setCfg({ ...cfg, cut_min_s: Number(e.target.value) })}
-                className={`${field} w-20 text-right`} /> s
-            </label>
-          )}
-          <label className="flex items-start gap-2">
-            <input type="radio" name="undubbed" checked={cfg.undubbed === 'silence'}
-              onChange={() => setCfg({ ...cfg, undubbed: 'silence' })} className="mt-1" />
-            <span><b>Fica mudo</b> — o vídeo continua, sem áudio no trecho.</span>
-          </label>
-          <label className="flex items-start gap-2">
-            <input type="radio" name="undubbed" checked={cfg.undubbed === 'fill'}
-              onChange={() => setCfg({ ...cfg, undubbed: 'fill' })} className="mt-1" />
-            <span><b>Recebe o áudio original</b> — no idioma original da obra (nunca outra faixa qualquer).</span>
-          </label>
-        </div>
-      </section>
-
-      <section className="mb-6">
-        <h3 className="mb-2 text-sm font-semibold text-zinc-300">Re-encode nos cortes</h3>
-        <p className="mb-2 text-xs text-zinc-500">
-          Cortar por cópia só cai em keyframe (até ~2 s de raspa). Re-encodar o vídeo com
-          keyframe forçado em cada corte torna o corte exato no frame. Use qualquer codec e
-          encoder que a máquina tenha — só as opções de <b>vídeo</b> valem aqui; áudio e
-          legendas seguem em cópia.
-        </p>
-        <label className="mb-2 flex items-center gap-2 text-sm text-zinc-300">
-          <input type="checkbox" checked={cfg.reencode !== null}
-            onChange={(e) => setCfg({ ...cfg, reencode: e.target.checked ? { ...CONVERT_DEFAULTS, video_codec: 'av1', quality_mode: 'crf', crf: 20 } : null })} />
-          Recodificar o vídeo nos cortes
-        </label>
-        {cfg.reencode !== null && (
-          <AdvancedOptions value={cfg.reencode} onChange={(v) => setCfg({ ...cfg, reencode: v })}
-            hidePresets hideTitle hideButtton />
-        )}
-      </section>
-
-      <div className="flex items-center gap-3">
+      <AdvancedMergePolicy value={cfg} onChange={(v) => v && setCfg(v)} forceCustom />
+      <div className="mt-4 flex items-center gap-3">
         <button onClick={save} disabled={saving}
           className="rounded-lg bg-blue-600 px-4 py-1.5 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50">
           {saving ? 'Salvando…' : 'Salvar'}

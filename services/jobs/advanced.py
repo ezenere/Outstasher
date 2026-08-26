@@ -97,13 +97,17 @@ async def _pause_for_drift(job: dict, files: dict, e: "merger.VersionMismatch"):
              f"{e.tau2_ms:+.0f} ms). Conversão pausada.")
 
 
-async def proceed(job_id: str, mode: str = "offset") -> dict | None:
+async def proceed(job_id: str, mode: str = "offset",
+                  advanced_merge: dict | None = None) -> dict | None:
     """Após a pausa de drift: mode='offset' converte com o offset do início
     (comportamento antigo); mode='advanced' roda o alinhador por conteúdo das
     séries (EDL) — para o caso de mesmo corte com uma cena/junção diferente."""
     job = _jobs.get(job_id)
     if not job or job["status"] != "awaiting" or not job.get("drift_confirm"):
         return None
+    if advanced_merge is not None:
+        from services import advanced_merge as adv_merge
+        job["advanced_merge"] = adv_merge.validate_override(advanced_merge)
     info = job.pop("drift_confirm")
     vf, af = Path(info["video_file"]), Path(info["audio_file"])
     if mode == "advanced":
@@ -188,7 +192,7 @@ async def _render_advanced(job: dict):
         segs = edl_mod.segments(adv["edl"])
         from services import advanced_merge
         from services.series.align import rules as rules_mod
-        politica = advanced_merge.get()
+        politica = advanced_merge.for_job(job)
         dur_a = float((adv["edl"].get("source_dub") or {}).get("duration") or 0.0)
         segs, _ = rules_mod.apply_rules(segs, advanced_merge.default_rules(politica), dur_a)
         extra_kw = advanced_merge.render_kwargs(

@@ -288,6 +288,7 @@ class JobRequest(BaseModel):
     download_only: bool = False  # só baixa (sem conversão/hardlink/cópia)
     convert: dict | None = None  # opções avançadas de conversão (transcode.validate)
     skip_search: bool = False    # manual: nem consulta o indexador (magnet próprio)
+    advanced_merge: dict | None = None  # override da política do merge avançado
 
 
 class SelectRequest(BaseModel):
@@ -669,7 +670,8 @@ async def create_job(req: JobRequest):
     try:
         return await jobs.create(req.tmdb_id, req.language, req.mode,
                                  req.destination_id, req.torrent_target_id, req.kind,
-                                 req.download_only, req.convert, req.skip_search)
+                                 req.download_only, req.convert, req.skip_search,
+                                 req.advanced_merge)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -705,6 +707,7 @@ class SeriesJobRequest(BaseModel):
     torrent_target_id: int | None = None
     convert: dict | None = None
     skip_search: bool = False          # manual: nem consulta o indexador
+    advanced_merge: dict | None = None  # override da política do merge avançado
 
 
 @app.post("/api/jobs/series")
@@ -714,7 +717,7 @@ async def create_series_job(req: SeriesJobRequest):
         return await series_pipeline.create_series(
             req.tmdb_id, req.language, req.seasons, req.episodes, req.mode,
             req.destination_id, req.torrent_target_id, req.convert,
-            req.skip_search)
+            req.skip_search, req.advanced_merge)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -1004,6 +1007,7 @@ async def select_job(job_id: str, req: SelectRequest):
 
 class ProceedRequest(BaseModel):
     mode: str = "offset"   # offset (offset do início) | advanced (EDL por conteúdo)
+    advanced_merge: dict | None = None  # política escolhida na hora (None = a do job/global)
 
 
 @app.post("/api/jobs/{job_id}/proceed")
@@ -1012,7 +1016,7 @@ async def proceed_job(job_id: str, req: ProceedRequest | None = None):
     mode = (req.mode if req else "offset")
     if mode not in ("offset", "advanced"):
         raise HTTPException(400, f"mode inválido: {mode}")
-    job = await jobs.proceed(job_id, mode)
+    job = await jobs.proceed(job_id, mode, req.advanced_merge if req else None)
     if not job:
         raise HTTPException(409, "Job não está aguardando confirmação de conversão")
     return job

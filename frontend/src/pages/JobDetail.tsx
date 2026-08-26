@@ -4,10 +4,11 @@ import {
   Check, Download, Folder, Magnet, MediaVideo, NavArrowLeft, Play, Refresh,
   Settings as SettingsIcon, SkipNext, SoundHigh, Trash, WarningTriangle,
 } from 'iconoir-react'
-import { convertSummary, mergePhase, post, prog, type Job, type JobEvent, type JobProgress } from '../api'
+import { convertSummary, mergePhase, post, prog, type Job, type JobEvent, type JobProgress, type AdvancedMergeConfig } from '../api'
 import { api } from '../api'
 import { Badge, CandidatesTable, ClampText, Collapsible, Elapsed, Empty, KindTags, MergeBar, ProgressBar, alignRole } from '../components/ui'
 import { useDialog } from '../components/Dialog'
+import AdvancedMergePolicy from '../components/AdvancedMergePolicy'
 import { SeriesEpisodes, SeriesGate, SeriesReport, SeriesTorrents } from '../components/SeriesJobSections'
 import AlignmentReview from '../components/AlignmentReview'
 import { jobTitle, removeJob } from './Jobs'
@@ -20,6 +21,8 @@ export default function JobDetail() {
   const [selAudio, setSelAudio] = useState<string | undefined>()
   const [selVideo, setSelVideo] = useState<string | undefined>()
   const [submitting, setSubmitting] = useState(false)
+  // política do merge avançado escolhida na hora (null = a do job/global)
+  const [advMerge, setAdvMerge] = useState<AdvancedMergeConfig | null>(null)
   // troca de torrent durante o download: qual lista está aberta + trava anti-duplo-clique
   const [pickKind, setPickKind] = useState<'video' | 'audio' | null>(null)
   const [switching, setSwitching] = useState(false)
@@ -164,7 +167,7 @@ export default function JobDetail() {
     if (!job || submitting) return
     setSubmitting(true)
     try {
-      await post(`/api/jobs/${job.id}/proceed`, { mode })
+      await post(`/api/jobs/${job.id}/proceed`, { mode, advanced_merge: mode === 'advanced' ? advMerge : null })
       void reload()
     } catch (e) {
       await dialog.alert({ title: 'Erro', message: (e as Error).message })
@@ -447,6 +450,9 @@ export default function JobDetail() {
           ) : /Medindo/.test(job.detail ?? '') ? (
             <p className="mt-2 text-xs text-zinc-500">Medindo o offset ao longo do filme…</p>
           ) : null}
+          <div className="mt-3">
+            <AdvancedMergePolicy value={advMerge} onChange={setAdvMerge} title="Para o alinhamento avançado" />
+          </div>
           <div className="mt-3 flex flex-wrap gap-2">
             <button
               onClick={() => proceedAnyway('advanced')}

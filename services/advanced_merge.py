@@ -101,3 +101,29 @@ def render_kwargs(cfg: dict | None = None, has_cuts: bool = False) -> dict:
     if has_cuts and cfg.get("reencode"):
         kw["video_reencode"] = {"convert": cfg["reencode"]}
     return kw
+
+
+def for_job(job: dict) -> dict:
+    """Política efetiva de um job: a global, com o override do job por cima
+    (escolhido no modal de download ou na hora de pedir o merge avançado).
+    job["advanced_merge"] = None/ausente → só a global."""
+    base = get()
+    over = job.get("advanced_merge")
+    if not isinstance(over, dict) or not over:
+        return base
+    merged = dict(base)
+    merged.update({k: v for k, v in over.items() if k in DEFAULTS})
+    return validate(merged)
+
+
+def validate_override(over) -> dict | None:
+    """Override parcial vindo da API: None/{} = usar a global; senão valida
+    as chaves informadas contra a global (o resto herda)."""
+    if not over:
+        return None
+    if not isinstance(over, dict):
+        raise ValueError("advanced_merge: objeto ou null")
+    merged = dict(get())
+    merged.update({k: v for k, v in over.items() if k in DEFAULTS})
+    ok = validate(merged)
+    return {k: ok[k] for k in over if k in DEFAULTS}
