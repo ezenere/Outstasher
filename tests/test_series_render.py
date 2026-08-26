@@ -591,6 +591,70 @@ def test_cut_video_reencode_corta_exato(tmp_path):
     assert info["b_cuts"] and abs(info["b_cuts"][0][0] - 31.3) < 0.1, info
 
 
+def _segs_juncao(ja, extra):
+    gap = Segment("gap_orig", ja, ja, ja, ja + 11.4)
+    gap.extra.update({"action": "cut_video", "junction_a": ja, **extra})
+    return [Segment("match", 0.0, ja, 0.0, ja, offset=0.0), gap,
+            Segment("match", ja, 48.6, ja + 11.4, 60.0, offset=11.4)]
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.skipif(not render_mod.has_mkvmerge(), reason="sem mkvmerge no PATH")
+def test_juncao_pelo_video_corta_no_frame_e_mantem_os_offsets(tmp_path):
+    """junction_b0/b1 (vídeo) valem para o CORTE; o áudio fica nos offsets
+    medidos: as duas bordas deslocadas igual (desvio A/V global de -50 ms)
+    são aceitas, e o dublado segue contínuo. Bordas inconsistentes (uma
+    borda 0,3 s fora) caem no corte pelo áudio."""
+    orig = _media(tmp_path / "orig.mkv", 60, seed=1)
+    dub = _media(tmp_path / "dub.mkv", 49, seed=2)
+    reenc = {"codec": "av1", "crf": 35, "preset": "veryfast"}
+    # consistente (na grade de 24 fps, como vem do vídeo): b0 = 31.25
+    # (=31.3-0.05, frame 750), b1 = 42.6667 (=42.7-0.033, frame 1024)
+    b1 = 1024 / 24
+    segs = _segs_juncao(31.3, {"junction_b0": 31.25, "junction_b1": round(b1, 4)})
+    out = tmp_path / "out.mkv"
+    logs = []
+    info = render_mod.render(segs, str(dub), str(orig), str(out), "pt",
+                             log=logs.append, video_reencode=reenc)
+    assert abs(info["b_cuts"][0][0] - 31.25) < 0.03, (info, logs)
+    dur = float(_probe(out)["format"]["duration"])
+    assert abs(dur - 48.6) < 0.15, dur
+    m = [x for x in segs if x.kind == "match"]
+    # o áudio seguiu o offset MEDIDO (11,4): entra no dub em b1 - 11,4 =
+    # 31,2667 (com o ja do vídeo seria 31,3); remapeado, o 2º match começa
+    # na saída em 31,25 — e o dublado fica contínuo a menos do dX (17 ms)
+    assert abs(m[1].a_start - (b1 - 11.4)) < 1e-3, m
+    assert abs(m[1].a_start - m[0].a_end) < 0.02, m
+    assert not any("inconsistentes" in l for l in logs), logs
+    # inconsistente: b0 0,3 s fora, b1 no lugar → áudio manda
+    segs = _segs_juncao(31.3, {"junction_b0": 31.0, "junction_b1": 42.7})
+    logs = []
+    info = render_mod.render(segs, str(dub), str(orig), str(tmp_path / "out2.mkv"),
+                             "pt", log=logs.append, video_reencode=reenc)
+    assert abs(info["b_cuts"][0][0] - 31.3) < 0.05, (info, logs)
+    assert any("inconsistentes" in l for l in logs), logs
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.skipif(not render_mod.has_mkvmerge(), reason="sem mkvmerge no PATH")
+def test_borda_de_fatia_dentro_do_corte_mantem_o_offset(tmp_path):
+    """Corte no início do original [0, 1,0) com o match começando DENTRO dele
+    (b 0,879, offset 0,879): a fatia dublada tem que começar no dublado em
+    0,121 (= 1,0 - 0,879) na saída 0 — não em 0 (122 ms atrasada)."""
+    orig = _media(tmp_path / "orig.mkv", 30, seed=1)
+    dub = _media(tmp_path / "dub.mkv", 29, seed=2)
+    gap = Segment("gap_orig", 0.0, 0.0, 0.0, 1.0)
+    gap.extra["action"] = "cut_video"
+    segs = [gap, Segment("match", 0.0, 28.0, 0.879, 28.879, offset=0.879)]
+    render_mod.render(segs, str(dub), str(orig), str(tmp_path / "out.mkv"), "pt",
+                      log=lambda m: None,
+                      video_reencode={"codec": "av1", "crf": 35, "preset": "veryfast"})
+    m = [x for x in segs if x.kind == "match"][0]
+    assert abs(m.b_start - 0.0) < 1e-6, m
+    assert 0.09 <= m.a_start <= 0.16, m           # 1,0(1) - 0,879
+    assert abs(m.offset - (m.b_start - m.a_start)) < 1e-6, m
+
+
 @pytest.mark.ffmpeg
 @pytest.mark.skipif(not render_mod.has_mkvmerge(), reason="sem mkvmerge no PATH")
 def test_cut_video_reencode_hardware_quando_ha_gpu(tmp_path):

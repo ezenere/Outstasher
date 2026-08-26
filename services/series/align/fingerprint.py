@@ -214,14 +214,56 @@ def dhash_stream(path: str, crop: str | None = None,
         raise FingerprintError(
             f"ffmpeg falhou extraindo fingerprint de {path}: "
             f"{err[-400:].decode('utf-8', 'ignore')}")
-    n = len(raw) // frame_bytes
-    if n == 0:
+    if len(raw) < frame_bytes:
         raise FingerprintError(f"nenhum frame extraído de {path}")
+    return _hashes_from_raw(raw)
+
+
+def _hashes_from_raw(raw: bytes) -> np.ndarray:
+    """rawvideo gray 9x8 → um dHash uint64 por frame."""
+    frame_bytes = HASH_W * HASH_H
+    n = len(raw) // frame_bytes
     frames = np.frombuffer(raw[:n * frame_bytes], dtype=np.uint8)
     frames = frames.reshape(n, HASH_H, HASH_W)
     bits = frames[:, :, 1:] > frames[:, :, :-1]          # (n, 8, 8) bool
     weights = (1 << np.arange(64, dtype=np.uint64)).reshape(HASH_H, HASH_W - 1)
     return (bits.astype(np.uint64) * weights).sum(axis=(1, 2))
+
+
+_PTS_RE = re.compile(rb"pts_time:\s*(-?\d+(?:\.\d+)?)")
+
+
+def dhash_window(path: str, start: float, dur: float, fps: float,
+                 crop: str | None = None) -> tuple[np.ndarray, float]:
+    """dHashes de uma JANELA curta a partir de `start`, um por frame DECODIFICADO
+    (sem reamostrar), para localizar uma emenda no frame exato.
+
+    Devolve (hashes, pts do 1º frame). Nada de grade inferida: `-copyts`
+    mantém os timestamps do arquivo, `select` garante o 1º frame com pts >=
+    start e o `showinfo` diz o pts real dele. Sem o filtro `fps`: quando o 1º
+    frame caía na 2ª metade de um slot ele era DUPLICADO e toda a janela
+    saía um índice deslocada (caso real: corte um frame tarde, frame da cena
+    excluída piscando na saída). Decode em software: a janela tem segundos."""
+    vf = [f"select=gte(t\\,{max(0.0, start):.4f})"] + ([f"crop={crop}"] if crop else []) + [
+        f"scale={HASH_W}:{HASH_H}:flags=area", "format=gray", "showinfo"]
+    nframes = int(round(dur * fps)) + 1
+    cmd = ["ffmpeg", "-hide_banner", "-nostats", "-loglevel", "info",
+           "-ss", f"{max(0.0, start - 0.5):.4f}", "-copyts", "-i", path,
+           "-frames:v", str(nframes), "-an", "-sn", "-fps_mode", "passthrough",
+           "-vf", ",".join(vf), "-f", "rawvideo", "-pix_fmt", "gray", "-"]
+    out, code, err = _run_frames(cmd, HASH_W * HASH_H, fps, None, None)
+    m = _PTS_RE.search(err)
+    if code != 0 or len(out) < HASH_W * HASH_H or m is None:
+        raise FingerprintError(
+            f"ffmpeg falhou extraindo janela de {path}: "
+            f"{err[-300:].decode('utf-8', 'ignore')}")
+    return _hashes_from_raw(out), float(m.group(1))
+
+
+def hamming_each(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Distância de Hamming elemento a elemento de dois vetores uint64."""
+    x = np.bitwise_xor(a, b).view(np.uint8).reshape(len(a), 8)
+    return _POPCOUNT8[x].sum(axis=1).astype(np.int32)
 
 
 CACHE_MAX_AGE_S = 60 * 24 * 3600   # fingerprints de jobs de 2 meses atrás: fora

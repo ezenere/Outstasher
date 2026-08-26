@@ -75,6 +75,25 @@ def _keyframe_at_or_before(path: str, t: float) -> float | None:
     return None
 
 
+JUNC_VIDEO_TOL_S = 0.125   # bordas da junção pelo vídeo: discordância tolerada
+
+
+def _fps_of(probe: dict) -> float | None:
+    """Taxa de frames do vídeo principal do probe (None se não der)."""
+    for st in probe.get("streams", []):
+        if st.get("codec_type") != "video" or (st.get("disposition") or {}).get("attached_pic") == 1:
+            continue
+        for key in ("avg_frame_rate", "r_frame_rate"):
+            try:
+                num, den = (st.get(key) or "").split("/")
+                fps = float(num) / float(den)
+            except (ValueError, ZeroDivisionError):
+                continue
+            if 5.0 <= fps <= 120.0:
+                return fps
+    return None
+
+
 def _keyframe_at_or_after(path: str, t: float) -> float | None:
     """Menor keyframe de vídeo >= t (janelas crescentes para frente)."""
     for ahead in (10.0, 30.0, 90.0):
@@ -213,16 +232,43 @@ def _apply_video_cuts(segs, orig_path: str, tmp_dir: Path, log,
         if prev is None or nxt is None or prev.offset is None or nxt.offset is None:
             continue
         b0, b1 = ja + prev.offset, ja + nxt.offset
-        if b1 - b0 < 0.5 or ja <= prev.a_start + 0.5 or ja >= nxt.a_end - 0.5:
+        a0 = a1 = ja
+        # o refine pelo vídeo deixou os pontos do original no FRAME exato.
+        # Eles valem para o corte do vídeo; o áudio continua nos offsets
+        # MEDIDOS (um desvio A/V global entre as fontes — caso real, ~65 ms —
+        # entra igual nas duas bordas, então o dublado segue contínuo na
+        # emenda e a sincronia validada não muda). Bordas que discordam em
+        # mais de ~3 frames: o vídeo não é confiável aqui, fica o áudio.
+        vb0, vb1 = seg.extra.get("junction_b0"), seg.extra.get("junction_b1")
+        if vb0 is not None and vb1 is not None:
+            vb0, vb1 = float(vb0), float(vb1)
+            if abs((vb1 - b1) - (vb0 - b0)) <= JUNC_VIDEO_TOL_S:
+                b0, b1 = vb0, vb1
+                a0, a1 = vb0 - prev.offset, vb1 - nxt.offset
+            else:
+                log(f"  junção {ja:.2f}s: bordas do vídeo inconsistentes "
+                    f"({vb0 - b0:+.3f}/{vb1 - b1:+.3f}s) — corte pelo áudio")
+        if b1 - b0 < 0.5 or a0 <= prev.a_start + 0.5 or a1 >= nxt.a_end - 0.5:
             continue
-        prev.a_end, prev.b_end = ja, b0
-        nxt.a_start, nxt.b_start = ja, b1
-        seg.a_start = seg.a_end = ja
+        prev.a_end, prev.b_end = a0, b0
+        nxt.a_start, nxt.b_start = a1, b1
+        seg.a_start, seg.a_end = a0, a1
         seg.b_start, seg.b_end = b0, b1
 
-    dur = float(merger.ffprobe_json(orig_path)["format"]["duration"])
+    probe_orig = merger.ffprobe_json(orig_path)
+    dur = float(probe_orig["format"]["duration"])
     if reencode:
-        pontos = [t for seg in alvos for t in (seg.b_start, seg.b_end)
+        # pontos de corte na GRADE de frames do original; o keyframe forçado
+        # cai no 1º frame com pts >= t, então pede um quarto de frame antes
+        # (ruído de float/arredondamento de ms do MKV não empurra para o
+        # frame seguinte)
+        fps = _fps_of(probe_orig)
+        if fps:
+            for seg in alvos:
+                seg.b_start = round(round(seg.b_start * fps) / fps, 4)
+                seg.b_end = round(round(seg.b_end * fps) / fps, 4)
+        folga = 0.25 / fps if fps else 0.0
+        pontos = [max(0.0, t - folga) for seg in alvos for t in (seg.b_start, seg.b_end)
                   if 0.5 < t < dur - 0.5]
         orig_path = _reencode_for_cuts(orig_path, tmp_dir, pontos, reencode,
                                        dur, log, on_progress, on_start)
@@ -305,8 +351,34 @@ def _apply_video_cuts(segs, orig_path: str, tmp_dir: Path, log,
             removido += min(t, c1) - c0
         return t - removido
 
+    def fora_do_corte(t, lado):
+        """Borda de fatia DENTRO de um corte vai para a beira dele: o início
+        para o fim do corte, o fim para o começo."""
+        for c0, c1 in cortes:
+            if c0 < t < c1:
+                return c1 if lado == "ini" else c0
+        return t
+
     ids_alvo = {id(x) for x in alvos}
     for seg in segs:
+        if (id(seg) not in ids_alvo and seg.offset is not None
+                and seg.b_start is not None and seg.b_end is not None):
+            # borda dentro de um corte: move b para a beira do corte E `a`
+            # junto, senão `offset = b - a` sai errado depois do remap. Caso
+            # real: match b 0,879-58,5 com corte [0, 1,001) — mapa(0,879)
+            # dava 0 e offset 0 em vez de -0,122: fatia dublada 122 ms
+            # atrasada no primeiro minuto inteiro
+            nb0 = fora_do_corte(seg.b_start, "ini")
+            nb1 = fora_do_corte(seg.b_end, "fim")
+            if nb0 != seg.b_start:
+                seg.a_start += nb0 - seg.b_start
+                seg.b_start = nb0
+            if nb1 != seg.b_end:
+                seg.a_end += nb1 - seg.b_end
+                seg.b_end = nb1
+            if seg.b_end < seg.b_start:      # engolido inteiro pelo corte
+                seg.b_end = seg.b_start
+                seg.a_end = seg.a_start
         seg.b_start = mapa(seg.b_start)
         seg.b_end = mapa(seg.b_end)
         # o offset é b - a: com b remapeado ele muda junto. Esquecer isto

@@ -42,6 +42,11 @@ def _seg_dict(s: Segment) -> dict:
         d["action"] = extra["action"]
     if extra.get("refine"):
         d["refine"] = extra["refine"]
+    # o resto do extra (junção exata da cena cortada: junction_a/b0/b1...)
+    # persiste inteiro — o render lê a EDL guardada, não os Segments vivos
+    rest = {k: v for k, v in extra.items() if k not in ("action", "refine")}
+    if rest:
+        d["extra"] = rest
     for key in ("a_start", "a_end", "b_start", "b_end", "offset"):
         if d.get(key) is not None:
             d[key] = round(d[key], 3)
@@ -63,6 +68,10 @@ def segments(edl: dict) -> list[Segment]:
             note=d.get("note", ""))
         if d.get("action"):
             s.extra["action"] = d["action"]
+        if d.get("refine"):
+            s.extra["refine"] = d["refine"]
+        if isinstance(d.get("extra"), dict):
+            s.extra.update(d["extra"])
         out.append(s)
     return out
 

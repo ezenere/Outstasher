@@ -26,6 +26,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import numpy as np
+
 from services import merger
 from services.merger_segments import _extract_wav_window
 from services.series.align.classify import Segment
@@ -745,12 +747,138 @@ def _bisect_junction(dub_path, dub_a, orig_path, orig_a,
     return (lo + hi) / 2 if decisive else None
 
 
+# raio da busca frame a frame em volta da junção do áudio: a bissecção erra
+# até ~0,4 s (medido em campo: 16 junções, erros de -0,29 a +0,40 s)
+JUNC_VIDEO_RADIUS_S = 1.5
+JUNC_VIDEO_RADIUS_BLIND_S = 2.5  # ...quando o áudio não decidiu (palpite da grade)
+JUNC_VIDEO_SAME = 24          # dHash médio até isto = "a mesma cena" (movimento
+                              # rápido com 1 frame de desalinho chega a ~19)
+JUNC_VIDEO_MARGIN = 5         # ...e tem que casar isto melhor que a OUTRA cena
+JUNC_VIDEO_MIN_FRAMES = 2     # evidência mínima de cada lado da emenda
+JUNC_VIDEO_RADIUS_MAX_S = 3.0 # emenda na borda da janela: tenta de novo até isto
+
+
+def _video_fps(path: str) -> float | None:
+    """Taxa de frames do 1º stream de vídeo (None = sem vídeo: .mka etc.)."""
+    try:
+        probe = merger.ffprobe_json(path)
+    except merger.MergeError:
+        return None
+    for st in probe.get("streams", []):
+        if st.get("codec_type") != "video" or (st.get("disposition") or {}).get("attached_pic") == 1:
+            continue
+        for key in ("avg_frame_rate", "r_frame_rate"):
+            txt = st.get(key) or ""
+            try:
+                num, den = txt.split("/")
+                fps = float(num) / float(den)
+            except (ValueError, ZeroDivisionError):
+                continue
+            if 5.0 <= fps <= 120.0:
+                return fps
+    return None
+
+
+def _video_junction(dub_path, orig_path, cut: float, off_a: float, off_b: float,
+                    log, radius: float = JUNC_VIDEO_RADIUS_S,
+                    crop_dub: str | None = None, crop_orig: str | None = None,
+                    ) -> tuple[float, float, float] | None:
+    """Emenda no FRAME exato, pelo vídeo: em volta do palpite `cut` (tempo do
+    dub), compara cada frame do dublado com o frame do original no offset de
+    ANTES (off_a → cena A) e no de DEPOIS (off_b → cena C). Antes da emenda o
+    dub casa com A, depois casa com C; o ponto que melhor separa os dois é a
+    emenda. O áudio bissecta até ~0,2 s (4-5 frames): sobrava esse tanto da
+    cena excluída num lado e faltava da cena boa no outro.
+
+    Devolve (ja, b0, b1): o 1º frame do dub que já é da cena C, e os tempos
+    correspondentes no original (1º frame da cena excluída e 1º frame da cena
+    C), todos na grade de frames de cada arquivo. None = sem vídeo num dos
+    lados ou sem separação clara (a emenda fica onde o áudio deixou)."""
+    from services.series.align import fingerprint
+    fps = _video_fps(orig_path)
+    fps_d = _video_fps(dub_path)
+    if fps is None or fps_d is None:
+        return None
+    t0 = max(0.0, cut - radius)
+    dur = 2 * radius + 1.0 / fps
+    # as janelas do original começam UM frame antes: as duas fontes podem ter
+    # meio frame de defasagem (caso real: dub + offset caiu exatamente entre
+    # dois frames do original), e o offset do áudio não decide de que lado —
+    # o vídeo decide, testando o desvio inteiro δ ∈ {-1, 0, +1} frame de
+    # cada lado e ficando com o que casa melhor
+    sa, sc = t0 + off_a - 1.0 / fps, t0 + off_b - 1.0 / fps
+    if sa < 0 or sc < 0:
+        return None     # começo do arquivo: sem frame anterior para testar
+    try:
+        hd, td = fingerprint.dhash_window(dub_path, t0, dur, fps, crop_dub)
+        ha, ta = fingerprint.dhash_window(orig_path, sa, dur + 2.0 / fps, fps, crop_orig)
+        hb, tc = fingerprint.dhash_window(orig_path, sc, dur + 2.0 / fps, fps, crop_orig)
+    except fingerprint.FingerprintError as e:
+        log(f"  junção pelo vídeo: {e}")
+        return None
+    n = min(len(hd), len(ha) - 2, len(hb) - 2)
+    if n < 2 * JUNC_VIDEO_MIN_FRAMES:
+        log(f"  junção pelo vídeo ~{cut:.2f}s: janela sem frames ({n})")
+        return None
+    hd = hd[:n]
+    # custo de emendar em k com desvios (δa, δc): dub[:k] é a cena A no
+    # desvio δa, dub[k:] é a cena C no desvio δc
+    best = None
+    for d_a in (0, 1, 2):
+        da_ = fingerprint.hamming_each(hd, ha[d_a:d_a + n]).astype(np.int64)
+        pref_a = np.concatenate(([0], np.cumsum(da_)))
+        for d_c in (0, 1, 2):
+            db_ = fingerprint.hamming_each(hd, hb[d_c:d_c + n]).astype(np.int64)
+            suf_b = np.concatenate((np.cumsum(db_[::-1])[::-1], [0]))
+            cost = pref_a + suf_b
+            k_ = int(np.argmin(cost))
+            if best is None or cost[k_] < best[0]:
+                best = (int(cost[k_]), k_, d_a, d_c, da_, db_)
+    _, k, d_a, d_c, da, db = best
+    if k < JUNC_VIDEO_MIN_FRAMES or n - k < JUNC_VIDEO_MIN_FRAMES:
+        # a emenda está na borda/fora da janela: uma 2ª tentativa mais larga
+        # (o áudio já errou 0,64 s em campo); depois disso, não há emenda
+        if radius < JUNC_VIDEO_RADIUS_MAX_S:
+            return _video_junction(dub_path, orig_path, cut, off_a, off_b, log,
+                                   radius=min(JUNC_VIDEO_RADIUS_MAX_S, radius * 2),
+                                   crop_dub=crop_dub, crop_orig=crop_orig)
+        log(f"  junção pelo vídeo ~{cut:.2f}s: sem emenda na janela ±{radius}s "
+            f"(k={k}/{n}, dA={da.mean():.1f} dC={db.mean():.1f})")
+        return None
+    # cada lado tem que casar com a PRÓPRIA cena (média baixa) e casar
+    # claramente melhor com ela do que com a outra — critério relativo:
+    # crop/letterbox/escuro derrubam os dois lados juntos
+    a_esq, c_esq = da[:k].mean(), db[:k].mean()
+    a_dir, c_dir = da[k:].mean(), db[k:].mean()
+    if (a_esq > JUNC_VIDEO_SAME or c_dir > JUNC_VIDEO_SAME
+            or a_esq + JUNC_VIDEO_MARGIN > c_esq or c_dir + JUNC_VIDEO_MARGIN > a_dir):
+        log(f"  junção pelo vídeo ~{cut:.2f}s: frames não casam "
+            f"(antes A={a_esq:.1f}/C={c_esq:.1f}, depois A={a_dir:.1f}/C={c_dir:.1f}, "
+            f"k={k}/{n})")
+        return None
+    # tempos a partir do pts REAL do 1º frame de cada janela (frame j = 1º + j/fps)
+    ja = td + k / fps_d
+    return (round(ja, 4), round(ta + (k + d_a) / fps, 4),
+            round(tc + (k + d_c) / fps, 4))
+
+
 def _refine_cut_junctions(segs: list[Segment], dub_path, dub_a,
                           orig_path, orig_a, log) -> list[Segment]:
     """[match A][gap_orig][match B] com o DUB contínuo (cena cortada da versão
     dublada): a fronteira exata em `a` vem do áudio (bissecção de presença) e
     cai num silêncio — não na grade de 0,25 s do vídeo. Os lados b são
     recomputados dos offsets medidos, então o preenchimento se ajusta."""
+    crops: dict[str, str | None] = {}
+
+    def crop_of(path) -> str | None:
+        if path not in crops:
+            try:
+                from services.series.align import fingerprint
+                crops[path] = fingerprint.crop_params(str(path))
+            except Exception:  # noqa: BLE001 — só um refinamento
+                crops[path] = None
+        return crops[path]
+
     for i in range(1, len(segs) - 1):
         g = segs[i]
         if g.kind != "gap_orig":
@@ -770,6 +898,7 @@ def _refine_cut_junctions(segs: list[Segment], dub_path, dub_a,
             continue
         cut = _bisect_junction(dub_path, dub_a, orig_path, orig_a,
                                t_lo, t_hi, a.offset, b.offset)
+        decisivo = cut is not None
         if cut is None:
             cut = video_cut   # indecisivo: fica o palpite do vídeo
         else:
@@ -792,6 +921,27 @@ def _refine_cut_junctions(segs: list[Segment], dub_path, dub_a,
         # ao preenchimento (não cortar palavra ao trocar de fonte); para o
         # corte do vídeo vale a posição crua
         g.extra["junction_a"] = round(cut, 3)
+        # ...e o VÍDEO leva a junção ao frame: a bissecção do áudio pára a
+        # ~0,2 s, e cada frame de erro é um frame da cena excluída sobrando
+        # de um lado e um da cena boa faltando do outro (caso real)
+        try:
+            vj = _video_junction(
+                dub_path, orig_path, cut, a.offset, b.offset, log,
+                radius=JUNC_VIDEO_RADIUS_S if decisivo else JUNC_VIDEO_RADIUS_BLIND_S,
+                crop_dub=crop_of(dub_path), crop_orig=crop_of(orig_path))
+        except Exception as e:  # noqa: BLE001 — refinamento opcional
+            log(f"  junção pelo vídeo falhou: {e}")
+            vj = None
+        if vj is not None:
+            ja, b0, b1 = vj
+            log(f"  vídeo levou a junção ao frame: {ja:.3f}s "
+                f"(original {b0:.3f}s → {b1:.3f}s)")
+            # junction_a segue sendo a do ÁUDIO (o render usa os offsets
+            # medidos para o áudio); os pontos do vídeo vão à parte
+            g.extra["junction_a_video"] = ja
+            g.extra["junction_b0"] = b0
+            g.extra["junction_b1"] = b1
+            cut = ja
         cut = _snap_to_silence(dub_path, dub_a, cut, log, radius=CUT_SNAP_S)
         cut = min(max(cut, a.a_start + 0.5), b.a_end - 0.5)
         a.a_end = cut

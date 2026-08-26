@@ -388,3 +388,59 @@ def test_juncao_guarda_ponto_exato_alem_do_encaixe_em_silencio(tmp_path):
     ja = g.extra.get("junction_a")
     assert ja is not None, out
     assert abs(ja - 30.2) < 0.4, ja        # bissecção fina: ~0,2 s do corte real
+
+
+def _scenes_video(path, scenes, fps=24, shift=0.0):
+    """Vídeo com cenas VISUALMENTE distintas emendadas (sem áudio). `shift`
+    desloca os timestamps (defasagem de fase entre as fontes)."""
+    ins, parts = [], []
+    for i, (src, dur) in enumerate(scenes):
+        ins += ["-f", "lavfi", "-i", f"{src}=s=160x90:r={fps}:d={dur}"]
+        parts.append(f"[{i}:v]")
+    fc = "".join(parts) + f"concat=n={len(scenes)}:v=1:a=0"
+    fc += f",setpts=PTS+{shift}/TB[v]" if shift else "[v]"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *ins,
+                    "-filter_complex", fc, "-map", "[v]", "-c:v", "libx264",
+                    "-preset", "ultrafast", "-crf", "20", "-pix_fmt", "yuv420p",
+                    str(path)], check=True)
+    return path
+
+
+@pytest.mark.ffmpeg
+def test_juncao_pelo_video_acha_o_frame_exato(tmp_path):
+    """Original = A (31,25 s) + B (11,5 s, cena excluída) + C; dublado = A + C.
+    O áudio deixou a junção 0,3 s antes (7 frames): o vídeo tem que levá-la
+    ao frame exato — 31,25 s no dub; no original, B começa em 31,25 e C em
+    42,75."""
+    A, B, C = ("testsrc2", 31.25), ("smptebars", 11.5), ("testsrc", 17.25)
+    orig = _scenes_video(tmp_path / "orig.mkv", [A, B, C])
+    dub = _scenes_video(tmp_path / "dub.mkv", [A, C])
+    logs = []
+    vj = refine._video_junction(str(dub), str(orig), 30.95, 0.0, 11.5, logs.append)
+    assert vj is not None, logs
+    ja, b0, b1 = vj
+    assert abs(ja - 31.25) < 0.045, ja            # dentro de um frame
+    assert abs(b0 - 31.25) < 0.045 and abs(b1 - 42.75) < 0.045, (b0, b1)
+    # sem vídeo de um lado (dub .wav): não mexe
+    wav = _audio(tmp_path / "dub.wav", 5, seed=1)
+    assert refine._video_junction(str(wav), str(orig), 30.95, 0.0, 11.5, logs.append) is None
+    # janela longe da emenda (dentro da cena A): sem separação → None
+    assert refine._video_junction(str(dub), str(orig), 10.0, 0.0, 11.5, logs.append) is None
+
+
+@pytest.mark.ffmpeg
+def test_juncao_pelo_video_com_meio_frame_de_defasagem(tmp_path):
+    """Dublado com os timestamps meio frame adiantados (fase diferente entre
+    as fontes — caso real: dub + offset caía exatamente entre dois frames do
+    original e o corte saía um frame tarde: um frame da cena excluída piscava
+    na saída). O desvio inteiro de frames é decidido pelo VÍDEO: b0/b1 exatos."""
+    A, B, C = ("testsrc2", 31.25), ("smptebars", 11.5), ("testsrc", 17.25)
+    orig = _scenes_video(tmp_path / "orig.mkv", [A, B, C])
+    half = 0.5 / 24
+    dub = _scenes_video(tmp_path / "dub.mkv", [A, C], shift=half)
+    logs = []
+    # offset = original - dublado: o dub está `half` atrasado nos timestamps
+    vj = refine._video_junction(str(dub), str(orig), 31.0, -half, 11.5 - half, logs.append)
+    assert vj is not None, logs
+    ja, b0, b1 = vj
+    assert abs(b0 - 31.25) < 0.002 and abs(b1 - 42.75) < 0.002, (b0, b1)
