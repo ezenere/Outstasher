@@ -589,3 +589,32 @@ def test_cut_video_reencode_corta_exato(tmp_path):
     assert v["codec_name"] == "av1", v["codec_name"]
     assert any("Re-encodando" in l for l in logs), logs
     assert info["b_cuts"] and abs(info["b_cuts"][0][0] - 31.3) < 0.1, info
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.skipif(not render_mod.has_mkvmerge(), reason="sem mkvmerge no PATH")
+def test_cut_video_reencode_hardware_quando_ha_gpu(tmp_path):
+    """Mesmo corte exato, pelo encoder de hardware (Arc/QSV) quando existe —
+    é ele que torna o re-encode viável (~8× tempo real contra horas do SVT
+    em CPU). Sem GPU o teste é pulado."""
+    from services import transcode
+    if not transcode.hw_encoder_works("av1_qsv"):
+        pytest.skip("sem av1_qsv funcional")
+    orig = _media(tmp_path / "orig.mkv", 60, seed=1)
+    dub = _media(tmp_path / "dub.mkv", 49, seed=2)
+    gap = Segment("gap_orig", 31.3, 31.3, 31.3, 42.7)
+    gap.extra["action"] = "cut_video"
+    segs = [
+        Segment("match", 0.0, 31.3, 0.0, 31.3, offset=0.0),
+        gap,
+        Segment("match", 31.3, 48.6, 42.7, 60.0, offset=11.4),
+    ]
+    out = tmp_path / "out.mkv"
+    logs = []
+    render_mod.render(segs, str(dub), str(orig), str(out), "pt", log=logs.append,
+                      video_reencode={"codec": "av1", "encoder": "av1_qsv", "crf": 30})
+    probe = _probe(out)
+    assert abs(float(probe["format"]["duration"]) - 48.6) < 0.15, logs
+    v = [s for s in probe["streams"] if s["codec_type"] == "video"][0]
+    assert v["codec_name"] == "av1"
+    assert any("av1_qsv" in l for l in logs), logs

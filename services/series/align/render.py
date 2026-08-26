@@ -107,11 +107,24 @@ def _reencode_for_cuts(orig_path: str, tmp_dir: Path, times: list[float],
     from services import transcode
     codec = spec.get("codec", "av1")
     crf = int(spec.get("crf", 20))
-    enc = transcode.CODECS[codec][1][0] if hasattr(transcode, "CODECS") else "libsvtav1"
-    if codec == "av1":
-        enc = "libsvtav1"
+    enc = spec.get("encoder") or "auto"
+    if enc == "auto":
+        # GPU Intel (Arc) faz AV1 a ~8× tempo real; o SVT-AV1 em CPU leva
+        # horas por episódio (e já travou em deadlock com 90+ threads num
+        # caso real). Hardware quando existe, software só de fallback.
+        enc = "av1_qsv" if (codec == "av1" and transcode.hw_encoder_works("av1_qsv")) \
+            else ("libsvtav1" if codec == "av1" else "libx264")
+    pre_in: list[str] = []
     args = ["-c:v", enc]
-    if enc == "libsvtav1":
+    if enc.endswith("_qsv"):
+        # decode por VAAPI (o decoder QSV das Arc descarta frames em silêncio
+        # — ver DECODE_QSV.md), frames pela RAM, encode QSV
+        pre_in = ["-hwaccel", "vaapi", "-hwaccel_device", transcode.VAAPI_RENDER_NODE]
+        if transcode._hw_probe(enc) == "low_power":
+            args += ["-low_power", "1"]
+        args += ["-global_quality", str(crf), "-preset", "veryslow",
+                 "-pix_fmt", "nv12"]
+    elif enc == "libsvtav1":
         preset = transcode._PRESETS[enc].get(spec.get("preset", "default"), "6")
         args += ["-preset", preset, "-crf", str(crf)]
         la = transcode.svtav1_lookahead()
@@ -132,10 +145,10 @@ def _reencode_for_cuts(orig_path: str, tmp_dir: Path, times: list[float],
     kfs = ",".join(f"{t:.3f}" for t in sorted(set(times)))
     out = tmp_dir / "orig_reenc.mkv"
     cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
-           "-progress", "pipe:1", "-i", orig_path, "-map", "0", "-c", "copy",
-           *args, "-force_key_frames", kfs, str(out)]
-    log(f"Re-encodando o vídeo em {codec.upper()} (CRF {crf}) com keyframe "
-        f"forçado em {len(set(times))} ponto(s) de corte...")
+           "-progress", "pipe:1", *pre_in, "-i", orig_path, "-map", "0",
+           "-c", "copy", *args, "-force_key_frames", kfs, str(out)]
+    log(f"Re-encodando o vídeo em {codec.upper()} ({enc}, qualidade {crf}) com "
+        f"keyframe forçado em {len(set(times))} ponto(s) de corte...")
     merger._run_ffmpeg_progress(cmd, duration, on_progress, on_start)
     return str(out)
 
