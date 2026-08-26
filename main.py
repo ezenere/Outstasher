@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 import config
-from services import auth, catalog, jackett, jobs, store, tmdb, transcode
+from services import advanced_merge, auth, catalog, jackett, jobs, store, tmdb, transcode
 from services import browse
 from services.series import manual as series_manual
 from services.series import pipeline as series_pipeline
@@ -490,6 +490,25 @@ async def put_extra_search_rules(req: ExtraSearchRulesRequest):
             clean[lang] = lang_rules
     store.set_extra_search_rules(clean)
     return {"ok": True, "rules": clean}
+
+
+@app.get("/api/advanced-merge")
+async def get_advanced_merge():
+    """Política do merge avançado: trecho sem dublagem e re-encode dos cortes."""
+    return {"config": advanced_merge.get(),
+            "encoders": await asyncio.to_thread(advanced_merge.encoders_available)}
+
+
+class AdvancedMergeRequest(BaseModel):
+    config: dict
+
+
+@app.put("/api/advanced-merge")
+async def put_advanced_merge(req: AdvancedMergeRequest):
+    try:
+        return {"ok": True, "config": advanced_merge.set(req.config)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 # -------------------- catalogo --------------------

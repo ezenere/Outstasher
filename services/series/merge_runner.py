@@ -244,6 +244,16 @@ async def _render_from_edl(job: dict, key: str, ep: dict):
     output = dest_dir / folder / naming.season_dir_name(ep["season"]) / f"{stem}.mkv"
     job["output"] = str(output)
     segs = edl_mod.segments(ep["edl"])
+    # política do merge avançado (Configurações): trecho sem dublagem sai do
+    # vídeo / fica mudo / recebe o original — como regras PADRÃO, depois das
+    # decisões do usuário (segmento com ação explícita não é tocado)
+    from services import advanced_merge
+    from services.series.align import rules as rules_mod
+    politica = advanced_merge.get()
+    dur_a = float((ep["edl"].get("source_dub") or {}).get("duration") or 0.0)
+    segs, _ = rules_mod.apply_rules(segs, advanced_merge.default_rules(politica), dur_a)
+    tem_cortes = any(sg.extra.get("action") == "cut_video" for sg in segs)
+    extra_kw = advanced_merge.render_kwargs(politica, has_cuts=tem_cortes)
     # o passo 1 do render monta a faixa dublada (arquivo intermediário): é a
     # etapa que a UI chama de "Gerando áudio da EDL", não de conversão
     log, on_progress = jobs._ffmpeg_hooks(job, jobs.runtime.PHASE_EDL)
@@ -266,7 +276,8 @@ async def _render_from_edl(job: dict, key: str, ep: dict):
             render_mod.render, segs, ep["src"]["dubbed"],
             ep["src"]["original"], str(output), job["language"],
             log, on_progress, jobs._register_proc(job["id"]),
-            ep["edl"].get("b_window"), externas)
+            ep["edl"].get("b_window"), externas,
+            m.get("original_language"), **extra_kw)
     finally:
         jobs._ffmpeg_procs.pop(job["id"], None)
     ep["output"] = str(output)

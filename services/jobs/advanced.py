@@ -186,6 +186,13 @@ async def _render_advanced(job: dict):
     async with lock:
         _set(job, "merging", "Renderizando a EDL...")
         segs = edl_mod.segments(adv["edl"])
+        from services import advanced_merge
+        from services.series.align import rules as rules_mod
+        politica = advanced_merge.get()
+        dur_a = float((adv["edl"].get("source_dub") or {}).get("duration") or 0.0)
+        segs, _ = rules_mod.apply_rules(segs, advanced_merge.default_rules(politica), dur_a)
+        extra_kw = advanced_merge.render_kwargs(
+            politica, has_cuts=any(sg.extra.get("action") == "cut_video" for sg in segs))
         # passo 1 do render: faixa dublada remontada (arquivo intermediário)
         log, on_progress = _ffmpeg_hooks(job, runtime.PHASE_EDL)
         if adv["edl"].get("note"):
@@ -220,7 +227,7 @@ async def _render_advanced(job: dict):
                 render_mod.render, segs, adv["audio_file"], adv["video_file"],
                 str(output), job["language"], log, on_progress,
                 _register_proc(job["id"]), adv["edl"].get("b_window"),
-                externas)
+                externas, movie.get("original_language"), **extra_kw)
         finally:
             _ffmpeg_procs.pop(job["id"], None)
         job["progress"]["merge"] = None

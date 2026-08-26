@@ -271,6 +271,22 @@ export interface JackettIndexer {
 // regras: { "<lang>": { "no_year": ["indexerId", ...], "roman": [...], "roman_no_year": [...] } }
 export type ExtraSearchRules = Record<string, Record<string, string[]>>
 
+export interface AdvancedMergeConfig {
+  /** trecho sem dublagem: sai do vídeo | fica mudo | recebe o áudio original */
+  undubbed: 'cut' | 'silence' | 'fill'
+  /** com 'cut': corta a partir de N s; abaixo disto o trecho fica mudo */
+  cut_min_s: number
+  /** re-encode do vídeo nos cortes (corte exato no frame) */
+  reencode: 'auto' | 'av1_qsv' | 'libsvtav1' | 'none'
+  /** CRF / ICQ do re-encode */
+  quality: number
+}
+
+export interface AdvancedMergeInfo {
+  config: AdvancedMergeConfig
+  encoders: { av1_qsv: boolean; libsvtav1: boolean }
+}
+
 export interface ExtraSearchConfig {
   rules: ExtraSearchRules
   variants: string[]

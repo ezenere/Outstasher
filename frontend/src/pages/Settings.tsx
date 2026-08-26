@@ -5,6 +5,7 @@ import {
   NavArrowRight, Plus, Refresh, Search, Star, StarSolid, Trash, Xmark,
 } from 'iconoir-react'
 import {
+  type AdvancedMergeConfig, type AdvancedMergeInfo,
   api, changePassword, convertSummary, del, post, put, VARIANT_LABEL,
   type ConvertOptions, type ConvertPreset, type Destination, type ExtraSearchConfig,
   type ExtraSearchRules, type JackettIndexer, type LanguageConfig, type LanguageEntry,
@@ -21,6 +22,7 @@ const SETTINGS_TABS: { to: string; label: string; icon: typeof Folder }[] = [
   { to: 'presets', label: 'Presets', icon: ControlSlider },
   { to: 'languages', label: 'Idiomas', icon: Language },
   { to: 'searches', label: 'Buscas extras', icon: Search },
+  { to: 'merge', label: 'Merge avançado', icon: ControlSlider },
   { to: 'security', label: 'Senha', icon: Lock },
 ]
 
@@ -983,6 +985,124 @@ function FormButtons({ saving, onSave, onCancel }: {
       >
         <Xmark width={16} height={16} /> Cancelar
       </button>
+    </div>
+  )
+}
+
+
+// ---------------- merge avançado (alinhamento por conteúdo) ----------------
+
+export function AdvancedMergeSection() {
+  const [info, setInfo] = useState<AdvancedMergeInfo | null>(null)
+  const [cfg, setCfg] = useState<AdvancedMergeConfig | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  useEffect(() => {
+    api<AdvancedMergeInfo>('/api/advanced-merge')
+      .then((i) => { setInfo(i); setCfg(i.config) })
+      .catch((e) => setMsg({ ok: false, text: (e as Error).message }))
+  }, [])
+
+  async function save() {
+    if (!cfg) return
+    setSaving(true)
+    setMsg(null)
+    try {
+      const r = await put<{ ok: boolean; config: AdvancedMergeConfig }>('/api/advanced-merge', { config: cfg })
+      setCfg(r.config)
+      setMsg({ ok: true, text: 'Configuração salva. Vale para os próximos merges por alinhamento.' })
+    } catch (e) {
+      setMsg({ ok: false, text: (e as Error).message })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (!cfg) return <div className="text-sm text-zinc-500">{msg?.text ?? 'Carregando…'}</div>
+  const hw = info?.encoders.av1_qsv
+  const sw = info?.encoders.libsvtav1
+  const field = 'rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm outline-none focus:border-blue-500'
+
+  return (
+    <div className="max-w-2xl">
+      <h2 className="mb-1 font-semibold">Merge avançado</h2>
+      <p className="mb-5 text-sm text-zinc-500">
+        Vale quando os dois arquivos têm montagens diferentes e o merge passa pelo
+        alinhamento por conteúdo (EDL). Decisões da revisão de um job sempre vencem
+        estes padrões.
+      </p>
+
+      <section className="mb-6">
+        <h3 className="mb-2 text-sm font-semibold text-zinc-300">Trecho do vídeo sem dublagem</h3>
+        <div className="flex flex-col gap-2 text-sm text-zinc-300">
+          <label className="flex items-start gap-2">
+            <input type="radio" name="undubbed" checked={cfg.undubbed === 'cut'}
+              onChange={() => setCfg({ ...cfg, undubbed: 'cut' })} className="mt-1" />
+            <span><b>A cena sai do vídeo</b> — o resultado só tem o que existe nos dois lados.
+              <span className="block text-xs text-zinc-500">Trechos menores que o limite abaixo ficam mudos em vez de cortados (evita pulos por raspas de menos de um segundo).</span></span>
+          </label>
+          {cfg.undubbed === 'cut' && (
+            <label className="ml-6 flex items-center gap-2 text-xs text-zinc-400">
+              Cortar a partir de
+              <input type="number" min={0} step={0.5} value={cfg.cut_min_s}
+                onChange={(e) => setCfg({ ...cfg, cut_min_s: Number(e.target.value) })}
+                className={`${field} w-20 text-right`} /> s
+            </label>
+          )}
+          <label className="flex items-start gap-2">
+            <input type="radio" name="undubbed" checked={cfg.undubbed === 'silence'}
+              onChange={() => setCfg({ ...cfg, undubbed: 'silence' })} className="mt-1" />
+            <span><b>Fica mudo</b> — o vídeo continua, sem áudio no trecho.</span>
+          </label>
+          <label className="flex items-start gap-2">
+            <input type="radio" name="undubbed" checked={cfg.undubbed === 'fill'}
+              onChange={() => setCfg({ ...cfg, undubbed: 'fill' })} className="mt-1" />
+            <span><b>Recebe o áudio original</b> — no idioma original da obra (nunca outra faixa qualquer).</span>
+          </label>
+        </div>
+      </section>
+
+      <section className="mb-6">
+        <h3 className="mb-2 text-sm font-semibold text-zinc-300">Re-encode nos cortes</h3>
+        <p className="mb-2 text-xs text-zinc-500">
+          Cortar por cópia só cai em keyframe (até ~2 s de raspa). Re-encodar o vídeo com
+          keyframe forçado em cada corte torna o corte exato no frame — ao custo de
+          recodificar o episódio.
+        </p>
+        <div className="flex flex-wrap items-center gap-3 text-sm">
+          <select value={cfg.reencode}
+            onChange={(e) => setCfg({ ...cfg, reencode: e.target.value as AdvancedMergeConfig['reencode'] })}
+            className={field}>
+            <option value="auto">Automático (GPU se houver, senão CPU)</option>
+            <option value="av1_qsv" disabled={hw === false}>AV1 na GPU Intel (QSV){hw === false ? ' — indisponível' : ''}</option>
+            <option value="libsvtav1" disabled={sw === false}>AV1 por software (SVT-AV1){sw === false ? ' — indisponível' : ''}</option>
+            <option value="none">Não recodificar (corte em keyframe)</option>
+          </select>
+          {cfg.reencode !== 'none' && (
+            <label className="flex items-center gap-2 text-xs text-zinc-400">
+              Qualidade (CRF/ICQ)
+              <input type="number" min={1} max={63} value={cfg.quality}
+                onChange={(e) => setCfg({ ...cfg, quality: Number(e.target.value) })}
+                className={`${field} w-20 text-right`} />
+            </label>
+          )}
+        </div>
+        {info && (
+          <div className="mt-2 text-xs text-zinc-500">
+            Nesta máquina: GPU Intel {hw ? 'disponível' : 'não encontrada'}; SVT-AV1 {sw ? 'disponível' : 'ausente'}.
+            {hw && ' A GPU faz ~8× tempo real; o SVT em CPU pode levar horas por episódio.'}
+          </div>
+        )}
+      </section>
+
+      <div className="flex items-center gap-3">
+        <button onClick={save} disabled={saving}
+          className="rounded-lg bg-blue-600 px-4 py-1.5 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50">
+          {saving ? 'Salvando…' : 'Salvar'}
+        </button>
+        {msg && <span className={`text-sm ${msg.ok ? 'text-emerald-400' : 'text-red-400'}`}>{msg.text}</span>}
+      </div>
     </div>
   )
 }
