@@ -41,6 +41,25 @@ def _media(path, dur, seed, size="320x180", chapters=None):
     return path
 
 
+def _scenes_media(path, scenes, fps=24):
+    """Vídeo com cenas visualmente distintas + áudio de ruído (um arquivo
+    'original' com cortes de câmera conhecidos)."""
+    ins, parts = [], []
+    dur = sum(d for _, d in scenes)
+    for i, (src, d) in enumerate(scenes):
+        ins += ["-f", "lavfi", "-i", f"{src}=s=320x180:r={fps}:d={d}"]
+        parts.append(f"[{i}:v]")
+    ins += ["-f", "lavfi", "-i", f"anoisesrc=color=pink:seed=7:duration={dur}"]
+    fc = "".join(parts) + f"concat=n={len(scenes)}:v=1:a=0[v]"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *ins,
+                    "-filter_complex", fc, "-map", "[v]", "-map", f"{len(scenes)}:a",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                    "-g", "48", "-keyint_min", "48", "-c:a", "ac3", "-b:a", "128k",
+                    "-ac", "2", "-metadata:s:a:0", "language=eng", str(path)],
+                   check=True)
+    return path
+
+
 def _probe(path):
     p = subprocess.run(
         ["ffprobe", "-v", "error", "-print_format", "json", "-show_format",
@@ -635,6 +654,37 @@ def test_cut_video_reencode_corta_exato(tmp_path):
     assert v["codec_name"] == "av1", v["codec_name"]
     assert any("Re-encodando" in l for l in logs), logs
     assert info["b_cuts"] and abs(info["b_cuts"][0][0] - 31.3) < 0.1, info
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.skipif(not render_mod.has_mkvmerge(), reason="sem mkvmerge no PATH")
+def test_corte_encaixa_na_fronteira_de_cena(tmp_path):
+    """Borda de corte vinda da grade do alinhador (0,25 s): a cena excluída
+    começa em 20,0 s e termina em 30,0 s, mas a EDL pede [20,25, 30,25). Sem
+    refino sobrariam 6 frames da cena excluída na emenda; a fronteira de cena
+    puxa o corte para o frame certo e a saída emenda A com C direto."""
+    A, B, C = ("testsrc2", 20.0), ("smptebars", 10.0), ("testsrc", 20.0)
+    orig = _scenes_media(tmp_path / "orig.mkv", [A, B, C])
+    dub = _media(tmp_path / "dub.mkv", 40, seed=2)
+    gap = Segment("gap_orig", 20.25, 20.25, 20.25, 30.25)
+    gap.extra["action"] = "cut_video"
+    segs = [Segment("match", 0.0, 20.25, 0.0, 20.25, offset=0.0), gap,
+            Segment("match", 20.25, 40.0, 30.25, 50.0, offset=10.0)]
+    out = tmp_path / "out.mkv"
+    logs = []
+    info = render_mod.render(segs, str(dub), str(orig), str(out), "pt",
+                             log=logs.append,
+                             video_reencode={"codec": "av1", "crf": 35,
+                                             "preset": "veryfast"})
+    assert any("fronteira de cena" in l for l in logs), logs
+    c0, c1 = info["b_cuts"][0]
+    assert abs(c0 - 20.0) < 0.05 and abs(c1 - 30.0) < 0.05, info
+    # nenhum frame da cena B (barras) sobrou: a emenda liga A em C
+    from services.series.align import fingerprint as fp
+    h, t0 = fp.dhash_window(str(out), 19.5, 1.2, 24.0)
+    hb, _ = fp.dhash_window(str(orig), 25.0, 0.2, 24.0)
+    dist = min(int(fp.hamming_each(h[i:i + 1], hb[:1])[0]) for i in range(len(h)))
+    assert dist > 12, f"frame da cena excluída na emenda (dist {dist})"
 
 
 def _segs_juncao(ja, extra):

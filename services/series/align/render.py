@@ -76,6 +76,51 @@ def _keyframe_at_or_before(path: str, t: float) -> float | None:
 
 
 JUNC_VIDEO_TOL_S = 0.125   # bordas da junção pelo vídeo: discordância tolerada
+CUT_EDGE_RADIUS_S = 0.3    # raio da busca da fronteira de cena na borda do corte
+CUT_EDGE_MIN = 20          # dHash: distância que já é mudança de cena
+CUT_EDGE_RATIO = 2.0       # ...e o dobro da 2ª maior (senão é movimento, não corte)
+
+
+def _scene_edge(path: str, t: float, fps: float,
+                radius: float = CUT_EDGE_RADIUS_S) -> float | None:
+    """pts do primeiro frame da cena que começa perto de `t` — a fronteira de
+    cena mais forte da janela. None quando não há uma clara (corte no meio de
+    um plano contínuo, ou movimento sem corte)."""
+    from services.series.align import fingerprint
+    try:
+        h, t0 = fingerprint.dhash_window(path, max(0.0, t - radius),
+                                         2 * radius + 1.0 / fps, fps)
+    except Exception:  # noqa: BLE001 — refinamento opcional
+        return None
+    if len(h) < 4:
+        return None
+    d = fingerprint.hamming_each(h[1:], h[:-1])
+    i = int(d.argmax())
+    top = int(d[i])
+    resto = [int(x) for j, x in enumerate(d) if j != i]
+    if top < CUT_EDGE_MIN or (resto and top < CUT_EDGE_RATIO * max(resto)):
+        return None
+    return round(t0 + (i + 1) / fps, 4)
+
+
+def _snap_cut_edges(alvos: list[Segment], orig_path: str, fps: float, log) -> None:
+    """Leva as bordas de cada corte à fronteira de cena do original.
+
+    O refino de junção só cobre [match][gap][match] com o dublado CONTÍNUO;
+    o resto dos cut_video herda as bordas da grade de 0,25 s do alinhador
+    (4 fps) — até 6 frames de sobra da cena excluída piscando na emenda
+    (caso real). A cena removida começa e termina em corte de câmera, então
+    a fronteira de cena é a borda certa; sem fronteira clara, nada muda."""
+    for seg in alvos:
+        for attr, lado in (("b_start", "início"), ("b_end", "fim")):
+            t = getattr(seg, attr)
+            if t is None:
+                continue
+            e = _scene_edge(orig_path, t, fps)
+            if e is not None and abs(e - t) > 0.5 / fps:
+                log(f"  corte {t:.3f}s ({lado}): fronteira de cena em {e:.3f}s "
+                    f"({(e - t) * 1000:+.0f} ms)")
+                setattr(seg, attr, e)
 
 
 def _fps_of(probe: dict) -> float | None:
@@ -257,12 +302,15 @@ def _apply_video_cuts(segs, orig_path: str, tmp_dir: Path, log,
 
     probe_orig = merger.ffprobe_json(orig_path)
     dur = float(probe_orig["format"]["duration"])
+    fps_cut = _fps_of(probe_orig)
+    if fps_cut:
+        _snap_cut_edges(alvos, orig_path, fps_cut, log)
     if reencode:
         # pontos de corte na GRADE de frames do original; o keyframe forçado
         # cai no 1º frame com pts >= t, então pede um quarto de frame antes
         # (ruído de float/arredondamento de ms do MKV não empurra para o
         # frame seguinte)
-        fps = _fps_of(probe_orig)
+        fps = fps_cut
         if fps:
             for seg in alvos:
                 seg.b_start = round(round(seg.b_start * fps) / fps, 4)
