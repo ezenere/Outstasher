@@ -185,13 +185,17 @@ def _reencode_for_cuts(orig_path: str, tmp_dir: Path, times: list[float],
                                     "re-encodam o vídeo (codec 'manter')")
         kfs = ",".join(f"{t:.3f}" for t in sorted(set(times)))
         out = tmp_dir / "orig_reenc.mkv"
-        cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
-               "-progress", "pipe:1", *plan.input_args, "-i", orig_path,
-               "-map", "0", "-c", "copy", *plan.args,
-               "-force_key_frames", kfs, str(out)]
+
+        def monta(in_args):
+            return ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error",
+                    "-y", "-progress", "pipe:1", *in_args, "-i", orig_path,
+                    "-map", "0", "-c", "copy", *plan.args,
+                    "-force_key_frames", kfs, str(out)]
+
         log(f"Re-encodando o vídeo ({plan.encoder}) com keyframe forçado em "
             f"{len(set(times))} ponto(s) de corte: " + "; ".join(plan.notes))
-        merger._run_ffmpeg_progress(cmd, duration, on_progress, on_start)
+        _run_reencode(monta, list(plan.input_args), duration, log,
+                      on_progress, on_start)
         return str(out)
     codec = spec.get("codec", "av1")
     crf = int(spec.get("crf", 20))
@@ -231,13 +235,31 @@ def _reencode_for_cuts(orig_path: str, tmp_dir: Path, times: list[float],
     args += ["-g", str(int(round(fps * transcode.GOP_SECONDS)))]
     kfs = ",".join(f"{t:.3f}" for t in sorted(set(times)))
     out = tmp_dir / "orig_reenc.mkv"
-    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
-           "-progress", "pipe:1", *pre_in, "-i", orig_path, "-map", "0",
-           "-c", "copy", *args, "-force_key_frames", kfs, str(out)]
+    def monta(in_args):
+        return ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+                "-progress", "pipe:1", *in_args, "-i", orig_path, "-map", "0",
+                "-c", "copy", *args, "-force_key_frames", kfs, str(out)]
+
     log(f"Re-encodando o vídeo em {codec.upper()} ({enc}, qualidade {crf}) com "
         f"keyframe forçado em {len(set(times))} ponto(s) de corte...")
-    merger._run_ffmpeg_progress(cmd, duration, on_progress, on_start)
+    _run_reencode(monta, pre_in, duration, log, on_progress, on_start)
     return str(out)
+
+
+def _run_reencode(monta, in_args: list[str], duration: float, log,
+                  on_progress, on_start) -> None:
+    """Roda o re-encode; se ele falhar COM decode por GPU, repete decodificando
+    em software. O encoder QSV recusa frames que o decode VAAPI entrega em
+    certos arquivos ('Invalid FrameType:0', caso real) — o encode continua na
+    GPU, só a decodificação muda."""
+    try:
+        merger._run_ffmpeg_progress(monta(in_args), duration, on_progress, on_start)
+    except merger.MergeError as e:
+        if not in_args:
+            raise
+        log(f"⚠️ re-encode falhou com decode pela GPU ({str(e)[:120]}) — "
+            f"repetindo com decode em software")
+        merger._run_ffmpeg_progress(monta([]), duration, on_progress, on_start)
 
 
 def _apply_video_cuts(segs, orig_path: str, tmp_dir: Path, log,

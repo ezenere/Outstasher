@@ -717,6 +717,42 @@ def test_corte_encaixa_na_fronteira_de_cena(tmp_path):
     assert dist > 12, f"frame da cena excluída na emenda (dist {dist})"
 
 
+def test_reencode_cai_para_decode_em_software(monkeypatch, tmp_path):
+    """Re-encode que falha COM decode pela GPU é repetido decodificando em
+    software (o encoder QSV recusa frames do decode VAAPI em certos arquivos):
+    a 2ª tentativa não leva -hwaccel, e o encoder segue o mesmo."""
+    from services import merger as m
+    chamadas = []
+
+    def falso(cmd, dur, on_progress=None, on_start=None):
+        chamadas.append(cmd)
+        if "-hwaccel" in cmd:
+            raise m.MergeError("ffmpeg falhou (código 183): Invalid FrameType:0")
+
+    monkeypatch.setattr(m, "_run_ffmpeg_progress", falso)
+    logs = []
+    render_mod._run_reencode(
+        lambda ia: ["ffmpeg", *ia, "-i", "x.mkv", "-c:v", "av1_qsv"],
+        ["-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128"],
+        60.0, logs.append, None, None)
+    assert len(chamadas) == 2, chamadas
+    assert "-hwaccel" in chamadas[0] and "-hwaccel" not in chamadas[1]
+    assert "av1_qsv" in chamadas[1]
+    assert any("decode em software" in l for l in logs), logs
+    # sem decode por GPU não há o que repetir: o erro sobe
+    chamadas.clear()
+
+    def sempre_falha(cmd, dur, on_progress=None, on_start=None):
+        chamadas.append(cmd)
+        raise m.MergeError("boom")
+
+    monkeypatch.setattr(m, "_run_ffmpeg_progress", sempre_falha)
+    with pytest.raises(m.MergeError):
+        render_mod._run_reencode(lambda ia: ["ffmpeg", *ia], [], 60.0,
+                                 logs.append, None, None)
+    assert len(chamadas) == 1, chamadas
+
+
 def _segs_juncao(ja, extra):
     gap = Segment("gap_orig", ja, ja, ja, ja + 11.4)
     gap.extra.update({"action": "cut_video", "junction_a": ja, **extra})
