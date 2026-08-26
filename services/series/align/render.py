@@ -337,6 +337,21 @@ def _apply_video_cuts(segs, orig_path: str, tmp_dir: Path, log,
             continue
         cortes.append((k0, k1))
     cortes.sort()
+    # UNIÃO dos cortes: bordas refinadas (junção/fronteira de cena) e o encaixe
+    # em keyframe fazem cortes vizinhos se sobreporem por dezenas de ms. O
+    # `mapa()` abaixo somaria a sobreposição DUAS vezes e o áudio depois dali
+    # sairia adiantado — acumulando meio segundo ao longo do episódio (caso
+    # real: 4 pontos fora de sincronia num episódio com 54 cortes).
+    uniao: list[tuple[float, float]] = []
+    for c0, c1 in cortes:
+        if uniao and c0 <= uniao[-1][1] + 1e-6:
+            if c1 > uniao[-1][1]:
+                uniao[-1] = (uniao[-1][0], c1)
+        else:
+            uniao.append((c0, c1))
+    if len(uniao) != len(cortes):
+        log(f"  cortes sobrepostos fundidos: {len(cortes)} → {len(uniao)}")
+    cortes = uniao
     if not cortes:
         return segs, None, []
 

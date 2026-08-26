@@ -543,6 +543,36 @@ def test_cut_video_remove_a_cena_sem_dublagem(tmp_path):
     assert "Extra" not in titulos, titulos
 
 
+@pytest.mark.ffmpeg
+@pytest.mark.skipif(not render_mod.has_mkvmerge(), reason="sem mkvmerge no PATH")
+def test_cortes_sobrepostos_nao_deslocam_o_audio(tmp_path):
+    """Duas cenas cortadas cujos trechos se SOBREPÕEM (bordas refinadas +
+    encaixe em keyframe): o remapeamento não pode contar a sobreposição duas
+    vezes — senão a dublagem depois dali sai adiantada (caso real: meio
+    segundo acumulado). União dos cortes: [20,30)+[29.5,35) = [20,35)."""
+    orig = _media(tmp_path / "orig.mkv", 60, seed=1)
+    dub = _media(tmp_path / "dub.mkv", 45, seed=2)
+    g1 = Segment("gap_orig", 20.0, 20.0, 20.0, 30.0, extra={"action": "cut_video"})
+    g2 = Segment("gap_orig", 20.0, 20.0, 29.5, 35.0, extra={"action": "cut_video"})
+    segs = [Segment("match", 0.0, 20.0, 0.0, 20.0, offset=0.0), g1, g2,
+            Segment("match", 20.0, 45.0, 35.0, 60.0, offset=15.0)]
+    out = tmp_path / "out.mkv"
+    logs = []
+    info = render_mod.render(segs, str(dub), str(orig), str(out), "pt",
+                             log=logs.append,
+                             video_reencode={"codec": "av1", "crf": 35,
+                                             "preset": "veryfast"})
+    assert len(info["b_cuts"]) == 1, info["b_cuts"]
+    c0, c1 = info["b_cuts"][0]
+    assert abs(c0 - 20.0) < 0.1 and abs(c1 - 35.0) < 0.1, info["b_cuts"]
+    dur = float(_probe(out)["format"]["duration"])
+    assert abs(dur - 45.0) < 0.3, (dur, logs)      # 60 - 15, não 60 - 15,5
+    # aos 30 s da saída tem que estar o dublado de 30 s (b=45 → a=30)
+    from services.series.align import refine
+    tau, q = refine._measure(str(out), 1, str(dub), 0, 30.0, 30.0, 6.0, radius=2.0)
+    assert q > 20 and abs(tau) < 0.06, (tau, q, logs)
+
+
 def test_cut_video_sem_mkvmerge_cai_no_preenchimento(tmp_path, monkeypatch):
     """Sem mkvmerge o corte não existe: o trecho fica no vídeo com áudio
     original (comportamento antigo), com aviso — nunca erro."""
