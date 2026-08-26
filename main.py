@@ -495,8 +495,7 @@ async def put_extra_search_rules(req: ExtraSearchRulesRequest):
 @app.get("/api/advanced-merge")
 async def get_advanced_merge():
     """Política do merge avançado: trecho sem dublagem e re-encode dos cortes."""
-    return {"config": advanced_merge.get(),
-            "encoders": await asyncio.to_thread(advanced_merge.encoders_available)}
+    return {"config": await asyncio.to_thread(advanced_merge.get)}
 
 
 class AdvancedMergeRequest(BaseModel):

@@ -105,6 +105,30 @@ def _reencode_for_cuts(orig_path: str, tmp_dir: Path, times: list[float],
     nem mudo/crack nas junções. spec: {"codec": "av1", "crf": 20,
     "preset": "default"}."""
     from services import transcode
+    probe = merger.ffprobe_json(orig_path)
+    if spec.get("convert"):
+        # opções de conversão do app (qualquer codec/encoder que a máquina
+        # tenha): o plano de vídeo é o mesmo da conversão normal — só o
+        # keyframe forçado nos cortes é específico daqui
+        opts = transcode.validate(spec["convert"])
+        merger.annotate_type_indexes(probe)
+        vstream = next(iter(merger.get_streams(probe, "video")), None)
+        if vstream is None:
+            raise merger.MergeError("original sem stream de vídeo")
+        plan = transcode.plan_video(probe, vstream, opts, src=orig_path)
+        if not plan.encode:
+            raise merger.MergeError("re-encode nos cortes: as opções não "
+                                    "re-encodam o vídeo (codec 'manter')")
+        kfs = ",".join(f"{t:.3f}" for t in sorted(set(times)))
+        out = tmp_dir / "orig_reenc.mkv"
+        cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+               "-progress", "pipe:1", *plan.input_args, "-i", orig_path,
+               "-map", "0", "-c", "copy", *plan.args,
+               "-force_key_frames", kfs, str(out)]
+        log(f"Re-encodando o vídeo ({plan.encoder}) com keyframe forçado em "
+            f"{len(set(times))} ponto(s) de corte: " + "; ".join(plan.notes))
+        merger._run_ffmpeg_progress(cmd, duration, on_progress, on_start)
+        return str(out)
     codec = spec.get("codec", "av1")
     crf = int(spec.get("crf", 20))
     enc = spec.get("encoder") or "auto"
@@ -132,7 +156,6 @@ def _reencode_for_cuts(orig_path: str, tmp_dir: Path, times: list[float],
             args += ["-svtav1-params", f"lookahead={la}"]
     else:
         args += ["-crf", str(crf)]
-    probe = merger.ffprobe_json(orig_path)
     fps = 24.0
     for st in merger.get_streams(probe, "video"):
         try:

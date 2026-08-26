@@ -10,29 +10,44 @@ from services import store
 
 KEY = "advanced_merge"
 UNDUBBED = ("cut", "silence", "fill")          # trecho sem dublagem
-REENCODE = ("auto", "av1_qsv", "libsvtav1", "none")
 DEFAULTS = {
     "undubbed": "cut",         # sem dublagem: a cena SAI do vídeo…
     "cut_min_s": 1.0,          # …a partir disto; abaixo, fica MUDA
-    "reencode": "auto",        # corte frame-exato re-encodando o vídeo
-    "quality": 20,             # CRF / ICQ do re-encode
+    # re-encode nos cortes: as MESMAS opções de conversão do app (codec,
+    # encoder, preset, CRF/bitrate...) ou None = corte em keyframe. O padrão
+    # é decidido pela máquina em default_reencode(): AV1 na GPU se houver.
+    "reencode": None,
 }
+
+
+def default_reencode() -> dict:
+    """Padrão do re-encode para ESTA máquina: AV1 CRF 20 na GPU Intel se ela
+    responde, senão SVT-AV1 em CPU (lento, mas exato)."""
+    from services import transcode
+    hw = "qsv" if transcode.hw_encoder_works("av1_qsv") else "none"
+    return transcode.validate({"video_codec": "av1", "hw_accel": hw,
+                               "quality_mode": "crf", "crf": 20,
+                               "preset": "default"}).to_dict()
 
 
 def get() -> dict:
     raw = store.get_setting(KEY)
+    if not raw:
+        cfg = dict(DEFAULTS)
+        cfg["reencode"] = default_reencode()
+        return cfg
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        data = {}
     cfg = dict(DEFAULTS)
-    if raw:
-        try:
-            data = json.loads(raw)
-            if isinstance(data, dict):
-                cfg.update({k: v for k, v in data.items() if k in DEFAULTS})
-        except (ValueError, TypeError):
-            pass
+    if isinstance(data, dict):
+        cfg.update({k: v for k, v in data.items() if k in DEFAULTS})
     return validate(cfg)
 
 
 def validate(cfg: dict) -> dict:
+    from services import transcode
     out = dict(DEFAULTS)
     und = str(cfg.get("undubbed", out["undubbed"]))
     if und not in UNDUBBED:
@@ -42,17 +57,17 @@ def validate(cfg: dict) -> dict:
         out["cut_min_s"] = max(0.0, float(cfg.get("cut_min_s", out["cut_min_s"])))
     except (TypeError, ValueError):
         raise ValueError("cut_min_s precisa ser um número de segundos")
-    re_ = str(cfg.get("reencode", out["reencode"]))
-    if re_ not in REENCODE:
-        raise ValueError(f"re-encode inválido: {re_!r}")
-    out["reencode"] = re_
-    try:
-        q = int(cfg.get("quality", out["quality"]))
-    except (TypeError, ValueError):
-        raise ValueError("qualidade precisa ser um inteiro")
-    if not 1 <= q <= 63:
-        raise ValueError("qualidade fora da faixa (1-63)")
-    out["quality"] = q
+    re_ = cfg.get("reencode")
+    if re_ in (None, "", "none"):
+        out["reencode"] = None
+    elif isinstance(re_, dict):
+        opts = transcode.validate(re_)          # levanta ValueError se inválido
+        if opts.video_codec == "keep":
+            raise ValueError("re-encode nos cortes precisa de um codec de vídeo "
+                             "(ou desligue o re-encode)")
+        out["reencode"] = opts.to_dict()
+    else:
+        raise ValueError("re-encode: use as opções de conversão ou null")
     return out
 
 
@@ -83,16 +98,6 @@ def render_kwargs(cfg: dict | None = None, has_cuts: bool = False) -> dict:
     """Argumentos extras do render.render() para esta política."""
     cfg = cfg or get()
     kw = {"fill_with_original": cfg["undubbed"] == "fill"}
-    if has_cuts and cfg["reencode"] != "none":
-        kw["video_reencode"] = {"codec": "av1", "encoder": cfg["reencode"],
-                                "crf": cfg["quality"]}
+    if has_cuts and cfg.get("reencode"):
+        kw["video_reencode"] = {"convert": cfg["reencode"]}
     return kw
-
-
-def encoders_available() -> dict:
-    """Para a UI: o que esta máquina consegue usar."""
-    from services import transcode
-    return {
-        "av1_qsv": transcode.hw_encoder_works("av1_qsv"),
-        "libsvtav1": "libsvtav1" in transcode.available_encoders(),
-    }

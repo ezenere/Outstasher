@@ -993,14 +993,13 @@ function FormButtons({ saving, onSave, onCancel }: {
 // ---------------- merge avançado (alinhamento por conteúdo) ----------------
 
 export function AdvancedMergeSection() {
-  const [info, setInfo] = useState<AdvancedMergeInfo | null>(null)
   const [cfg, setCfg] = useState<AdvancedMergeConfig | null>(null)
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
   useEffect(() => {
     api<AdvancedMergeInfo>('/api/advanced-merge')
-      .then((i) => { setInfo(i); setCfg(i.config) })
+      .then((i) => setCfg(i.config))
       .catch((e) => setMsg({ ok: false, text: (e as Error).message }))
   }, [])
 
@@ -1020,8 +1019,6 @@ export function AdvancedMergeSection() {
   }
 
   if (!cfg) return <div className="text-sm text-zinc-500">{msg?.text ?? 'Carregando…'}</div>
-  const hw = info?.encoders.av1_qsv
-  const sw = info?.encoders.libsvtav1
   const field = 'rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm outline-none focus:border-blue-500'
 
   return (
@@ -1067,32 +1064,18 @@ export function AdvancedMergeSection() {
         <h3 className="mb-2 text-sm font-semibold text-zinc-300">Re-encode nos cortes</h3>
         <p className="mb-2 text-xs text-zinc-500">
           Cortar por cópia só cai em keyframe (até ~2 s de raspa). Re-encodar o vídeo com
-          keyframe forçado em cada corte torna o corte exato no frame — ao custo de
-          recodificar o episódio.
+          keyframe forçado em cada corte torna o corte exato no frame. Use qualquer codec e
+          encoder que a máquina tenha — só as opções de <b>vídeo</b> valem aqui; áudio e
+          legendas seguem em cópia.
         </p>
-        <div className="flex flex-wrap items-center gap-3 text-sm">
-          <select value={cfg.reencode}
-            onChange={(e) => setCfg({ ...cfg, reencode: e.target.value as AdvancedMergeConfig['reencode'] })}
-            className={field}>
-            <option value="auto">Automático (GPU se houver, senão CPU)</option>
-            <option value="av1_qsv" disabled={hw === false}>AV1 na GPU Intel (QSV){hw === false ? ' — indisponível' : ''}</option>
-            <option value="libsvtav1" disabled={sw === false}>AV1 por software (SVT-AV1){sw === false ? ' — indisponível' : ''}</option>
-            <option value="none">Não recodificar (corte em keyframe)</option>
-          </select>
-          {cfg.reencode !== 'none' && (
-            <label className="flex items-center gap-2 text-xs text-zinc-400">
-              Qualidade (CRF/ICQ)
-              <input type="number" min={1} max={63} value={cfg.quality}
-                onChange={(e) => setCfg({ ...cfg, quality: Number(e.target.value) })}
-                className={`${field} w-20 text-right`} />
-            </label>
-          )}
-        </div>
-        {info && (
-          <div className="mt-2 text-xs text-zinc-500">
-            Nesta máquina: GPU Intel {hw ? 'disponível' : 'não encontrada'}; SVT-AV1 {sw ? 'disponível' : 'ausente'}.
-            {hw && ' A GPU faz ~8× tempo real; o SVT em CPU pode levar horas por episódio.'}
-          </div>
+        <label className="mb-2 flex items-center gap-2 text-sm text-zinc-300">
+          <input type="checkbox" checked={cfg.reencode !== null}
+            onChange={(e) => setCfg({ ...cfg, reencode: e.target.checked ? { ...CONVERT_DEFAULTS, video_codec: 'av1', quality_mode: 'crf', crf: 20 } : null })} />
+          Recodificar o vídeo nos cortes
+        </label>
+        {cfg.reencode !== null && (
+          <AdvancedOptions value={cfg.reencode} onChange={(v) => setCfg({ ...cfg, reencode: v })}
+            hidePresets hideTitle hideButtton />
         )}
       </section>
 

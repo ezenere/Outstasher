@@ -276,15 +276,13 @@ export interface AdvancedMergeConfig {
   undubbed: 'cut' | 'silence' | 'fill'
   /** com 'cut': corta a partir de N s; abaixo disto o trecho fica mudo */
   cut_min_s: number
-  /** re-encode do vídeo nos cortes (corte exato no frame) */
-  reencode: 'auto' | 'av1_qsv' | 'libsvtav1' | 'none'
-  /** CRF / ICQ do re-encode */
-  quality: number
+  /** re-encode do vídeo nos cortes (corte exato no frame): as mesmas opções
+   *  de conversão do app, ou null = não recodificar (corte em keyframe) */
+  reencode: ConvertOptions | null
 }
 
 export interface AdvancedMergeInfo {
   config: AdvancedMergeConfig
-  encoders: { av1_qsv: boolean; libsvtav1: boolean }
 }
 
 export interface ExtraSearchConfig {

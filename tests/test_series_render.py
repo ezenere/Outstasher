@@ -618,3 +618,27 @@ def test_cut_video_reencode_hardware_quando_ha_gpu(tmp_path):
     v = [s for s in probe["streams"] if s["codec_type"] == "video"][0]
     assert v["codec_name"] == "av1"
     assert any("av1_qsv" in l for l in logs), logs
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.skipif(not render_mod.has_mkvmerge(), reason="sem mkvmerge no PATH")
+def test_cut_video_reencode_com_opcoes_de_conversao(tmp_path):
+    """O re-encode dos cortes aceita as opções de conversão do app (aqui
+    H.264 por software, CRF): qualquer codec/encoder que a máquina tenha."""
+    orig = _media(tmp_path / "orig.mkv", 60, seed=1)
+    dub = _media(tmp_path / "dub.mkv", 49, seed=2)
+    gap = Segment("gap_orig", 31.3, 31.3, 31.3, 42.7)
+    gap.extra["action"] = "cut_video"
+    segs = [Segment("match", 0.0, 31.3, 0.0, 31.3, offset=0.0), gap,
+            Segment("match", 31.3, 48.6, 42.7, 60.0, offset=11.4)]
+    out = tmp_path / "out.mkv"
+    logs = []
+    render_mod.render(segs, str(dub), str(orig), str(out), "pt", log=logs.append,
+                      video_reencode={"convert": {"video_codec": "h264", "hw_accel": "none",
+                                                  "quality_mode": "crf", "crf": 28,
+                                                  "preset": "veryfast"}})
+    probe = _probe(out)
+    assert abs(float(probe["format"]["duration"]) - 48.6) < 0.15, logs
+    v = [s for s in probe["streams"] if s["codec_type"] == "video"][0]
+    assert v["codec_name"] == "h264"
+    assert any("libx264" in l for l in logs), logs

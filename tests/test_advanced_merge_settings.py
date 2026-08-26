@@ -7,17 +7,27 @@ from services.series.align import rules
 from services.series.align.classify import Segment
 
 
-def test_padrao_e_persistencia(temp_db):
-    assert advanced_merge.get() == advanced_merge.DEFAULTS
-    salvo = advanced_merge.set({"undubbed": "silence", "reencode": "none", "quality": 24})
-    assert salvo["undubbed"] == "silence" and salvo["reencode"] == "none"
+def test_padrao_e_persistencia(temp_db, monkeypatch):
+    from services import transcode
+    monkeypatch.setattr(transcode, "hw_encoder_works", lambda enc: False)
+    cfg = advanced_merge.get()
+    assert cfg["undubbed"] == "cut" and cfg["cut_min_s"] == 1.0
+    # padrão adaptado à máquina: sem GPU, AV1 por software, CRF 20
+    assert cfg["reencode"]["video_codec"] == "av1"
+    assert cfg["reencode"]["hw_accel"] == "none" and cfg["reencode"]["crf"] == 20
+    salvo = advanced_merge.set({"undubbed": "silence", "reencode": None})
+    assert salvo["undubbed"] == "silence" and salvo["reencode"] is None
     assert advanced_merge.get() == salvo
+    # qualquer codec/encoder das opções de conversão vale
+    salvo = advanced_merge.set({"reencode": {"video_codec": "hevc", "hw_accel": "none",
+                                             "quality_mode": "crf", "crf": 22}})
+    assert salvo["reencode"]["video_codec"] == "hevc"
 
 
 @pytest.mark.parametrize("cfg,msg", [
     ({"undubbed": "russo"}, "política"),
     ({"reencode": "x265"}, "re-encode"),
-    ({"quality": 99}, "faixa"),
+    ({"reencode": {"video_codec": "keep"}}, "codec"),
     ({"cut_min_s": "muito"}, "segundos"),
 ])
 def test_validacao(temp_db, cfg, msg):
@@ -46,19 +56,18 @@ def test_regras_padrao_fill_e_silence():
 
 
 def test_render_kwargs():
-    cfg = dict(advanced_merge.DEFAULTS)
+    opts = {"video_codec": "av1", "hw_accel": "none", "quality_mode": "crf", "crf": 20}
+    cfg = dict(advanced_merge.DEFAULTS, reencode=opts)
     assert advanced_merge.render_kwargs(cfg, has_cuts=False) == {"fill_with_original": False}
     kw = advanced_merge.render_kwargs(cfg, has_cuts=True)
-    assert kw["video_reencode"] == {"codec": "av1", "encoder": "auto", "crf": 20}
+    assert kw["video_reencode"] == {"convert": opts}
     assert "video_reencode" not in advanced_merge.render_kwargs(
-        dict(cfg, reencode="none"), has_cuts=True)
+        dict(cfg, reencode=None), has_cuts=True)
 
 
 def test_api_roundtrip(temp_db, monkeypatch):
     from fastapi.testclient import TestClient
     import main
-    monkeypatch.setattr(advanced_merge, "encoders_available",
-                        lambda: {"av1_qsv": False, "libsvtav1": True})
     c = TestClient(main.app)
     monkeypatch.setattr(main.auth, "require_auth", lambda *a, **k: None, raising=False)
     r = c.get("/api/advanced-merge")
