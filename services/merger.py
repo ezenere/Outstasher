@@ -69,9 +69,22 @@ VIDEO_CODEC_WEIGHT = {
     "av1": 50, "hevc": 40, "h265": 40, "h264": 30, "vp9": 25, "mpeg2video": 10, "mpeg4": 8,
 }
 AUDIO_CODEC_WEIGHT = {
-    "truehd": 100, "flac": 95, "pcm_s24le": 92, "pcm_s16le": 90,
-    "dca": 85, "eac3": 75, "ac3": 65, "opus": 60, "aac": 55, "vorbis": 50, "mp3": 45,
+    "truehd": 100, "mlp": 98, "flac": 95, "alac": 93,
+    "pcm_s24le": 92, "pcm_s32le": 92, "pcm_bluray": 91, "pcm_dvd": 91,
+    "pcm_s16le": 90,
+    # o ffprobe chama TODO DTS de "dts" (o profile é que distingue MA/X do
+    # core); "dca" é o nome ANTIGO do decoder e continua aceito. Faltando
+    # "dts", um DTS-HD MA 7.1 pontuava ZERO e perdia para um AC3 estéreo —
+    # caso real de campo: o inglês do REMUX perdeu para o do arquivo dublado.
+    "dts": 85, "dca": 85,
+    "eac3": 75, "ac3": 65, "opus": 60, "aac": 55, "vorbis": 50,
+    "wmapro": 48, "mp3": 45,
 }
+# extensões lossless/imersivas valem mais que o core do MESMO codec
+AUDIO_PROFILE_BONUS = (
+    (("dts-hd ma", "dts-hd master", "dts-x", "dts:x", "xll"), 10),
+    (("dts-hd hra", "dts-es", "atmos"), 5),
+)
 SUB_CODEC_WEIGHT = {
     "ass": 60, "ssa": 58, "subrip": 55, "webvtt": 52,
     "hdmv_pgs_subtitle": 45, "dvd_subtitle": 40,
@@ -268,7 +281,15 @@ def video_score(s: dict) -> tuple:
 
 
 def audio_score(s: dict) -> tuple:
+    """Ordem de preferência de uma faixa: codec (com o bônus do profile),
+    canais, taxa de amostragem e bitrate — nessa ordem."""
     cw = AUDIO_CODEC_WEIGHT.get((s.get("codec_name") or "").lower(), 0)
+    perfil = (s.get("profile") or "").lower()
+    if cw:
+        for chaves, bonus in AUDIO_PROFILE_BONUS:
+            if any(k in perfil for k in chaves):
+                cw += bonus
+                break
     return (cw, channels_of(s), int(s.get("sample_rate") or 0), bit_rate_of(s))
 
 
