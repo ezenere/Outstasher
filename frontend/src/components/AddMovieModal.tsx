@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { MediaVideo, Movie as MovieIcon, Play, Search, SoundHigh, Xmark } from 'iconoir-react'
+import { Folder, MediaVideo, Movie as MovieIcon, Play, Search, SoundHigh, Xmark } from 'iconoir-react'
 import { api, post, type ConvertOptions, type Destination, type Job, type Language, type Movie, type MoviePage } from '../api'
 import AdvancedOptions from './AdvancedOptions'
+import FolderPicker from './FolderPicker'
 import { useScrollLock } from './ui'
 
 interface Props {
@@ -11,9 +12,16 @@ interface Props {
   onClose: () => void
 }
 
-/** Popup de conversão manual: escolhe o filme no TMDB, digita os caminhos dos
- *  dois arquivos já no disco e o destino — o merge segue o pipeline normal
- *  (alinhamento, fila de conversão, progresso no detalhe do job). */
+/** Pasta de um caminho, para o navegador reabrir onde o usuário parou. */
+const pastaDe = (p: string) => {
+  const i = p.trim().lastIndexOf('/')
+  return i > 0 ? p.trim().slice(0, i) : null
+}
+
+/** Popup de conversão manual: escolhe o filme no TMDB, aponta os dois arquivos
+ *  já no disco (pelo navegador de pastas do servidor ou digitando) e o destino
+ *  — o merge segue o pipeline normal (alinhamento, fila de conversão,
+ *  progresso no detalhe do job). */
 export default function AddMovieModal({ destinations, defaultDestId, onClose }: Props) {
   const [languages, setLanguages] = useState<Language[]>([])
   const [language, setLanguage] = useState('pt')
@@ -26,6 +34,8 @@ export default function AddMovieModal({ destinations, defaultDestId, onClose }: 
   const [destId, setDestId] = useState<number | null>(defaultDestId)
   const [advanced, setAdvanced] = useState<ConvertOptions | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  // qual campo o navegador de pastas está preenchendo
+  const [picking, setPicking] = useState<null | 'video' | 'audio'>(null)
   const [error, setError] = useState<string | null>(null)
   const navigate = useNavigate()
   useScrollLock()
@@ -153,25 +163,24 @@ export default function AddMovieModal({ destinations, defaultDestId, onClose }: 
           )}
         </div>
 
-        {/* 2. arquivos */}
-        <label className="mt-4 block text-sm">
-          <span className="flex items-center gap-1.5 text-zinc-400"><MediaVideo width={14} height={14} /> Arquivo de vídeo (caminho no servidor)</span>
-          <input
-            value={videoPath}
-            onChange={(e) => setVideoPath(e.target.value)}
-            placeholder="/mnt/d/filmes/Filme.2014.1080p.mkv"
-            className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 font-mono text-xs outline-none focus:border-blue-500"
-          />
-        </label>
-        <label className="mt-3 block text-sm">
-          <span className="flex items-center gap-1.5 text-zinc-400"><SoundHigh width={14} height={14} /> Arquivo com o áudio dublado (caminho no servidor)</span>
-          <input
-            value={audioPath}
-            onChange={(e) => setAudioPath(e.target.value)}
-            placeholder="/mnt/d/filmes/Filme.Dublado.mkv"
-            className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 font-mono text-xs outline-none focus:border-blue-500"
-          />
-        </label>
+        {/* 2. arquivos — pelo navegador do servidor (o mesmo do modal de série)
+            ou digitados à mão, para quem já sabe o caminho */}
+        <ArquivoField
+          id="mm-video" icon={MediaVideo}
+          label="Arquivo de vídeo (caminho no servidor)"
+          value={videoPath} onChange={setVideoPath}
+          placeholder="/mnt/.../Filme.2014.1080p.mkv"
+          onBrowse={() => setPicking('video')}
+          className="mt-4"
+        />
+        <ArquivoField
+          id="mm-audio" icon={SoundHigh}
+          label="Arquivo com o áudio dublado (caminho no servidor)"
+          value={audioPath} onChange={setAudioPath}
+          placeholder="/mnt/.../Filme.Dublado.mkv"
+          onBrowse={() => setPicking('audio')}
+          className="mt-3"
+        />
 
         {/* 3. idioma + destino */}
         <div className="mt-3 flex flex-col gap-3 sm:flex-row">
@@ -225,6 +234,57 @@ export default function AddMovieModal({ destinations, defaultDestId, onClose }: 
             {submitting ? 'Validando arquivos...' : <><Play width={15} height={15} /> Converter</>}
           </button>
         </div>
+      </div>
+
+      {picking && (
+        <FolderPicker
+          mode="file"
+          title={picking === 'video' ? 'Arquivo de vídeo (original)'
+            : 'Arquivo com o áudio dublado'}
+          start={pastaDe(picking === 'video' ? videoPath : audioPath)}
+          onPick={(p) => {
+            picking === 'video' ? setVideoPath(p) : setAudioPath(p)
+            setPicking(null)
+          }}
+          onClose={() => setPicking(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+function ArquivoField({ id, icon: Icon, label, value, onChange, placeholder,
+                       onBrowse, className }: {
+  id: string
+  icon: typeof MediaVideo
+  label: string
+  value: string
+  onChange: (v: string) => void
+  placeholder: string
+  onBrowse: () => void
+  className?: string
+}) {
+  return (
+    <div className={`text-sm ${className ?? ''}`}>
+      <label htmlFor={id} className="flex items-center gap-1.5 text-zinc-400">
+        <Icon width={14} height={14} /> {label}
+      </label>
+      <div className="mt-1 flex gap-2">
+        <input
+          id={id}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          className="min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 font-mono text-xs outline-none focus:border-blue-500"
+        />
+        <button
+          type="button"
+          onClick={onBrowse}
+          title="Procurar no servidor"
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-700 px-3 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+        >
+          <Folder width={14} height={14} /> Procurar
+        </button>
       </div>
     </div>
   )
