@@ -663,7 +663,8 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         outs.append((o, cdc, br))
     if extras:
         log("Áudios do dublado além do alvo (mesma montagem): "
-            + ", ".join(ex["lang"] for ex in extras))
+            + ", ".join(ex["lang"] + (f" [{ex['especial']}]" if ex.get("especial") else "")
+                        for ex in extras))
     filter_complex = ";".join(chains)
 
     Path(output).parent.mkdir(parents=True, exist_ok=True)
@@ -729,8 +730,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         # muxer do ffmpeg simplesmente não existe nele.
         if has_mkvmerge() and not in_opts:
             cmd2 = _mkvmerge_cmd(str(output), orig_path, str(dub_mka),
-                                 iso, probe_orig, subs_prontas,
-                                 [ex["lang"] for ex in extras])
+                                 iso, probe_orig, subs_prontas, extras)
             p2 = _run_mkvmerge(cmd2, on_progress)
             if p2.returncode >= 2:   # 1 = só avisos; 2 = erro de verdade
                 raise merger.MergeError(
@@ -767,7 +767,9 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         for k, ex in enumerate(extras, start=1):
             cmd2 += ["-map", f"1:a:{k}",
                      f"-metadata:s:a:{n_orig_a + k}", f"language={ex['lang']}",
-                     f"-disposition:a:{n_orig_a + k}", "0"]
+                     f"-disposition:a:{n_orig_a + k}", ex.get("especial") or "0"]
+            if ex.get("title"):
+                cmd2 += [f"-metadata:s:a:{n_orig_a + k}", f"title={ex['title']}"]
         # legendas do original intactas — TODAS: legenda comum é o motivo
         # de existirem, e é a intercalação que se adapta a elas (abaixo)
         n_orig_s = len(merger.get_streams(probe_orig, "subtitle"))
@@ -860,24 +862,51 @@ def _dub_chains(slices: list[dict], dub_inp: str, orig_inp: str | None,
     return chains, out
 
 
+def _tipo_especial(st: dict) -> str | None:
+    """'visual_impaired' | 'comment' | 'hearing_impaired' quando a faixa NÃO é
+    a mixagem comum do idioma (audiodescrição, comentário...). Faixa assim
+    convive com a do mesmo idioma em vez de competir com ela."""
+    disp = st.get("disposition") or {}
+    for flag in ("visual_impaired", "comment", "hearing_impaired"):
+        if disp.get(flag) == 1:
+            return flag
+    titulo = ((st.get("tags") or {}).get("title") or "").lower()
+    if any(t in titulo for t in ("audiodescri", "audio description", "descriptive",
+                                 "narrat", " ad)", "(ad")):
+        return "visual_impaired"
+    if "comment" in titulo or "coment" in titulo:
+        return "comment"
+    return None
+
+
 def _extra_dub_audio(probe_orig: dict, probe_dub: dict, iso: str) -> list[dict]:
-    """Idiomas de áudio que SÓ o dublado tem (fora o alvo e 'und'): o melhor
-    stream de cada um — política do caminho rápido (melhor áudio por idioma
-    entre os dois arquivos; idioma que o original também tem fica com o do
-    original, intocado)."""
+    """Faixas de áudio do dublado que a saída ainda não tem: os idiomas que só
+    ele tem (o melhor stream de cada, como no caminho rápido) e as faixas
+    ESPECIAIS — audiodescrição, comentário —, que entram mesmo no idioma do
+    original ou do alvo, porque não são a mesma coisa que a mixagem comum."""
     merger.annotate_type_indexes(probe_dub)
     have = {merger.canonical_lang(merger.raw_lang_of(s))
             for s in merger.get_streams(probe_orig, "audio")}
-    best: dict[str, dict] = {}
+    best: dict[tuple[str, str], dict] = {}
     for st in merger.get_streams(probe_dub, "audio"):
         lang = merger.canonical_lang(merger.raw_lang_of(st))
-        if lang in (iso, "und") or lang in have:
+        especial = _tipo_especial(st)
+        if not especial and (lang in (iso, "und") or lang in have):
             continue
-        if lang not in best or merger.audio_score(st) > merger.audio_score(best[lang]):
-            best[lang] = st
-    return [{"lang": lang, "type_index": int(st["_type_index"]),
-             "channels": int(st.get("channels") or 2)}
-            for lang, st in sorted(best.items())]
+        chave = (lang, especial or "")
+        if chave not in best or merger.audio_score(st) > merger.audio_score(best[chave]):
+            best[chave] = st
+    saida = []
+    for (lang, especial), st in sorted(best.items()):
+        titulo = ((st.get("tags") or {}).get("title") or "").strip()
+        if not titulo and especial == "visual_impaired":
+            titulo = "Audiodescrição"
+        elif not titulo and especial == "comment":
+            titulo = "Comentários"
+        saida.append({"lang": lang, "type_index": int(st["_type_index"]),
+                      "channels": int(st.get("channels") or 2),
+                      "especial": especial or None, "title": titulo})
+    return saida
 
 
 def _extract_dub_text_subs(dub_path: str, probe_dub: dict, tmp_dir: Path,
@@ -974,7 +1003,7 @@ def has_mkvmerge() -> bool:
 def _mkvmerge_cmd(output: str, orig_path: str, dub_mka: str, iso: str,
                   probe_orig: dict,
                   extra_subs: list[dict] | None = None,
-                  extra_langs: list[str] | None = None) -> list[str]:
+                  extras: list[dict] | None = None) -> list[str]:
     """Comando do mkvmerge para o mux final: tudo do original (vídeo, áudios,
     legendas, capítulos, anexos) + a faixa dublada remontada, que entra com o
     idioma alvo e como faixa padrão (os áudios do original perdem o padrão).
@@ -987,8 +1016,16 @@ def _mkvmerge_cmd(output: str, orig_path: str, dub_mka: str, iso: str,
     cmd += [orig_path,
             "--language", f"0:{iso}",
             "--default-track-flag", "0:yes"]
-    for k, lang in enumerate(extra_langs or [], start=1):
-        cmd += ["--language", f"{k}:{lang}", "--default-track-flag", f"{k}:no"]
+    for k, ex in enumerate(extras or [], start=1):
+        cmd += ["--language", f"{k}:{ex['lang']}", "--default-track-flag", f"{k}:no"]
+        if ex.get("title"):
+            cmd += ["--track-name", f"{k}:{ex['title']}"]
+        if ex.get("especial") == "visual_impaired":
+            cmd += ["--visual-impaired-flag", f"{k}:yes"]
+        elif ex.get("especial") == "comment":
+            cmd += ["--commentary-flag", f"{k}:yes"]
+        elif ex.get("especial") == "hearing_impaired":
+            cmd += ["--hearing-impaired-flag", f"{k}:yes"]
     cmd.append(dub_mka)
     for it in extra_subs or []:
         titulo = {"forced": "Forçada", "sdh": "SDH"}.get(it["flavor"], "")

@@ -901,3 +901,48 @@ def test_render_nao_deixa_temporario_para_tras(tmp_path):
                       str(dub), str(orig), str(tmp_path / "out.mkv"), "pt",
                       log=lambda m: None)
     assert set(glob.glob("/tmp/edl_render_*")) == antes
+
+
+def test_audiodescricao_do_dublado_nao_e_descartada():
+    """Faixa especial (audiodescrição, comentário) entra mesmo no idioma que o
+    original já tem — não é a mesma coisa que a mixagem comum. Caso real: o
+    dump trazia inglês normal + audiodescrição e o vídeo já tinha inglês; a
+    audiodescrição sumia junto com o inglês redundante."""
+    orig = {"streams": [
+        {"codec_type": "audio", "codec_name": "eac3", "channels": 6,
+         "tags": {"language": "eng"}, "index": 1}]}
+    dub = {"streams": [
+        # inglês comum: redundante, o do original é melhor -> fica de fora
+        {"codec_type": "audio", "codec_name": "aac", "channels": 2,
+         "tags": {"language": "eng"}, "index": 1},
+        # audiodescrição em inglês: entra
+        {"codec_type": "audio", "codec_name": "aac", "channels": 2,
+         "tags": {"language": "eng"}, "disposition": {"visual_impaired": 1},
+         "index": 2},
+        # espanhol comum: idioma que só o dublado tem -> entra
+        {"codec_type": "audio", "codec_name": "aac", "channels": 2,
+         "tags": {"language": "spa"}, "index": 3},
+        # português é o alvo (montado à parte) -> fora
+        {"codec_type": "audio", "codec_name": "aac", "channels": 2,
+         "tags": {"language": "por"}, "index": 4}]}
+    for p in (orig, dub):
+        render_mod.merger.annotate_type_indexes(p)
+    extras = render_mod._extra_dub_audio(orig, dub, "por")
+    assert [(e["lang"], e["especial"]) for e in extras] == [
+        ("eng", "visual_impaired"), ("spa", None)], extras
+    assert extras[0]["title"] == "Audiodescrição"
+    # e o comando do mkvmerge marca a flag da faixa especial
+    cmd = render_mod._mkvmerge_cmd("/tmp/o.mkv", "/tmp/v.mkv", "/tmp/d.mka",
+                                   "por", orig, None, extras)
+    assert "--visual-impaired-flag" in cmd and "1:yes" in cmd, cmd
+
+
+def test_faixa_especial_reconhecida_pelo_titulo():
+    """Sem disposition, o título denuncia: audiodescrição e comentário."""
+    def st(titulo):
+        return {"tags": {"title": titulo}}
+    assert render_mod._tipo_especial(st("English (Audio Description)")) == "visual_impaired"
+    assert render_mod._tipo_especial(st("Audiodescrição")) == "visual_impaired"
+    assert render_mod._tipo_especial(st("Comentários do diretor")) == "comment"
+    assert render_mod._tipo_especial(st("English 5.1")) is None
+    assert render_mod._tipo_especial({"disposition": {"comment": 1}}) == "comment"
