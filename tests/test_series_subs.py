@@ -219,3 +219,30 @@ def test_attach_sidecar_nao_reescreve_o_arquivo(tmp_path):
     assert (tmp_path / "Movie [pt+orig].por.srt").exists()
     forced = (tmp_path / "Movie [pt+orig].por.forced.srt").read_text()
     assert "00:00:00,000 --> 00:00:01,000" in forced
+
+
+def test_sdh_convive_com_a_legenda_comum(tmp_path):
+    """SDH é um sabor próprio (traz som ambiente e quem fala): entra mesmo
+    quando o arquivo já tem a legenda comum daquele idioma — caso real, a SDH
+    de um dump sumia porque o vídeo já trazia a legenda inglesa."""
+    sdh = _srt(tmp_path / "eng.sdh.srt", [(0.0, 1.0, "[porta rangendo]")])
+    comum = _srt(tmp_path / "eng.srt", [(0.0, 1.0, "olá")])
+    embutidas = subs.embedded_text_keys({"streams": [
+        {"codec_type": "subtitle", "codec_name": "subrip",
+         "tags": {"language": "eng"}}]})
+    assert embutidas == {("eng", "normal")}
+    itens, pulados = subs.plan([str(sdh)], [], embutidas)
+    assert [i["flavor"] for i in itens] == ["sdh"], (itens, pulados)
+    # a comum, essa sim, é duplicata
+    itens, pulados = subs.plan([str(comum)], [], embutidas)
+    assert itens == [] and "já existe" in pulados[0]
+
+
+def test_sabor_de_faixa_embutida():
+    def st(**kw):
+        return {"codec_type": "subtitle", "codec_name": "subrip",
+                "tags": {"language": "eng"}, **kw}
+    assert subs._sabor_do_stream(st(disposition={"forced": 1})) == "forced"
+    assert subs._sabor_do_stream(st(disposition={"hearing_impaired": 1})) == "sdh"
+    assert subs._sabor_do_stream(st(tags={"language": "eng", "title": "English (CC)"})) == "sdh"
+    assert subs._sabor_do_stream(st(tags={"language": "eng", "title": "English"})) == "normal"

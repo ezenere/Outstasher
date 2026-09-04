@@ -349,14 +349,31 @@ def edl_fn(segments: list[dict], b_shift: float = 0.0):
 # -------------------- planejar / muxar --------------------
 
 def embedded_text_keys(probe: dict) -> set[tuple[str, str]]:
-    """(idioma, 'forced'|'normal') das legendas de TEXTO já no arquivo."""
+    """(idioma, 'forced'|'sdh'|'normal') das legendas de TEXTO já no arquivo.
+
+    SDH conta como um sabor PRÓPRIO: ela traz som ambiente e identificação de
+    quem fala, então convive com a legenda comum do mesmo idioma em vez de ser
+    descartada como duplicata (caso real: a SDH de um dump sumia porque o
+    vídeo já tinha a legenda comum daquele idioma)."""
     keys = set()
     for s in merger.get_streams(probe, "subtitle"):
         if (s.get("codec_name") or "").lower() not in TEXT_CODECS:
             continue
         lang = merger.canonical_lang(merger.raw_lang_of(s))
-        keys.add((lang, "forced" if merger.is_forced(s) else "normal"))
+        keys.add((lang, _sabor_do_stream(s)))
     return keys
+
+
+def _sabor_do_stream(s: dict) -> str:
+    """'forced' | 'sdh' | 'normal' de uma faixa já embutida."""
+    if merger.is_forced(s):
+        return "forced"
+    if (s.get("disposition") or {}).get("hearing_impaired") == 1:
+        return "sdh"
+    titulo = ((s.get("tags") or {}).get("title") or "").lower()
+    if any(t in titulo for t in ("sdh", "cc", "hearing", "surdo")):
+        return "sdh"
+    return "normal"
 
 
 def plan(orig_subs: list, dub_subs: list, embedded: set[tuple[str, str]],
@@ -373,19 +390,17 @@ def plan(orig_subs: list, dub_subs: list, embedded: set[tuple[str, str]],
     seen: set[tuple[str, str]] = set()
 
     def admit(name: str, side: str, path: str, lang: str, flavor: str) -> None:
-        key = (lang, "forced" if flavor == "forced" else "normal")
+        # cada sabor é uma faixa diferente: forçada, SDH e comum convivem
+        key = (lang, flavor if flavor in ("forced", "sdh") else "normal")
+        rotulo = {"forced": " forçada", "sdh": " SDH"}.get(flavor, "")
         if key in embedded:
-            skipped.append(f"{name}: já existe legenda {lang}"
-                           f"{' forçada' if flavor == 'forced' else ''} embutida")
+            skipped.append(f"{name}: já existe legenda {lang}{rotulo} embutida")
             return
-        if key in seen and flavor != "sdh":
-            skipped.append(f"{name}: duplicada ({lang}) — mantida a do "
+        if key in seen:
+            skipped.append(f"{name}: duplicada ({lang}{rotulo}) — mantida a do "
                            f"{'original' if side == 'dub' else 'mesmo lado'}")
             return
-        if flavor == "sdh" and (lang, "sdh") in seen:
-            skipped.append(f"{name}: duplicada ({lang} SDH)")
-            return
-        seen.add((lang, "sdh") if flavor == "sdh" else key)
+        seen.add(key)
         items.append({"path": path, "side": side, "lang": lang, "flavor": flavor})
 
     for side, subs, video, fb in (("orig", orig_subs, orig_video, orig_lang),
