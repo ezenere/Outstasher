@@ -18,6 +18,7 @@ nenhum capítulo de auditoria é criado — os preenchimentos ficam registrados
 na EDL do job, não na mídia. Num original FUNDIDO (b_window) o ffmpeg desloca
 e recorta os capítulos junto com o -ss/-to.
 """
+import math
 import re
 import shutil
 import subprocess
@@ -78,6 +79,17 @@ def _keyframe_at_or_before(path: str, t: float) -> float | None:
 
 JUNC_VIDEO_TOL_S = 0.125   # bordas da junção pelo vídeo: discordância tolerada
 MIN_ENTRE_CORTES_S = 0.25  # sobra entre dois cortes menor que isto some junto
+GRADE_TOL = 0.05           # quão perto do frame o valor já é considerado "na grade"
+
+
+def _na_grade(t: float, fps: float, lado: str) -> float:
+    """Leva `t` para a grade de frames. Se já está praticamente em cima de um
+    frame, fica nele; senão vai para o de trás ('baixo') ou o da frente
+    ('cima') — o lado que preserva o conteúdo dublado."""
+    n = t * fps
+    if abs(n - round(n)) <= GRADE_TOL:
+        return round(round(n) / fps, 4)
+    return round((math.floor(n) if lado == "baixo" else math.ceil(n)) / fps, 4)
 CUT_EDGE_RADIUS_S = 0.3    # raio da busca da fronteira de cena na borda do corte
 CUT_EDGE_MIN = 20          # dHash: distância que já é mudança de cena
 CUT_EDGE_RATIO = 2.0       # ...e o dobro da 2ª maior (senão é movimento, não corte)
@@ -381,8 +393,14 @@ def _apply_video_cuts(segs, orig_path: str, tmp_dir: Path, log,
         fps = fps_cut
         if fps:
             for seg in alvos:
-                seg.b_start = round(round(seg.b_start * fps) / fps, 4)
-                seg.b_end = round(round(seg.b_end * fps) / fps, 4)
+                # viés SEGURO: o início vai para o frame anterior e o fim para
+                # o seguinte. Sem fronteira de cena clara, a borda herda a
+                # grade de 0,25 s do alinhador, que não cai em frame nenhum —
+                # arredondar para o mais próximo deixava o primeiro frame da
+                # cena removida na saída (caso real). Comer um frame do que
+                # fica é imperceptível; deixar um do que saiu, não.
+                seg.b_start = _na_grade(seg.b_start, fps, "baixo")
+                seg.b_end = _na_grade(seg.b_end, fps, "cima")
         folga = 0.25 / fps if fps else 0.0
         pontos = [max(0.0, t - folga) for seg in alvos for t in (seg.b_start, seg.b_end)
                   if 0.5 < t < dur - 0.5]

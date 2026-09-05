@@ -968,3 +968,18 @@ def test_faixa_especial_reconhecida_pelo_titulo():
     assert render_mod._tipo_especial(st("Comentários do diretor")) == "comment"
     assert render_mod._tipo_especial(st("English 5.1")) is None
     assert render_mod._tipo_especial({"disposition": {"comment": 1}}) == "comment"
+
+
+def test_borda_de_corte_vai_para_o_frame_seguro():
+    """A borda que veio da grade de 0,25 s do alinhador não cai em frame
+    nenhum. O início do corte desce para o frame anterior e o fim sobe para o
+    seguinte: come um frame do que fica (imperceptível) em vez de deixar um
+    frame da cena removida (visível como piscada)."""
+    fps = 24000 / 1001
+    # 1017,75 s não é frame: fica entre 24401 (1017,7269) e 24402 (1017,7686)
+    assert render_mod._na_grade(1017.75, fps, "baixo") == round(24401 / fps, 4)
+    assert render_mod._na_grade(1017.75, fps, "cima") == round(24402 / fps, 4)
+    # valor que JÁ é frame não se move
+    exato = round(24402 / fps, 4)
+    assert render_mod._na_grade(exato, fps, "baixo") == round(24402 / fps, 4)
+    assert render_mod._na_grade(exato, fps, "cima") == round(24402 / fps, 4)
