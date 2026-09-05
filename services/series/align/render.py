@@ -77,6 +77,7 @@ def _keyframe_at_or_before(path: str, t: float) -> float | None:
 
 
 JUNC_VIDEO_TOL_S = 0.125   # bordas da junção pelo vídeo: discordância tolerada
+MIN_ENTRE_CORTES_S = 0.25  # sobra entre dois cortes menor que isto some junto
 CUT_EDGE_RADIUS_S = 0.3    # raio da busca da fronteira de cena na borda do corte
 CUT_EDGE_MIN = 20          # dHash: distância que já é mudança de cena
 CUT_EDGE_RATIO = 2.0       # ...e o dobro da 2ª maior (senão é movimento, não corte)
@@ -411,7 +412,11 @@ def _apply_video_cuts(segs, orig_path: str, tmp_dir: Path, log,
     # real: 4 pontos fora de sincronia num episódio com 54 cortes).
     uniao: list[tuple[float, float]] = []
     for c0, c1 in cortes:
-        if uniao and c0 <= uniao[-1][1] + 1e-6:
+        # ...e o que sobra ENTRE dois cortes quase colados vai junto: um
+        # pedaço de poucos frames espremido entre duas cenas removidas não é
+        # conteúdo, é resto de fronteira — e pisca na saída como um frame
+        # solto (caso real: 33 ms entre dois cortes viraram um flash)
+        if uniao and c0 <= uniao[-1][1] + MIN_ENTRE_CORTES_S:
             if c1 > uniao[-1][1]:
                 uniao[-1] = (uniao[-1][0], c1)
         else:

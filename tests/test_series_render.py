@@ -545,6 +545,28 @@ def test_cut_video_remove_a_cena_sem_dublagem(tmp_path):
 
 @pytest.mark.ffmpeg
 @pytest.mark.skipif(not render_mod.has_mkvmerge(), reason="sem mkvmerge no PATH")
+def test_sobra_de_poucos_frames_entre_cortes_some_junto(tmp_path):
+    """Dois cortes separados por 33 ms: o pedaço entre eles não é conteúdo, é
+    resto de fronteira — e ficaria piscando na saída como um frame solto entre
+    duas cenas removidas (caso real). Ele sai junto, num corte só."""
+    orig = _media(tmp_path / "orig.mkv", 60, seed=1)
+    dub = _media(tmp_path / "dub.mkv", 47, seed=2)
+    g1 = Segment("gap_orig", 20.0, 20.0, 20.0, 26.0, extra={"action": "cut_video"})
+    g2 = Segment("gap_orig", 20.0, 20.0, 26.033, 33.0, extra={"action": "cut_video"})
+    segs = [Segment("match", 0.0, 20.0, 0.0, 20.0, offset=0.0), g1, g2,
+            Segment("match", 20.0, 47.0, 33.0, 60.0, offset=13.0)]
+    logs = []
+    info = render_mod.render(segs, str(dub), str(orig), str(tmp_path / "out.mkv"),
+                             "pt", log=logs.append,
+                             video_reencode={"codec": "av1", "crf": 35,
+                                             "preset": "veryfast"})
+    assert len(info["b_cuts"]) == 1, info["b_cuts"]
+    c0, c1 = info["b_cuts"][0]
+    assert abs(c0 - 20.0) < 0.1 and abs(c1 - 33.0) < 0.1, info["b_cuts"]
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.skipif(not render_mod.has_mkvmerge(), reason="sem mkvmerge no PATH")
 def test_cortes_sobrepostos_nao_deslocam_o_audio(tmp_path):
     """Duas cenas cortadas cujos trechos se SOBREPÕEM (bordas refinadas +
     encaixe em keyframe): o remapeamento não pode contar a sobreposição duas
