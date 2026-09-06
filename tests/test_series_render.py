@@ -404,6 +404,35 @@ def test_aviso_quando_o_muxer_forcou_saida():
     assert m.interleave_warning("tudo certo") is None
 
 
+def test_degrau_de_offset_nao_abre_buraco_no_meio_da_fala():
+    """Caso real (34:41 de um episódio): dois matches vizinhos com offsets
+    125 ms diferentes deixam um vazio de 375 ms no original que ninguém
+    descreve. Preenchê-lo picota a fala; esticar a dublagem anterior custa
+    repetir 125 ms, que ninguém ouve. O critério é a REPETIÇÃO, não o
+    tamanho do vazio."""
+    segs = [
+        Segment("match", 0.14, 563.49, 0.0, 563.35, offset=-0.138),
+        Segment("match", 563.74, 568.52, 563.72, 568.50, offset=-0.0125),
+    ]
+    slices, fills = render_mod._plan_slices(segs, 568.50)
+    assert not fills, "nada de preenchimento no meio da fala"
+    assert [sl["src"] for sl in slices] == ["dub", "dub"]
+    # a primeira fatia cobre o vazio inteiro: a saída não tem furo
+    assert abs(slices[0]["b_end"] - slices[1]["b_start"]) < 1e-6
+
+
+def test_buraco_grande_ainda_e_preenchido():
+    """Esticar só vale para resíduo de fronteira: um vazio de vários segundos
+    é falta de dublagem de verdade e repetir a fatia anterior por cima dele
+    seria pior que preencher."""
+    segs = [
+        Segment("match", 0.0, 100.0, 0.0, 100.0, offset=0.0),
+        Segment("match", 100.0, 200.0, 105.0, 205.0, offset=5.0),
+    ]
+    slices, fills = render_mod._plan_slices(segs, 205.0)
+    assert len(fills) == 1 and abs(fills[0]["b_end"] - fills[0]["b_start"] - 5.0) < 1e-6
+
+
 def test_intercalacao_frouxa_e_consertada_pelo_mkvmerge(tmp_path, monkeypatch):
     """Avisar não basta: a faixa que ficou atrasada demais fica INALCANÇÁVEL
     POR SEEK (o player lista a dublagem e não toca nada nos primeiros minutos

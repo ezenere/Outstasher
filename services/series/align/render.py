@@ -32,9 +32,13 @@ from services.series.align.classify import Segment
 
 # tolerância para "fatia colada na anterior" (evita micro-gaps de arredondamento)
 _EPS = 0.02
-# buraco entre duas fatias de dublagem até isto é arredondamento (grade de
-# 0,25 s do vídeo), não falta de dublagem: a fatia anterior estende
-SMALL_HOLE_S = 0.35
+# buraco NÃO descrito pela EDL entre duas fatias de dublagem: a fatia
+# anterior estende por cima dele. Quem manda é o quanto de dublagem isso
+# REPETE (o artefato audível), não o tamanho do buraco — dois matches com
+# offsets 125 ms diferentes deixam um vazio de 375 ms cujo custo de esticar
+# é só a repetição de 125 ms, e um vazio no meio de uma fala custa MUITO mais
+DUP_MAX_S = 0.35
+HOLE_MAX_S = 2.0
 
 
 @lru_cache(maxsize=1)
@@ -1163,12 +1167,18 @@ def _plan_slices(segs: list[Segment],
         b0 = max(b0, cursor)
         if b0 > cursor + _EPS:
             hole = b0 - cursor
-            if hole <= SMALL_HOLE_S and slices and slices[-1]["src"] == "dub" \
-                    and not slices[-1].get("tempo"):
-                # sobra de arredondamento entre duas fatias de dublagem
-                # (fronteiras do vídeo vêm quantizadas a 0,25 s): a dublagem
-                # anterior CONTINUA por esses ms — jamais áudio original no
-                # meio da fala
+            estica = (slices and slices[-1]["src"] == "dub"
+                      and not slices[-1].get("tempo"))
+            # quanto de dublagem seria REPETIDO ao esticar: o que a fatia
+            # anterior passa a tocar menos o começo da próxima. Sem próxima
+            # fatia dublada, o buraco inteiro é repetição
+            dup = hole
+            if estica and seg.kind in ("match", "drift") and seg.offset is not None:
+                dup = (slices[-1]["src_end"] + hole) - (b0 - seg.offset)
+            if estica and hole <= HOLE_MAX_S and dup <= DUP_MAX_S:
+                # sobra das fronteiras (grade de 0,25 s do vídeo, degraus de
+                # offset do refino): a dublagem anterior CONTINUA por esses ms
+                # — jamais buraco nem áudio original no meio da fala
                 slices[-1]["src_end"] += hole
                 slices[-1]["b_end"] += hole
             else:
