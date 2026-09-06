@@ -828,7 +828,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
             raise merger.MergeError(
                 "mux final falhou: "
                 + merger.describe_exit(p2.returncode, p2.stderr))
-        warn = merger.interleave_warning(p2.stderr)
+        warn = merger.fix_interleaving(str(output), p2.stderr, log)
         if warn:
             log(warn)
         # truncamento silencioso: sob pressão de memória o ffmpeg já saiu com

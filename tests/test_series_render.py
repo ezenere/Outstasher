@@ -7,6 +7,7 @@ dict do job.
 """
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -401,6 +402,57 @@ def test_aviso_quando_o_muxer_forcou_saida():
     assert warn and "INTERCALAÇÃO FROUXA" in warn and "2x" in warn
     assert m.interleave_warning("") is None
     assert m.interleave_warning("tudo certo") is None
+
+
+def test_intercalacao_frouxa_e_consertada_pelo_mkvmerge(tmp_path, monkeypatch):
+    """Avisar não basta: a faixa que ficou atrasada demais fica INALCANÇÁVEL
+    POR SEEK (o player lista a dublagem e não toca nada nos primeiros minutos
+    — caso real de um lote inteiro). Havendo mkvmerge, o arquivo é reescrito
+    em stream copy, que reintercala e refaz os índices."""
+    from services import merger as m
+    err = ("[matroska @ 0x1] Delay between the first packet and last packet "
+           "in the muxing queue is 101000000 > 100000000: forcing output")
+    out = tmp_path / "e.mkv"
+    out.write_bytes(b"mux frouxo")
+
+    chamados = []
+
+    def falso_mkvmerge(cmd, **kw):
+        chamados.append(cmd)
+        Path(cmd[cmd.index("-o") + 1]).write_bytes(b"reintercalado")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(m, "has_mkvmerge", lambda: True)
+    monkeypatch.setattr(m.subprocess, "run", falso_mkvmerge)
+    nota = m.fix_interleaving(str(out), err)
+    assert chamados and chamados[0][0] == "mkvmerge"
+    assert out.read_bytes() == b"reintercalado", "o conserto entra no lugar"
+    assert nota and "mkvmerge" in nota
+    assert not list(tmp_path.glob("*.reinterleave.mkv")), "sem sobra no destino"
+
+
+def test_sem_mkvmerge_o_aviso_continua(tmp_path, monkeypatch):
+    """Sem a ferramenta, o arquivo fica como está — mas o usuário precisa
+    saber que ele pode engasgar."""
+    from services import merger as m
+    err = "queue is 101000000 > 100000000: forcing output"
+    out = tmp_path / "e.mkv"
+    out.write_bytes(b"mux frouxo")
+    monkeypatch.setattr(m, "has_mkvmerge", lambda: False)
+    nota = m.fix_interleaving(str(out), err)
+    assert nota and "INTERCALAÇÃO FROUXA" in nota
+    assert out.read_bytes() == b"mux frouxo"
+
+
+def test_mux_limpo_nao_mexe_no_arquivo(tmp_path, monkeypatch):
+    from services import merger as m
+    out = tmp_path / "e.mkv"
+    out.write_bytes(b"ok")
+    monkeypatch.setattr(m, "has_mkvmerge", lambda: True)
+    monkeypatch.setattr(m.subprocess, "run",
+                        lambda *a, **k: pytest.fail("não devia remuxar"))
+    assert m.fix_interleaving(str(out), "tudo certo") is None
+    assert out.read_bytes() == b"ok"
 
 
 def test_mkvmerge_cmd_marca_dublagem_como_padrao():

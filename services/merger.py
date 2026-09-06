@@ -698,6 +698,42 @@ def interleave_warning(stderr: str) -> str | None:
             f"forçadas do original e refaça.")
 
 
+def has_mkvmerge() -> bool:
+    return shutil.which("mkvmerge") is not None
+
+
+def fix_interleaving(output: str, stderr: str, log=lambda _m: None) -> str | None:
+    """Conserta a intercalação frouxa do arquivo recém-muxado, se houve.
+
+    "Frouxa" nao e cosmetico: uma faixa que ficou atrasada demais fica
+    INALCANCAVEL POR SEEK — o player abre o arquivo, ve a faixa na lista e nao
+    toca nada nos primeiros minutos (caso real: a dublagem de parte de um lote
+    inteiro). O mkvmerge reintercala e reescreve os indices em stream copy;
+    so entao o aviso vira desnecessario.
+
+    Devolve a nota para o usuario (None se o mux ja saiu limpo)."""
+    warn = interleave_warning(stderr)
+    if not warn:
+        return None
+    if Path(output).suffix.lower() != ".mkv" or not has_mkvmerge():
+        return warn
+    tmp = Path(output).with_name(Path(output).stem + ".reinterleave.mkv")
+    log("Intercalação frouxa: reescrevendo o arquivo pelo mkvmerge...")
+    try:
+        p = subprocess.run(["mkvmerge", "-q", "-o", str(tmp), output],
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        if p.returncode >= 2 or not tmp.exists() or tmp.stat().st_size <= 0:
+            tmp.unlink(missing_ok=True)
+            return warn
+        os.replace(tmp, output)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        return warn
+    return ("intercalação frouxa no mux (faixa esparsa) — arquivo reescrito "
+            "pelo mkvmerge, que reintercala e refaz os índices")
+
+
 def out_of_memory(returncode: int, stderr: str) -> bool:
     """O ffmpeg morreu por memória? (alocação recusada pelo teto, ou morto de
     fora pelo OOM killer — que não deixa stderr nenhum)"""
@@ -1077,7 +1113,7 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
     mem_cap = None if (vplan and vplan.encode) else MUX_MEM_LIMIT_GB
     tail = _run_ffmpeg_progress(cmd, out_duration, on_progress, on_start,
                                 total_frames, mem_limit_gb=mem_cap)
-    warn = interleave_warning(tail)
+    warn = fix_interleaving(output, tail, log)
     if warn:
         result.notes.append(warn)
         log(warn)
