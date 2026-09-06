@@ -616,6 +616,50 @@ def _drop_stray_matches(segs: list[Segment], log, dub_path=None, dub_a=None,
     return out
 
 
+SPURIOUS_GAP_S = 2.0      # gap entre matches de MESMO offset: artefato de hash
+SPURIOUS_DIAG_S = 0.10    # ... com os dois lados avançando o mesmo tanto
+
+
+def _drop_spurious_gaps(segs: list[Segment], log) -> list[Segment]:
+    """[match A][gap curto][match B] com A.offset == B.offset e os DOIS lados
+    avançando o mesmo tanto: não houve edição nenhuma ali.
+
+    Uma cena a mais de um dos lados OBRIGA o offset a mudar — se ele não
+    muda, o "gap" é o DP se recusando a casar alguns frames (flash, dissolve,
+    corte seco reencodado diferente). Deixá-lo custa caro: a dublagem daquele
+    trecho é DESCARTADA e o buraco vira preenchimento — no meio de uma fala,
+    quando a junção não caiu num silêncio (caso real: meio segundo de fala
+    sumindo aos 8:20 de um episódio). Fundindo, a dublagem segue contínua.
+
+    Roda depois do refino por áudio de propósito: é o offset MEDIDO que
+    decide, não o do vídeo (quantizado em 0,25 s a 4 fps, ele fabrica
+    degraus de um frame que não existem)."""
+    out: list[Segment] = []
+    i = 0
+    while i < len(segs):
+        s = segs[i]
+        if (s.kind in ("gap_dub", "gap_orig") and out and i + 1 < len(segs)
+                and out[-1].kind == "match" and segs[i + 1].kind == "match"
+                and out[-1].offset is not None
+                and segs[i + 1].offset is not None
+                and out[-1].b_end is not None
+                and segs[i + 1].b_start is not None):
+            prev, nxt = out[-1], segs[i + 1]
+            da = nxt.a_start - prev.a_end
+            db = nxt.b_start - prev.b_end
+            if (abs(nxt.offset - prev.offset) <= MERGE_OFF_TOL_S
+                    and max(abs(da), abs(db)) <= SPURIOUS_GAP_S
+                    and abs(da - db) <= SPURIOUS_DIAG_S):
+                log(f"  gap de {max(da, db):.2f}s em {prev.a_end:.2f}s entre "
+                    f"matches de mesmo offset — sem edição, dublagem segue")
+                prev.a_end, prev.b_end = nxt.a_end, nxt.b_end
+                i += 2
+                continue
+        out.append(s)
+        i += 1
+    return out
+
+
 def _merge_adjacent(segs: list[Segment]) -> list[Segment]:
     """Matches vizinhos, contíguos e com o mesmo offset (5 ms) fundem: menos
     fatias no render — e nenhuma fronteira que não seja uma edição real."""
@@ -1027,8 +1071,9 @@ def refine_offsets(segs: list[Segment], dub_path: str, dub_a: int,
     áudio é contínuo, mede o perfil de offset em cada match e divide onde há
     edição (corte em silêncio), descarta matches espúrios, refina as
     FRONTEIRAS entre segmentos (junção de cena cortada por bissecção; bordas
-    de recap/substituída no silêncio) e funde vizinhos iguais. Retorna a
-    lista NOVA de segmentos (a estrutura pode mudar)."""
+    de recap/substituída no silêncio), descarta gaps que o offset medido
+    desmente e funde vizinhos iguais. Retorna a lista NOVA de segmentos (a
+    estrutura pode mudar)."""
     segs = collapse_wobbles(segs, dub_path, dub_a, orig_path, orig_a, log)
     segs = _resolve_replaced_by_audio(segs, dub_path, dub_a, orig_path, orig_a, log)
     segs = _reclaim_gap_dub(segs, dub_path, dub_a, orig_path, orig_a, log)
@@ -1053,6 +1098,7 @@ def refine_offsets(segs: list[Segment], dub_path: str, dub_a: int,
     # fronteiras ENTRE segmentos: também saem da grade do vídeo para o áudio
     out = _refine_cut_junctions(out, dub_path, dub_a, orig_path, orig_a, log)
     out = _snap_gap_edges(out, dub_path, dub_a, log)
+    out = _drop_spurious_gaps(out, log)
     return _merge_adjacent(out)
 
 

@@ -165,6 +165,51 @@ def test_juncao_com_dublado_a_mais_nao_puxa_original(tmp_path):
     assert any("junção" in l for l in logs)
 
 
+def test_gap_entre_matches_de_mesmo_offset_e_artefato(tmp_path):
+    """Caso real (aos 8:20 de um episódio): o DP abriu um gap_dub de 0,5 s
+    entre dois matches com o MESMO offset. Uma cena a mais de um dos lados
+    obriga o offset a mudar — se ele não muda, não houve edição, e manter o
+    gap custa meio segundo de fala dublada DESCARTADA mais um buraco
+    preenchido (silêncio, ali) no meio da frase."""
+    segs = [
+        Segment("match", 0.0, 500.5, 110.0, 610.5, offset=110.0),
+        Segment("gap_dub", 500.5, 501.0, 611.0, 611.0),
+        Segment("match", 501.0, 513.4, 611.0, 623.4, offset=110.0),
+    ]
+    logs = []
+    out = refine._drop_spurious_gaps(segs, log=logs.append)
+    assert [s.kind for s in out] == ["match"]
+    assert out[0].a_start == 0.0 and out[0].a_end == 513.4
+    assert out[0].b_start == 110.0 and out[0].b_end == 623.4
+    assert any("sem edição" in l for l in logs)
+
+
+def test_gap_com_offset_diferente_dos_lados_fica():
+    """Aqui o offset MUDA na mesma medida do gap: é edição de verdade (cena
+    só no original) e tem que sobreviver — inclusive porque é ela que manda
+    o trecho sem dublagem sair do vídeo."""
+    segs = [
+        Segment("match", 0.0, 100.0, 10.0, 110.0, offset=10.0),
+        Segment("gap_orig", 100.0, 100.0, 110.0, 111.5),
+        Segment("match", 100.0, 200.0, 111.5, 211.5, offset=11.5),
+    ]
+    out = refine._drop_spurious_gaps(segs, log=lambda _m: None)
+    assert [s.kind for s in out] == ["match", "gap_orig", "match"]
+
+
+def test_gap_espurio_longo_demais_nao_e_fundido():
+    """O argumento vale para um punhado de frames que o hash recusou; vários
+    segundos com o mesmo offset dos dois lados é outra coisa (arquivos
+    diferentes, mapeamento errado) e não se resolve fundindo às cegas."""
+    segs = [
+        Segment("match", 0.0, 100.0, 0.0, 100.0, offset=0.0),
+        Segment("gap_dub", 100.0, 105.0, 105.0, 105.0),
+        Segment("match", 105.0, 200.0, 105.0, 200.0, offset=0.0),
+    ]
+    out = refine._drop_spurious_gaps(segs, log=lambda _m: None)
+    assert [s.kind for s in out] == ["match", "gap_dub", "match"]
+
+
 def test_descarte_da_juncao_cabe_inteiro_no_silencio(tmp_path):
     """Caso real (E05 aos 31:10): 905 ms a mais no dublado (preto do intervalo
     comercial) e silêncio de ~1,1 s. Mandar o CORTE para o meio do silêncio
