@@ -795,9 +795,10 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
                 cmd2 += [f"-metadata:s:a:{n_orig_a + k}", f"title={ex['title']}"]
         # legendas do original intactas — TODAS: legenda comum é o motivo
         # de existirem, e é a intercalação que se adapta a elas (abaixo)
-        n_orig_s = len(merger.get_streams(probe_orig, "subtitle"))
-        if n_orig_s:
-            cmd2 += ["-map", "0:s?", "-c:s", "copy"]
+        subs_orig = merger.usable_subtitles(probe_orig)
+        n_orig_s = len(subs_orig)
+        for k, st in enumerate(subs_orig):
+            cmd2 += ["-map", f"0:s:{int(st['_type_index'])}", f"-c:s:{k}", "copy"]
         for k, it in enumerate(subs_prontas):
             idx = n_orig_s + k
             titulo = {"forced": "Forçada", "sdh": "SDH"}.get(it["flavor"], "")

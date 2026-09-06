@@ -979,7 +979,7 @@ def convert_single(src: str, output: str, opts: ConvertOptions,
         kept = [(s, plan_audio(s, opts)) for s in audios]
         dropped = []
 
-    all_subs = merger.get_streams(probe, "subtitle")
+    all_subs = merger.usable_subtitles(probe)
     subs = [] if opts.subtitles == "none" else all_subs
 
     result = merger.MergeResult(output=output)

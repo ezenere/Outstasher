@@ -302,6 +302,22 @@ def sub_needs_reencode_to_mkv(codec_name: str) -> bool:
     return (codec_name or "").lower() in {"mov_text", "tx3g"}
 
 
+# legendas que o Matroska nao guarda e nenhum encoder converte: closed
+# captions EIA-608/708 vem como STREAM propria em alguns releases (iTunes) e
+# derrubam o mux inteiro ("Subtitle codec 94218 is not supported") — sao
+# descartadas na origem, junto com streams de codec desconhecido
+SUB_CODECS_FORA_DO_MKV = {"eia_608", "eia_708", "unknown", "none", ""}
+
+
+def sub_fits_mkv(s: dict) -> bool:
+    return (s.get("codec_name") or "").lower() not in SUB_CODECS_FORA_DO_MKV
+
+
+def usable_subtitles(probe: dict) -> list[dict]:
+    """Legendas do arquivo que cabem num MKV (ver SUB_CODECS_FORA_DO_MKV)."""
+    return [s for s in get_streams(probe, "subtitle") if sub_fits_mkv(s)]
+
+
 # -------------------- offset (GCC-PHAT) --------------------
 
 def _extract_mono_wav(input_path: str, a_type_index: int, output_wav: str,
@@ -398,7 +414,7 @@ def choose_best_audio_per_language(probes: list[dict],
 def pick_subs_for_lang(probes: list[dict], lang: str, video_src: int) -> list[tuple[int, dict]]:
     """Forcada + completa para a lingua, preferindo o arquivo do video."""
     def collect(i: int) -> list[dict]:
-        return [s for s in get_streams(probes[i], "subtitle")
+        return [s for s in usable_subtitles(probes[i])
                 if canonical_lang(raw_lang_of(s)) == lang]
 
     pref, other = collect(video_src), collect(1 - video_src)
@@ -854,7 +870,7 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
         log("Legendas descartadas (opções avançadas)")
     elif convert is not None and convert.subtitles == "all":
         for src_i in (ref_input, other_input):
-            selected_subs.extend((src_i, s) for s in get_streams(probes[src_i], "subtitle"))
+            selected_subs.extend((src_i, s) for s in usable_subtitles(probes[src_i]))
     else:
         for lang in audio_langs:
             selected_subs.extend(pick_subs_for_lang(probes, lang, video_src=ref_input))
