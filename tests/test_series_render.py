@@ -421,6 +421,23 @@ def test_degrau_de_offset_nao_abre_buraco_no_meio_da_fala():
     assert abs(slices[0]["b_end"] - slices[1]["b_start"]) < 1e-6
 
 
+def test_corte_de_video_nao_esconde_o_match_seguinte():
+    """Caso real: entre dois matches ficou um gap_orig de 0,8 ms — o resto de
+    uma cena JÁ cortada do vídeo. Ele não ocupa nada na saída, mas era o
+    "próximo segmento" na conta do vazio, escondendo o match de verdade: sem
+    o match, não dá para saber quanta dublagem a esticada repetiria, e o
+    vazio de 366 ms virava silêncio no meio da fala."""
+    segs = [
+        Segment("match", 0.10, 557.50, 0.0, 557.40, offset=-0.100),
+        Segment("gap_dub", 557.50, 559.00, 557.54, 557.54),
+        Segment("gap_orig", 559.25, 559.25, 557.7656, 557.7664),
+        Segment("match", 559.41, 1132.29, 557.766, 1130.64, offset=-1.641),
+    ]
+    slices, fills = render_mod._plan_slices(segs, 1130.64)
+    assert not fills, "nada de silêncio: a dublagem descartada cobre o vazio"
+    assert [sl["src"] for sl in slices] == ["dub", "dub"]
+
+
 def test_buraco_grande_ainda_e_preenchido():
     """Esticar só vale para resíduo de fronteira: um vazio de vários segundos
     é falta de dublagem de verdade e repetir a fatia anterior por cima dele

@@ -1157,8 +1157,12 @@ def _plan_slices(segs: list[Segment],
                        "b_start": b0, "b_end": b1})
         fills.append({"b_start": b0, "b_end": b1, "why": why})
 
+    # segmento que não chega a ocupar _EPS na saída não existe mais nela (um
+    # corte de vídeo deixa o trecho cortado com span ~0): mantê-lo na lista só
+    # atrapalha, porque ele passa a ser o "próximo segmento" e esconde o match
+    # que vem depois — e é do match seguinte que sai a conta da repetição
     ordered = sorted((s for s in segs if s.b_start is not None
-                      and (s.b_end or 0) > (s.b_start or 0)),
+                      and (s.b_end or 0) - s.b_start > _EPS),
                      key=lambda s: s.b_start)
     for seg in ordered:
         b0, b1 = max(0.0, seg.b_start), min(duration_b, seg.b_end)
