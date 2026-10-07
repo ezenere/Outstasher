@@ -282,19 +282,50 @@ def _tag(job: dict, kind: str) -> str:
     return f"dl-{job['id']}-{kind}"
 
 
-def _map_qbit_path(job: dict, path: str) -> Path:
-    """Traduz o caminho reportado pelo qBittorrent para o caminho local.
+def _qbit_path_candidates(job: dict, path: str) -> list[Path]:
+    """Caminhos locais POSSÍVEIS para um caminho reportado pelo qBittorrent,
+    em ordem de prioridade: o par save_path->local_path do destino do job,
+    os pares de TODOS os destinos cadastrados e o QBIT_PATH_MAP do .env.
 
-    Prioridade: o par save_path->local_path do destino de torrents do job;
-    depois o QBIT_PATH_MAP global do .env (fallback/compatibilidade).
-    """
+    Todos os destinos, e não só o do job, porque o usuário troca a pasta de
+    salvamento no PRÓPRIO qBittorrent quando falta espaço — e aí o caminho
+    reportado passa a ter o prefixo de outro destino. O caminho cru entra
+    por último (qBittorrent na mesma máquina, sem tradução)."""
+    pairs: list[tuple[str, str]] = []
     save = job.get("torrent_save_path") or ""
     local = job.get("torrent_local_path") or ""
     if save and local:
-        mapped = config.map_path(path, [(save, local)])
-        if mapped != path:
-            return Path(mapped)
-    return Path(config.map_path(path, config.QBIT_PATH_MAP))
+        pairs.append((save, local))
+    try:
+        targets = store.list_torrent_targets()
+    except Exception:  # noqa: BLE001 — sem banco (testes, CLI): só o job e o .env
+        targets = []
+    pairs += sorted(((t["save_path"], t["local_path"]) for t in targets
+                     if t.get("save_path") and t.get("local_path")),
+                    key=lambda m: len(m[0]), reverse=True)
+    pairs += list(config.QBIT_PATH_MAP)
+    out: list[Path] = []
+    seen: set[str] = set()
+    for src, dst in pairs:
+        mapped = config.map_path(path, [(src, dst)])
+        if mapped != path and mapped not in seen:
+            seen.add(mapped)
+            out.append(Path(mapped))
+    if path not in seen:
+        out.append(Path(path))
+    return out
+
+
+def _map_qbit_path(job: dict, path: str) -> Path:
+    """Traduz o caminho reportado pelo qBittorrent para o caminho local: o
+    primeiro candidato (ver _qbit_path_candidates) que EXISTE nesta máquina.
+    Sem nenhum existente, devolve o de maior prioridade — quem chama decide
+    o que fazer com um caminho inexistente (e lista os tentados no erro)."""
+    cands = _qbit_path_candidates(job, path)
+    for c in cands:
+        if c.exists():
+            return c
+    return cands[0]
 
 
 def _free_name(path: Path) -> Path:

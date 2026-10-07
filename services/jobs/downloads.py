@@ -327,10 +327,12 @@ async def _replace_torrent(job: dict, kind: str, current: dict | None, nxt: dict
 def _find_video_file(job: dict, content_path: str) -> Path:
     p = _map_qbit_path(job, content_path)
     if not p.exists():
+        tentados = ", ".join(f"'{c}'" for c in runtime._qbit_path_candidates(job, content_path))
         raise RuntimeError(
-            f"Caminho '{p}' (qBittorrent reportou '{content_path}') não existe nesta máquina. "
-            f"Configure o caminho local do destino de torrents em Configurações "
-            f"(ou monte a pasta de downloads nesta máquina).")
+            f"O qBittorrent reportou '{content_path}' e nenhum caminho local correspondente "
+            f"existe nesta máquina (tentados: {tentados}). Se a pasta de salvamento foi "
+            f"trocada no qBittorrent, cadastre em Configurações um destino de torrents com "
+            f"esse caminho de salvamento e o caminho local onde ele está montado.")
     if p.is_file():
         return p
     files = [f for f in p.rglob("*")

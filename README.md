@@ -221,7 +221,11 @@ com **Adicionar episódios** e **recompressão** por episódio, temporada ou sé
 
 - **Destinos do arquivo final** (por mídia), com uso de disco.
 - **Destinos dos torrents**: `save_path` do qBittorrent + caminho local montado
-  nesta máquina.
+  nesta máquina. Na hora de localizar o download, valem **todos** os destinos
+  cadastrados (não só o escolhido no job): se a pasta de salvamento foi trocada
+  no próprio qBittorrent, basta que o novo caminho seja o de algum destino —
+  ganha o primeiro que existe em disco; sem nenhum, o job falha listando os
+  caminhos tentados.
 - **Catálogo**: ffprobe parseado por arquivo, renomear/remover, **Recomprimir**,
   **Marcar ID do TMDB** (renomeia a pasta para `[tmdbid-N]`).
 
