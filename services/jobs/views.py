@@ -132,9 +132,12 @@ def summary() -> list[dict]:
     """Lista mínima de processos EM ANDAMENTO + erros, para o dropdown do
     cabeçalho. Só o essencial para o item da lista (sem candidatos/eventos)."""
     out = []
-    # o dropdown faz polling: do histórico só os torrents (o % do download de
-    # série sai deles); candidatos e episódios não entram na conta
-    for j in _all_jobs(sections=("torrents",)):
+    # o dropdown faz polling: do histórico só os ERROS (concluídos e
+    # cancelados nunca aparecem nele — ler a biblioteca inteira a cada tick
+    # para descartá-la era o custo da rota) e, deles, só os torrents (o % do
+    # download de série sai deles)
+    hist = store.load_jobs_by_status(("error",), sections=("torrents",))
+    for j in list(_jobs.values()) + hist:
         state = _STATE_OF.get(j["status"])
         if state in (None, "done"):  # dropdown ignora concluídos e cancelados
             continue
@@ -247,6 +250,8 @@ def list_group(group: str = "active", page: int = 1,
         jobs_ = [j for j in _jobs.values() if j["status"] in _GROUPS["active"]
                  and (media is None or _media_type(j) == media)]
     elif group == "all":
+        if per_page is not None:
+            return _page_all(max(1, page), per_page, media)
         jobs_ = _all_jobs(media)
     else:
         statuses = _GROUPS.get(group)
@@ -265,6 +270,19 @@ def list_group(group: str = "active", page: int = 1,
 
     jobs_.sort(key=lambda j: j["created_at"], reverse=True)
     return _page(jobs_, page, per_page, len(jobs_), slice_it=True)
+
+
+def _page_all(page: int, per_page: int, media: str | None) -> dict:
+    """Página do grupo 'all': os ativos (memória) + só os terminais que
+    podem cair na página — os page*per_page mais recentes, paginados no SQL.
+    O total soma a memória com a contagem do banco (job ativo não tem status
+    terminal no banco, nem terminal fica na memória: ver runtime._set)."""
+    mem = [j for j in _jobs.values() if media is None or _media_type(j) == media]
+    by_status = store.count_jobs_by_status(media)
+    total = len(mem) + sum(by_status.get(s, 0) for s in _TERMINAL_STATUSES)
+    term = store.load_jobs_by_status(_TERMINAL_STATUSES, page * per_page, 0,
+                                     media=media, sections=store.LIST_SECTIONS)
+    return _page(mem + term, page, per_page, total, slice_it=True)
 
 
 def _page(jobs_: list[dict], page: int, per_page: int | None, total: int,

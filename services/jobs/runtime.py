@@ -127,22 +127,16 @@ PHASE_CONVERT = "convert"  # merge/render/recompressão de fato
 def _ffmpeg_hooks(job: dict, phase: str = PHASE_CONVERT):
     """(log, on_progress) para as conversões de ffmpeg. log escreve no detalhe
     + evento 'merge'; on_progress guarda o progresso em memória (a UI lê via
-    polling) e persiste no banco no máximo a cada 15s (não martela o SQLite a
-    cada tick). Usado por merge, entrega single e recompressão."""
+    polling). Usado por merge, entrega single e recompressão."""
     def log(msg):
         job["detail"] = str(msg)
         _event(job, "merge", str(msg))
 
-    last_persist = [0.0]
-
     def on_progress(info: dict):
+        # só em memória: a barra do merge não vai para o banco (store,
+        # _enc_progress) — depois de um restart o merge recomeça do zero, e
+        # regravar o job a cada 15s só para ela não guardava nada útil
         job["progress"]["merge"] = {**info, "phase": info.get("phase", phase)}
-        now = time.monotonic()
-        # 15s: mais apertado que o PROGRESS_PERSIST_SECONDS do download, porque
-        # a barra de merge muda depressa e vale persistir para retomar após crash
-        if now - last_persist[0] > 15:
-            last_persist[0] = now
-            _persist(job)
 
     return log, on_progress
 

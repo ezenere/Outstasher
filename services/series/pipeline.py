@@ -249,7 +249,10 @@ async def _prepare(job: dict):
     try:
         job["episode_groups"] = await tmdb.tv_episode_groups(job["tmdb_id"])
     except Exception:  # noqa: BLE001 — melhor sem o sinal do que sem o job
-        job["episode_groups"] = []
+        # sem a chave (quem lê usa `or []`): um [] aqui viraria "a série não
+        # tem ordens alternativas" na tabela compartilhada (store,
+        # media_episode_groups) e apagaria as que outro job já conhece
+        job.pop("episode_groups", None)
 
     title = job["movie"]["original_title"]
     jobs._event(job, "info",

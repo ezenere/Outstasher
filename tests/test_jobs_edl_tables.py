@@ -111,6 +111,12 @@ def _data(jid) -> dict:
             "SELECT data FROM jobs WHERE id = ?", (jid,)).fetchone()[0])
 
 
+def _col(jid, col):
+    with store._lock:
+        return store._conn.execute(
+            f"SELECT {col} FROM jobs WHERE id = ?", (jid,)).fetchone()[0]
+
+
 def _count(table, jid) -> int:
     with store._lock:
         return store._conn.execute(
@@ -220,10 +226,12 @@ def test_filme_edl_em_tabela_e_payload_derivado(temp_db):
     job = _filme()
     store.upsert_job(job)
     data = _data(job["id"])
-    # os dois arquivos ficam no documento; a EDL e o payload não
-    assert data["advanced"] == {"video_file": "/dl/o/filme.mkv",
-                                "audio_file": "/dl/d/filme.mkv"}
-    assert data["awaiting"] == {"reason": "alignment_review", "payload": None}
+    # os dois arquivos e o motivo do gate em colunas; a EDL e o payload não
+    # vão para lugar nenhum do documento
+    assert "advanced" not in data and "awaiting" not in data
+    assert (_col(job["id"], "adv_video_file"), _col(job["id"], "adv_audio_file")) \
+        == ("/dl/o/filme.mkv", "/dl/d/filme.mkv")
+    assert _col(job["id"], "awaiting_reason") == "alignment_review"
     assert len(json.dumps(data)) < 1_000
     back = store.get_job(job["id"])
     assert back["advanced"] == json.loads(json.dumps(job["advanced"]))
@@ -364,8 +372,9 @@ def test_le_filme_antigo_com_edl_no_documento(temp_db):
     assert "edl" not in j["advanced"]
     # job ativo regravado sai no formato novo, e volta igual
     store.upsert_job(job)
-    assert "edl" not in _data(doc["id"])["advanced"]
-    assert _data(doc["id"])["awaiting"]["payload"] is None
+    assert "advanced" not in _data(doc["id"]) and "awaiting" not in _data(doc["id"])
+    assert store.get_job(doc["id"])["awaiting"] == {"reason": "alignment_review",
+                                                    "payload": None}
     assert store.get_job(doc["id"])["advanced"] == doc["advanced"]
 
 
@@ -385,8 +394,9 @@ def test_le_serie_antiga_com_edl_no_documento(temp_db):
     assert pub["awaiting"]["payload"] == doc["awaiting"]["payload"]
     store.upsert_job(back)
     assert _count("edls", doc["id"]) == 4
-    assert "payload" in _data(doc["id"])["awaiting"]
-    assert _data(doc["id"])["awaiting"]["payload"] is None
+    assert "awaiting" not in _data(doc["id"])
+    assert store.get_job(doc["id"])["awaiting"] == {"reason": "alignment_review",
+                                                    "payload": None}
     assert store.get_job(doc["id"])["episodes"] == doc["episodes"]
 
 
@@ -469,6 +479,8 @@ def test_payload_de_revisao_nunca_vai_para_o_documento(temp_db):
     job = _filme()
     job["awaiting"]["payload"] = {"episodes": {"filme": job["advanced"]["edl"]}}
     store.upsert_job(job)
-    assert _data(job["id"])["awaiting"] == {"reason": "alignment_review",
-                                            "payload": None}
+    assert "awaiting" not in _data(job["id"])
+    assert _col(job["id"], "awaiting_reason") == "alignment_review"
+    assert store.get_job(job["id"])["awaiting"] == {"reason": "alignment_review",
+                                                    "payload": None}
     assert job["awaiting"]["payload"] is not None          # o dict não é mexido

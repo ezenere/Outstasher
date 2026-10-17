@@ -142,7 +142,8 @@ def test_round_trip_episodios_e_torrents(temp_db):
     # o documento não carrega mais nada disso (nem o relatório)
     data = _data(job["id"])
     assert not any(k in data for k in ("episodes", "torrents", "order_map", "report"))
-    assert data["known_seasons"] == [1, 2]     # depende do TMDB: fica no documento
+    # temporadas conhecidas: metadado da série (media_seasons), derivado
+    assert "known_seasons" not in data and back["known_seasons"] == [1, 2]
 
     # o torrent do plano aponta para o candidato e não repete os campos; o
     # magnet próprio grava os seus

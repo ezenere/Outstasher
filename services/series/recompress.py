@@ -98,8 +98,13 @@ async def _run(job: dict):
     try:
         if job.get("tmdb_id"):
             try:
-                job["movie"] = await tmdb.tv_details(job["tmdb_id"])
-                job["movie"]["original_title"] = job["movie"].get("original_title")
+                info = await tmdb.tv_details(job["tmdb_id"])
+                # mesmo formato do job de série (pipeline._prepare): as
+                # temporadas não fazem parte do `movie`
+                job["movie"] = {k: info[k] for k in
+                                ("id", "original_title", "localized_title",
+                                 "english_title", "original_language", "year",
+                                 "overview", "poster")}
             except Exception:  # noqa: BLE001 — metadado é cosmético aqui
                 pass
         opts = transcode.validate(job["convert"])
