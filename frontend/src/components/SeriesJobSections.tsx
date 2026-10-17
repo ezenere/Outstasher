@@ -335,6 +335,10 @@ function MismatchedGate({ job, onResolved }: { job: Job; onResolved: () => void 
   const attempts = job.awaiting?.payload.attempts ?? 0
   const keys = Object.keys(pool).sort()
   const active = keys.filter((k) => !ignored.has(k))
+  // dublados de episódios já concluídos: reaproveitáveis (episódio duplo num
+  // lado e dividido no outro — o mesmo arquivo serve mais de um original)
+  const done = job.awaiting?.payload.done ?? {}
+  const doneKeys = Object.keys(done).sort()
 
   async function send(decision: object, confirm?: string) {
     if (busy) return
@@ -366,7 +370,7 @@ function MismatchedGate({ job, onResolved }: { job: Job; onResolved: () => void 
 
   const chosenDubs = new Set(Object.values(pairs))
   const validPairs = Object.entries(pairs).filter(([ok, dk]) =>
-    active.includes(ok) && active.includes(dk))
+    active.includes(ok) && (active.includes(dk) || dk in done))
 
   return (
     <section className="mt-6 rounded-xl border border-amber-900/60 bg-amber-950/20 p-4">
@@ -420,12 +424,25 @@ function MismatchedGate({ job, onResolved }: { job: Job; onResolved: () => void 
                       className="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs"
                     >
                       <option value="">— manter como está —</option>
-                      {active.map((dk) => (
-                        <option key={dk} value={dk}
-                          disabled={chosenDubs.has(dk) && pairs[k] !== dk}>
-                          dublado de {dk}: {pool[dk].dubbed}
-                        </option>
-                      ))}
+                      <optgroup label="Desalinhados">
+                        {active.map((dk) => (
+                          <option key={dk} value={dk}
+                            disabled={chosenDubs.has(dk) && pairs[k] !== dk}>
+                            dublado de {dk}: {pool[dk].dubbed}
+                          </option>
+                        ))}
+                      </optgroup>
+                      {doneKeys.length > 0 && (
+                        // sem bloqueio de reuso: o mesmo arquivo pode servir
+                        // vários originais (é o caso do episódio duplo)
+                        <optgroup label="Já concluídos (reaproveitar o mesmo arquivo)">
+                          {doneKeys.map((dk) => (
+                            <option key={dk} value={dk}>
+                              dublado de {dk}: {done[dk].dubbed}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
                     </select>
                   ) : (
                     <span className="truncate" title={ep.dubbed}>{ep.dubbed}</span>

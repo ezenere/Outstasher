@@ -154,6 +154,8 @@ export interface JobGate {
     episode_groups?: { id: string; name: string; type: number; episode_count: number }[]
     /** mismatched_pairs: episódios que falharam por conflito de alinhamento */
     mismatched?: Record<string, { original: string; dubbed: string; error: string }>
+    /** mismatched_pairs: episódios concluídos cujo dublado pode ser reaproveitado */
+    done?: Record<string, { dubbed: string }>
     attempts?: number
     /** manual_pick */
     candidates?: Record<'original' | 'dubbed', Record<string, SeriesCandidate[]>>

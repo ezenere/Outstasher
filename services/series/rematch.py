@@ -39,6 +39,15 @@ def mismatched(job: dict) -> dict:
             and str(ep.get("error") or "").startswith(MISMATCH_PREFIX)}
 
 
+def donors(job: dict) -> dict:
+    """Episódios JÁ CONCLUÍDOS cujo dublado pode ser reaproveitado no casamento
+    manual. Caso real: episódio duplo num lado e dividido no outro — o arquivo
+    dublado de duas partes casa com UM original e conclui; o segundo original
+    precisa do mesmo arquivo (o alinhador por conteúdo acha a metade dele)."""
+    return {k: ep for k, ep in job["episodes"].items()
+            if ep.get("state") == "done" and (ep.get("src") or {}).get("dubbed")}
+
+
 def gate_payload(job: dict) -> dict:
     eps = {}
     for k, ep in sorted(mismatched(job).items()):
@@ -48,7 +57,10 @@ def gate_payload(job: dict) -> dict:
             "dubbed": Path(src.get("dubbed") or "?").name,
             "error": str(ep.get("error") or ""),
         }
-    return {"mismatched": eps, "attempts": int(job.get("rematch_attempts") or 0)}
+    done = {k: {"dubbed": Path(ep["src"]["dubbed"]).name}
+            for k, ep in sorted(donors(job).items())}
+    return {"mismatched": eps, "done": done,
+            "attempts": int(job.get("rematch_attempts") or 0)}
 
 
 def score_all(pool: dict, log=print, on_progress=None) -> list[tuple]:
@@ -111,15 +123,18 @@ def apply_ignores(job: dict, keys: list[str]):
 
 def apply_pairs(job: dict, pairs: dict[str, str], fracs: dict[str, float] | None = None):
     """Religa cada original ao dublado escolhido e devolve os episódios à fila
-    de merge (state=downloaded). O dublado vem de OUTRO episódio do pool — o
-    arquivo, não o episódio: quem manda na identidade é o original."""
+    de merge (state=downloaded). O dublado vem de OUTRO episódio do pool, ou
+    de um já concluído (ver donors) — o arquivo, não o episódio: quem manda
+    na identidade é o original."""
     pool = mismatched(job)
+    doadores = donors(job)
     for ok, dk in pairs.items():
-        if ok not in pool or dk not in pool:
+        if ok not in pool or (dk not in pool and dk not in doadores):
             raise ValueError(f"par inválido: {ok} <- {dk} (fora do pool)")
     # snapshot ANTES de mexer: numa troca A<->B, o segundo par leria o
     # caminho já sobrescrito pelo primeiro
-    dub_de = {k: job["episodes"][k]["src"]["dubbed"] for k in pool}
+    dub_de = {k: job["episodes"][k]["src"]["dubbed"]
+              for k in list(pool) + list(doadores)}
     for ok, dk in pairs.items():
         ep = job["episodes"][ok]
         ep["src"]["dubbed"] = dub_de[dk]
@@ -128,8 +143,9 @@ def apply_pairs(job: dict, pairs: dict[str, str], fracs: dict[str, float] | None
         ep.pop("edl", None)
         ep["output"] = None
         pct = f" ({fracs[ok]:.0%} dos frames)" if fracs and ok in fracs else ""
+        de = f"{dk} (já concluído — mesmo arquivo)" if dk in doadores else dk
         jobs._event(job, "chosen",
-                    f"{ok}: áudio dublado religado ao arquivo de {dk}{pct}")
+                    f"{ok}: áudio dublado religado ao arquivo de {de}{pct}")
 
 
 async def run_auto(job: dict, ignore: list[str]):

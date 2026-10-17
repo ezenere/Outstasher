@@ -95,6 +95,50 @@ def test_aplicar_pares_religa_dublado_e_reenfileira(temp_db):
         # E01 saiu do pool (downloaded) — par com quem não está no pool é erro
 
 
+def _com_duplo_concluido(job: dict) -> dict:
+    """E04 concluído com um dublado DUPLO (duas partes num arquivo só)."""
+    job["episodes"]["S01E04"] = {
+        "season": 1, "episode": 4, "name": "Episodio 4",
+        "air_date": "2020-01-01", "runtime": 40, "state": "done",
+        "error": None, "output": "/dest/S01E04.mkv",
+        "src": {"original": "/x/orig_S01E04.mkv",
+                "dubbed": "/x/dub_S01E04-E05_duplo.mkv"}}
+    return job
+
+
+def test_concluido_aparece_como_doador_no_gate(temp_db):
+    job = _com_duplo_concluido(_job(2))
+    payload = rematch.gate_payload(job)
+    assert set(payload["mismatched"]) == {"S01E01", "S01E02"}
+    assert payload["done"] == {"S01E04": {"dubbed": "dub_S01E04-E05_duplo.mkv"}}
+
+
+def test_dublado_de_concluido_serve_a_mais_de_um_original(temp_db):
+    """Caso real: o lado dublado tem o episódio DUPLO num arquivo, o original
+    tem as duas partes separadas. Uma parte casou e concluiu; a outra (e
+    qualquer outra que precise) reaproveita o MESMO arquivo — e o concluído
+    não é tocado."""
+    job = _com_duplo_concluido(_job(2))
+    rematch.apply_pairs(job, {"S01E01": "S01E04", "S01E02": "S01E04"})
+    for k in ("S01E01", "S01E02"):
+        ep = job["episodes"][k]
+        assert ep["src"]["dubbed"] == "/x/dub_S01E04-E05_duplo.mkv"
+        assert ep["state"] == "downloaded" and ep["error"] is None
+    doador = job["episodes"]["S01E04"]
+    assert doador["state"] == "done"
+    assert doador["output"] == "/dest/S01E04.mkv"
+    assert doador["src"]["dubbed"] == "/x/dub_S01E04-E05_duplo.mkv"
+
+
+def test_doador_precisa_estar_concluido(temp_db):
+    """Episódio que não está no pool nem concluído (pendente, pulado...) não
+    serve de doador — o arquivo dele pode nem existir ainda."""
+    job = _com_duplo_concluido(_job(2))
+    job["episodes"]["S01E04"]["state"] = "skipped_missing"
+    with pytest.raises(ValueError, match="fora do pool"):
+        rematch.apply_pairs(job, {"S01E01": "S01E04"})
+
+
 def test_ignorar_vira_pulo_decidido(temp_db):
     job = _job(2)
     rematch.apply_ignores(job, ["S01E02", "S09E99"])   # inexistente: ignora
