@@ -7,7 +7,7 @@ locais, recompressão) e por mídia (filme x série).
 import asyncio
 from pathlib import Path
 
-from services import catalog, store
+from services import catalog
 from services.jobs import downloads, movies, recompress, runtime, search
 from services.jobs.runtime import (
     _TERMINAL_STATUSES, _cancelling, _delete_output, _event, _has_torrents,
@@ -209,8 +209,7 @@ async def remove(job_id: str, delete_torrents: bool = False) -> bool:
     job = await cancel(job_id, delete_torrents)
     if not job:
         return False
-    _jobs.pop(job_id, None)
-    store.delete_job(job_id)
+    runtime._delete_job(job_id)
     return True
 
 

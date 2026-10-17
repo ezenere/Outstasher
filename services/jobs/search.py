@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, unquote_plus, urlparse
 import config
 from services import jackett, selector, store, tmdb
 from services.jobs.runtime import (
-    MAX_SELECTABLE, _event, _needed_torrents, _set)
+    MAX_SELECTABLE, _event, _needed_torrents, _persist, _set)
 
 
 def custom_candidate(url: str, title: str = "") -> dict:
@@ -336,7 +336,7 @@ async def _search(job: dict):
         "audio": [_slim(c, f"a{i}") for i, c in enumerate(audio_viable[:MAX_SELECTABLE])],
         "video": [_slim(c, f"v{i}") for i, c in enumerate(video_viable[:MAX_SELECTABLE])],
     }
-    store.upsert_job(job)
+    _persist(job)
 
 
 def _auto_pick(job: dict) -> tuple[dict | None, dict | None]:

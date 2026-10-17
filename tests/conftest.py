@@ -114,6 +114,9 @@ def temp_db(tmp_path, monkeypatch):
     jobs._tasks.clear()
     jobs._ffmpeg_procs.clear()
     jobs._cancelling.clear()
+    jobs.runtime._dirty.clear()
+    jobs.runtime._last_persist.clear()
+    jobs.runtime._removed.clear()
     catalog._library_cache.update(at=None, keys=frozenset())
 
     return store

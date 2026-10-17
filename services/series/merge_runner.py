@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 import config
-from services import merger, store, transcode
+from services import merger, transcode
 from services import jobs
 from services.series import naming, subs
 
@@ -99,7 +99,7 @@ async def merge_all(job: dict):
             finally:
                 job["progress"]["merge"] = None
                 job["output"] = None
-        store.upsert_job(job)
+        jobs._persist(job)
 
     await _wrap_up(job)
 

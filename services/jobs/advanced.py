@@ -9,7 +9,7 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 
-from services import merger, store
+from services import merger
 from services.series import subs as ext_subs
 from services.jobs import delivery, runtime
 from services.jobs.runtime import (
@@ -280,7 +280,7 @@ async def resolve_review(job_id: str, reason: str, decision: dict) -> dict | Non
     edl_dict["review"]["required"] = needs
     if needs:
         job["awaiting"]["payload"] = {"episodes": {"filme": edl_dict}}
-        store.upsert_job(job)
+        runtime._persist(job)
         return _public(job)
     job.pop("awaiting", None)
     _event(job, "chosen", "Revisão de alinhamento resolvida")

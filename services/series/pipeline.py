@@ -521,7 +521,7 @@ def _store_plan(job: dict, plans: dict):
             torrents.append(entry)
             n += 1
     job["torrents"] = torrents
-    store.upsert_job(job)
+    jobs._persist(job)
 
 
 def _aired_ref(job: dict, search_ref: tuple[int, int]) -> tuple[int, int]:
@@ -1009,7 +1009,7 @@ def _apply_manual(job: dict, decision: dict):
     job["torrents"] = [t for t in job["torrents"] if t["coverage"]]
     jobs._event(job, "chosen",
                 f"Modo manual: {len(picks)} episódio(s) com escolha explícita")
-    store.upsert_job(job)
+    jobs._persist(job)
 
 
 def _find_candidate(job: dict, role: str, candidate_id: str) -> dict:
@@ -1159,7 +1159,7 @@ def _apply_manual_torrents(job: dict, decision: dict):
                 f"({', '.join(sorted(roles_touched))})"
                 + (f", {n_custom} magnet(s)/link(s) próprio(s)" if n_custom else "")
                 + " — lacunas passam pelo gate normal")
-    store.upsert_job(job)
+    jobs._persist(job)
 
 
 # -------------------- download --------------------
@@ -1293,7 +1293,7 @@ async def _wait_downloads(job: dict):
                       f"não os contém) — decidir antes de continuar")
                 return
             if time.monotonic() - last_persist >= config.PROGRESS_PERSIST_SECONDS:
-                store.upsert_job(job)
+                jobs._persist(job)
                 last_persist = time.monotonic()
         except jobs._CONN_ERRORS as e:
             if not conn_lost:
@@ -1393,7 +1393,7 @@ async def _ensure_file_selection(job: dict, t: dict):
         # lacunas novas passam pelo gate de novo, mesmo que o usuário já
         # tenha aceitado lacunas antes (são OUTRAS lacunas)
         job.pop("_gaps_accepted", None)
-        store.upsert_job(job)
+        jobs._persist(job)
 
 
 async def _readd(job: dict, t: dict):
@@ -1446,7 +1446,7 @@ async def _replace_entry(job: dict, t: dict, nxt: dict, reason: str):
     await jobs._qbit.add(nxt.get("magnet") or nxt["link"],
                          f"{shared_tag(job)},{t['tag']}", save_path)
     jobs._event(job, "qbit", f"{reason}: {nxt['title']}")
-    store.upsert_job(job)
+    jobs._persist(job)
 
 
 async def _switch_stalled(job: dict, t: dict, limit_min: int) -> bool:
@@ -1560,7 +1560,7 @@ async def _resolve_episode_files(job: dict):
             faltou = [ROLE_LABEL[r] for r in roles_of(job) if r not in ep["src"]]
             ep["state"] = "failed"
             ep["error"] = f"arquivo não baixado/encontrado: {', '.join(faltou)}"
-    store.upsert_job(job)
+    jobs._persist(job)
 
 
 def _find_episode_file(root, season: int, episode: int) -> Path:

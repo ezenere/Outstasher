@@ -12,8 +12,8 @@ from pathlib import Path
 from services import merger, store, tmdb, transcode
 from services.jobs import advanced, delivery, downloads, search
 from services.jobs.runtime import (
-    KINDS, _TERMINAL_STATUSES, _event, _fail, _get_merge_lock, _jobs,
-    _needed_torrents, _public, _set, _spawn)
+    KINDS, _TERMINAL_STATUSES, _delete_job, _event, _fail, _get_merge_lock,
+    _jobs, _needed_torrents, _public, _set, _spawn)
 
 
 async def create(tmdb_id: int, language: str, mode: str = "auto",
@@ -36,8 +36,7 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
     # readicionar o filme descarta erro anterior da MESMA variante (tmdb+idioma+
     # kind). Concluído/cancelado persistem (não são apagados na readição).
     for old_id in store.error_jobs_for(tmdb_id, language, kind):
-        _jobs.pop(old_id, None)
-        store.delete_job(old_id)
+        _delete_job(old_id)
     # apenas baixar: o produto final fica na pasta dos torrents, então o job
     # não precisa (nem usa) um destino de arquivo final
     dest = None
@@ -162,8 +161,7 @@ async def create_manual(tmdb_id: int, language: str, video_path: str, audio_path
 
     # readicionar o filme descarta erro anterior da mesma variante (como no create)
     for old_id in store.error_jobs_for(tmdb_id, language, "both"):
-        _jobs.pop(old_id, None)
-        store.delete_job(old_id)
+        _delete_job(old_id)
     dest = store.get_destination(destination_id) if destination_id else None
     if dest is not None and dest.get("media", "movie") != "movie":
         raise ValueError(f"O destino '{dest['label']}' é da biblioteca de "

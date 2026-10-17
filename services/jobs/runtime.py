@@ -8,7 +8,9 @@ Camada de baixo: não importa nenhum outro módulo do pacote.
 """
 
 import asyncio
+import atexit
 import subprocess
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -140,7 +142,7 @@ def _ffmpeg_hooks(job: dict, phase: str = PHASE_CONVERT):
         # a barra de merge muda depressa e vale persistir para retomar após crash
         if now - last_persist[0] > 15:
             last_persist[0] = now
-            store.upsert_job(job)
+            _persist(job)
 
     return log, on_progress
 
@@ -232,18 +234,147 @@ def _lookup(job_id: str) -> dict | None:
     return _jobs.get(job_id) or store.get_job(job_id)
 
 
-def _event(job: dict, kind: str, message: str, data=None):
+# -------------------- persistência do documento do job --------------------
+# O código muta o dict do job e chama _event — e conta, sem dizer, que o evento
+# leva a mutação para o banco. Regravar o documento inteiro a CADA evento era
+# o custo: um job de série tem centenas de KB e o merge emite milhares de
+# linhas de log (cada uma reescrevia o job). Agora o evento só marca o job como
+# sujo; o documento grava no máximo uma vez por config.EVENT_PERSIST_SECONDS:
+#   - primeiro evento depois de um silêncio (ou o primeiro do job neste
+#     processo, que é o que cria a linha): grava na hora;
+#   - eventos dentro da janela: job fica em _dirty e o flush periódico
+#     (persist_loop, no lifespan do servidor) grava quando a janela fecha;
+#   - _set (mudança de status) grava sempre na hora;
+#   - desligamento (lifespan e atexit): flush de tudo que estiver sujo.
+# Chamado também de threads (log do ffmpeg roda via to_thread), por isso o lock.
+_persist_lock = threading.Lock()
+_last_persist: dict[str, float] = {}  # job_id -> monotonic() da última gravação
+_dirty: dict[str, dict] = {}          # job_id -> dict com mutação ainda não gravada
+# jobs removidos neste processo: nada mais grava (nem evento) para eles — um
+# flush atrasado ou um evento tardio da task que morria não pode ressuscitar a
+# linha que o usuário apagou.
+_removed: set[str] = set()
+
+
+def _persist(job: dict):
+    """Grava o documento do job AGORA e o tira da lista de sujos."""
+    jid = job["id"]
+    with _persist_lock:
+        if jid in _removed:
+            return
+        # limpa ANTES de gravar: mutação feita durante a gravação (outra
+        # thread) volta a marcar sujo e sai no próximo flush
+        _dirty.pop(jid, None)
+        _last_persist[jid] = time.monotonic()
+    store.upsert_job(job)
+
+
+def _touch(job: dict):
+    """Mutação a persistir sem urgência: grava já se a janela passou, senão
+    marca sujo para o flush."""
+    jid = job["id"]
+    with _persist_lock:
+        if jid in _removed:
+            return
+        last = _last_persist.get(jid)
+        if (last is not None
+                and time.monotonic() - last < config.EVENT_PERSIST_SECONDS):
+            _dirty[jid] = job
+            return
+    _persist(job)
+
+
+def flush_dirty(force: bool = False) -> int:
+    """Grava os jobs sujos cuja janela fechou (todos, com force). Devolve
+    quantos gravou. Só ATUALIZA (create=False): a linha já foi criada pela
+    primeira gravação, e um job apagado por fora (store.delete_job direto)
+    não volta."""
+    now = time.monotonic()
+    with _persist_lock:
+        due = [j for jid, j in _dirty.items()
+               if force or now - _last_persist.get(jid, 0.0)
+               >= config.EVENT_PERSIST_SECONDS]
+        for j in due:
+            _dirty.pop(j["id"], None)
+            _last_persist[j["id"]] = now
+    written = 0
+    for j in due:
+        try:
+            store.upsert_job(j, create=False)
+            written += 1
+        except RuntimeError:
+            # job sujo é job em movimento: se uma thread (merge via to_thread)
+            # mexeu num dict no meio do json.dumps, tenta de novo no próximo
+            # tick em vez de perder a mutação
+            with _persist_lock:
+                if j["id"] not in _removed:
+                    _dirty.setdefault(j["id"], j)
+    return written
+
+
+def _forget(job_id: str):
+    """O job foi (ou vai ser) apagado do banco: descarta o que estiver sujo e
+    bloqueia gravações futuras dele."""
+    with _persist_lock:
+        _removed.add(job_id)
+        _dirty.pop(job_id, None)
+        _last_persist.pop(job_id, None)
+
+
+def _delete_job(job_id: str):
+    """Remove o job da memória e do banco sem deixar flush pendente."""
+    _forget(job_id)
+    _jobs.pop(job_id, None)
+    store.delete_job(job_id)
+
+
+async def persist_loop():
+    """Flush periódico dos jobs sujos (task do lifespan do servidor)."""
+    tick = min(1.0, config.EVENT_PERSIST_SECONDS)
+    while True:
+        await asyncio.sleep(tick)
+        try:
+            flush_dirty()
+        except Exception as e:  # noqa: BLE001 — o loop não pode morrer
+            print(f"[jobs] flush dos jobs sujos falhou: {e}")
+
+
+def _flush_at_exit():
+    # scripts que importam o pacote sem o servidor (sem persist_loop) também
+    # saem com o estado final gravado
+    try:
+        flush_dirty(force=True)
+    except Exception:  # noqa: BLE001 — banco já fechado/indisponível na saída
+        pass
+
+
+atexit.register(_flush_at_exit)
+
+
+def _add_event(job: dict, kind: str, message: str, data=None) -> bool:
+    """Grava só a linha do evento (sem o documento do job)."""
+    if job["id"] in _removed:
+        return False  # job apagado: evento tardio viraria linha órfã
     ev = {"ts": datetime.now().isoformat(timespec="seconds"), "kind": kind, "message": message}
     if data is not None:
         ev["data"] = data
     store.add_event(job["id"], ev)
-    store.upsert_job(job)  # status/detail quase sempre mudam junto com o evento
+    return True
+
+
+def _event(job: dict, kind: str, message: str, data=None):
+    if _add_event(job, kind, message, data):
+        # o documento quase sempre mudou junto com o evento (detail, estado de
+        # episódio, hash de torrent...): marca para gravar, com janela
+        _touch(job)
 
 
 def _set(job: dict, status: str, detail: str = ""):
     job["status"] = status
     job["detail"] = detail
-    _event(job, "status", detail or status)  # persiste o estado final no banco
+    _add_event(job, "status", detail or status)
+    # transição de status é durável na hora (não espera a janela do _event)
+    _persist(job)
     if status == "done":
         # entrou filme novo no destino: a próxima busca refaz o scan da coleção
         catalog.invalidate_library()

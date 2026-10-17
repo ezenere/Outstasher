@@ -83,9 +83,19 @@ POLL_ACTIVE_WINDOW_SECONDS = 10.0
 # de quanto em quanto tempo o progresso é PERSISTIDO no banco. Consultar o
 # qBittorrent é barato, mas gravar no SQLite a cada tick é desperdício — o
 # progresso é só um número que a UI já lê do backend em memória. Eventos reais
-# (download concluído, troca de torrent, warning...) persistem na hora via
-# _event; aqui é só o "mero progresso" que fica throttled.
+# (download concluído, troca de torrent, warning...) persistem via _event (ver
+# EVENT_PERSIST_SECONDS); aqui é só o "mero progresso" que fica throttled.
 PROGRESS_PERSIST_SECONDS = 60
+# janela de agrupamento das regravações do job disparadas por _event. O evento
+# em si (linha na tabela events) grava sempre na hora; o DOCUMENTO do job é que
+# grava no máximo uma vez por janela — o primeiro evento depois de um silêncio
+# grava na hora, os seguintes só marcam o job como sujo e um flush periódico
+# (e o desligamento do servidor) grava o estado final. Antes cada evento
+# regravava o documento inteiro: um job de série tem centenas de KB e o merge
+# emite milhares de linhas de log. Curta de propósito (e não os 60s do
+# progresso): o servidor já travou sob I/O, e num travamento o que se perde é
+# o que mudou dentro da janela. Mudança de status (_set) grava sempre na hora.
+EVENT_PERSIST_SECONDS = 5.0
 
 # Idiomas suportados para a faixa dublada.
 # tmdb: codigo de idioma usado para buscar o titulo traduzido no TMDB.

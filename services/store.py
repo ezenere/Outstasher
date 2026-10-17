@@ -457,14 +457,21 @@ def save_languages(languages: list[dict], subtitle_markers: list[str]):
     load_language_config()
 
 
-def upsert_job(job: dict):
+def upsert_job(job: dict, create: bool = True):
+    """Grava o job. Com create=False só ATUALIZA uma linha existente: é o que o
+    flush atrasado de jobs sujos usa (jobs.runtime) — se o job foi removido no
+    meio da janela, a gravação atrasada não pode recriá-lo."""
     doc = {k: v for k, v in job.items() if k != "events"}
+    data = json.dumps(doc, ensure_ascii=False)
     with _lock:
-        _conn.execute(
-            "INSERT INTO jobs (id, created_at, status, data) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET status = excluded.status, data = excluded.data",
-            (job["id"], job["created_at"], job["status"],
-             json.dumps(doc, ensure_ascii=False)))
+        if create:
+            _conn.execute(
+                "INSERT INTO jobs (id, created_at, status, data) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET status = excluded.status, data = excluded.data",
+                (job["id"], job["created_at"], job["status"], data))
+        else:
+            _conn.execute("UPDATE jobs SET status = ?, data = ? WHERE id = ?",
+                          (job["status"], data, job["id"]))
         _conn.commit()
 
 

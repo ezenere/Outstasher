@@ -34,9 +34,9 @@ from services.jobs import (
 from services.jobs.runtime import (
     KINDS, MAX_SELECTABLE, VIDEO_EXTENSIONS, _CONN_ERRORS, _cancelling,
     _delete_output, _event, _fail, _ffmpeg_hooks, _ffmpeg_procs,
-    _get_merge_lock, _jobs, _lookup, _map_qbit_path, _needed_torrents, _public,
-    _qbit, _register_proc, _set, _spawn, _tasks, load, poll_interval,
-    progress_demanded, touch_progress_demand,
+    _get_merge_lock, _jobs, _lookup, _map_qbit_path, _needed_torrents, _persist,
+    _public, _qbit, _register_proc, _set, _spawn, _tasks, flush_dirty, load,
+    persist_loop, poll_interval, progress_demanded, touch_progress_demand,
 )
 # ---- leituras da UI ----
 from services.jobs.views import (
@@ -62,16 +62,16 @@ __all__ = [
     "runtime", "search", "views",
     # API usada por main.py
     "KINDS", "VIDEO_EXTENSIONS", "cancel", "counts", "create", "create_manual",
-    "create_recompress", "get_job", "list_group", "list_jobs", "load",
-    "poll_interval", "proceed", "progress", "remove", "resolve_review",
+    "create_recompress", "flush_dirty", "get_job", "list_group", "list_jobs",
+    "load", "persist_loop", "poll_interval", "proceed", "progress", "remove", "resolve_review",
     "resume_pending", "retry", "select", "summary", "switch",
     "touch_progress_demand",
     # infraestrutura compartilhada com services/series/*
     "MAX_SELECTABLE", "_CONN_ERRORS", "_cancelling", "_dedup_results",
     "_delete_output", "_deliver_single", "_download_pct", "_event", "_fail",
     "_ffmpeg_hooks", "_ffmpeg_procs", "_get_merge_lock", "_jobs", "_lookup",
-    "_map_qbit_path", "_merge", "_needed_torrents", "_probe_manual_file",
-    "_public", "_qbit", "_register_proc", "_run_from_download", "_search",
+    "_map_qbit_path", "_merge", "_needed_torrents", "_persist",
+    "_probe_manual_file", "_public", "_qbit", "_register_proc", "_run_from_download", "_search",
     "_set", "_shape_verdict", "_slim_job", "_spawn", "_stall_limit_minutes",
     "_tasks", "progress_demanded",
 ]

@@ -128,7 +128,7 @@ async def _run(job: dict):
                 finally:
                     job["progress"]["merge"] = None
                     job["output"] = None
-            store.upsert_job(job)
+            jobs._persist(job)
         merge_runner._finish(job)
         catalog.invalidate_library()
     except asyncio.CancelledError:

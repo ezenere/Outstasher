@@ -10,7 +10,6 @@ import time
 from pathlib import Path
 
 import config
-from services import store
 from services.jobs import runtime
 from services.jobs.runtime import (
     VIDEO_EXTENSIONS, _CONN_ERRORS, _event, _map_qbit_path, _needed_torrents,
@@ -235,9 +234,9 @@ async def _wait_downloads(job: dict) -> dict:
                                f"continuando a esperar (cancele o job se quiser desistir)")
                         st["warned"] = True
             # persiste o progresso no banco só de tempos em tempos (eventos
-            # reais já persistiram na hora, via _event)
+            # reais persistem via _event, com a janela de EVENT_PERSIST_SECONDS)
             if time.monotonic() - last_persist >= config.PROGRESS_PERSIST_SECONDS:
-                store.upsert_job(job)
+                runtime._persist(job)
                 last_persist = time.monotonic()
         except _CONN_ERRORS as e:
             # qBittorrent fora do ar / rede caiu: avisa uma vez e segue tentando

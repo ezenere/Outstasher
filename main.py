@@ -51,7 +51,14 @@ def _with_disk(dest: dict) -> dict:
 async def lifespan(app: FastAPI):
     jobs.load()
     jobs.resume_pending()
-    yield
+    # _event só marca o job como sujo; este loop grava os sujos quando a
+    # janela fecha, e o flush final no desligamento grava o que sobrou
+    flusher = asyncio.create_task(jobs.runtime.persist_loop())
+    try:
+        yield
+    finally:
+        flusher.cancel()
+        jobs.runtime.flush_dirty(force=True)
 
 
 app = FastAPI(title="Outstasher", lifespan=lifespan)
