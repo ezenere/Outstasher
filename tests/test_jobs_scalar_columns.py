@@ -491,6 +491,30 @@ def test_normalizacao_legada_pura():
     assert out["movie"] == MOVIE
 
 
+def test_formato_antigo_de_movie_e_progress_vai_para_as_tabelas(temp_db):
+    """Caso real (banco do servidor): jobs de versões antigas tinham `movie`
+    sem english_title/original_language/overview (ou com `seasons`, lista que
+    nada lê mais) e o progresso do download sem size/downloaded. O formato
+    exato do codificador os deixava inteiros no documento; normalizados, vão
+    para as tabelas como qualquer job novo."""
+    f = json.loads(json.dumps(_filme("velho")))
+    f["movie"] = {"id": f["tmdb_id"], "original_title": "Filme Exemplo",
+                  "localized_title": "Filme Exemplo", "year": "2001",
+                  "poster": "http://p/x.jpg"}
+    for role in ("video", "audio"):
+        f["progress"][role] = {"pct": 100.0, "speed": 0, "eta": 8640000,
+                               "state": "uploading", "seeds": 0, "name": "x"}
+    f["movie"]["seasons"] = [{"season_number": 1}]
+    out = store._legacy_scalars(f)
+    assert out["movie"]["overview"] is None and "seasons" not in out["movie"]
+    assert out["progress"]["video"]["size"] is None
+    store.upsert_job(out)
+    assert set(_data("velho")) <= {"advanced_merge", "convert", "review_rules"}
+    back = store.get_job("velho")
+    assert back["movie"]["original_title"] == "Filme Exemplo"
+    assert back["progress"]["video"]["pct"] == 100.0
+
+
 def test_banco_antigo_abre_lista_e_migra_no_upsert(temp_db):
     doc = _doc_antigo_serie()
     _insert_doc(doc)

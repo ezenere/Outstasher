@@ -2443,8 +2443,26 @@ def _legacy_scalars(doc: dict) -> dict:
       tinha virado texto: {"3": [1, 5]});
     - progress: a barra do merge sai (efêmera) — num job que parou no meio
       do merge fica só a etapa (ver _enc_progress);
-    - awaiting de série com gate derivado: o payload gravado sai."""
+    - awaiting de série com gate derivado: o payload gravado sai;
+    - movie e progress de versões antigas completam o formato atual: chaves
+      que vieram depois (english_title, original_language, overview; size e
+      downloaded do download) entram como None, e `movie.seasons` (lista que
+      nenhum código lê mais) sai. Sem isso, o codificador — que exige o
+      formato EXATO para a ida e volta não confundir ausente com None —
+      deixava esses jobs inteiros no documento (medido no banco real: 62
+      jobs com movie e 49 com progress de fora das tabelas). Para esses
+      campos ausente e None são a mesma coisa para quem lê."""
     doc = dict(doc)
+    mv = doc.get("movie")
+    if isinstance(mv, dict):
+        doc["movie"] = {k: mv.get(k) for k in _MOVIE_KEYS}
+    prog = doc.get("progress")
+    if isinstance(prog, dict) and doc.get("media_type") != "tv":
+        doc["progress"] = {
+            role: ({k: v.get(k) for k in _PROGRESS_KEYS}
+                   if role != "merge" and isinstance(v, dict)
+                   and set(v) <= set(_PROGRESS_KEYS) else v)
+            for role, v in prog.items()}
     req = doc.get("request")
     if isinstance(req, dict) and isinstance(req.get("episodes"), dict):
         eps = req["episodes"]
