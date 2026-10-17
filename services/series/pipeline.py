@@ -448,7 +448,7 @@ async def _plan_and_gate(job: dict):
 
     gaps = _collect_gaps(job)
     if gaps and not job.get("_gaps_accepted"):
-        _gate(job, "gaps_confirm", {"missing": gaps},
+        _gate(job, "gaps_confirm", None,
               f"⚠️ {len(gaps)} episódio(s) sem torrent — decidir antes de baixar")
         return
 
@@ -639,10 +639,47 @@ def _alternatives_for(job: dict, torrent: dict) -> list[dict]:
 
 # -------------------- gates --------------------
 
-def _gate(job: dict, reason: str, payload: dict, detail: str):
+# Gates cujo conteúdo é DERIVÁVEL do estado persistido do job (episódios e
+# torrents): o payload não é gravado — é calculado na hora em que a API
+# entrega o job (awaiting_view). Gravar uma cópia de algo derivável só cria o
+# risco de ela envelhecer (caso real: o gate de desalinhados ganhou os
+# doadores concluídos, e um gate aberto antes da atualização não os teria).
+# Os demais gates mostram RESULTADOS DE BUSCA, que só existem em memória
+# durante a busca — esses sim precisam do snapshot gravado.
+DERIVED_GATES = ("gaps_confirm", "alignment_review", "mismatched_pairs")
+
+
+def gate_payload(job: dict, reason: str) -> dict | None:
+    """Conteúdo de um gate derivado, a partir do estado atual do job."""
+    if reason == "gaps_confirm":
+        return {"missing": _collect_gaps(job),
+                # aberto com download em curso (pack sem os arquivos esperados):
+                # algum torrent já foi enviado ao qBittorrent
+                "mid_download": any(t.get("hash") for t in job["torrents"])}
+    if reason == "alignment_review":
+        return {"episodes": {k: v["edl"] for k, v in sorted(job["episodes"].items())
+                             if v["state"] == "review"}}
+    if reason == "mismatched_pairs":
+        from services.series import rematch
+        return rematch.gate_payload(job)
+    return None
+
+
+def awaiting_view(job: dict) -> dict | None:
+    """O `awaiting` como a UI o recebe: gate derivado com o payload calculado
+    agora; gate de busca com o snapshot gravado."""
+    gate = job.get("awaiting")
+    if not gate or gate.get("reason") not in DERIVED_GATES:
+        return gate
+    return {**gate, "payload": gate_payload(job, gate["reason"])}
+
+
+def _gate(job: dict, reason: str, payload: dict | None, detail: str):
     """Pausa o job num gate explícito. A coroutine do pipeline RETORNA depois
-    de chamar isto; o resolve() respawna a continuação."""
-    job["awaiting"] = {"reason": reason, "payload": payload}
+    de chamar isto; o resolve() respawna a continuação. Gate derivado não
+    leva payload (ver DERIVED_GATES)."""
+    job["awaiting"] = {"reason": reason,
+                       "payload": None if reason in DERIVED_GATES else payload}
     jobs._set(job, "awaiting", detail)
 
 
@@ -751,10 +788,10 @@ async def resolve(job_id: str, reason: str, decision: dict) -> dict | None:
         elif reason == "alignment_review":
             _apply_review(job, decision)
             # episódios ainda sem decisão continuam em revisão: re-abre o gate
-            remaining = {k: v["edl"] for k, v in job["episodes"].items()
-                         if v["state"] == "review"}
+            remaining = [k for k, v in job["episodes"].items()
+                         if v["state"] == "review"]
             if remaining:
-                _gate(job, "alignment_review", {"episodes": remaining},
+                _gate(job, "alignment_review", None,
                       f"⚠️ {len(remaining)} episódio(s) ainda precisam de revisão")
                 return jobs._public(job)
             jobs._spawn(job["id"], _resume_merge(job))
@@ -1251,7 +1288,7 @@ async def _wait_downloads(job: dict):
             # no qBittorrent — só o watchdog para até a decisão)
             if not job.get("_gaps_accepted") and _collect_gaps(job):
                 gaps = _collect_gaps(job)
-                _gate(job, "gaps_confirm", {"missing": gaps, "mid_download": True},
+                _gate(job, "gaps_confirm", None,
                       f"⚠️ {len(gaps)} episódio(s) ficaram sem torrent (o pack "
                       f"não os contém) — decidir antes de continuar")
                 return

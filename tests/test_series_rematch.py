@@ -139,6 +139,20 @@ def test_doador_precisa_estar_concluido(temp_db):
         rematch.apply_pairs(job, {"S01E01": "S01E04"})
 
 
+def test_payload_gravado_velho_e_ignorado(temp_db):
+    """O gate de desalinhados não grava payload: a API calcula na entrega.
+    Um job que ainda carrega um payload antigo no banco (de antes dessa
+    mudança, sem os doadores) aparece certo do mesmo jeito."""
+    from services import jobs
+    job = _com_duplo_concluido(_job(2))
+    job["status"] = "awaiting"
+    job["awaiting"] = {"reason": "mismatched_pairs",
+                       "payload": {"mismatched": {}, "attempts": 1}}
+    payload = jobs._public(job)["awaiting"]["payload"]
+    assert set(payload["mismatched"]) == {"S01E01", "S01E02"}
+    assert "S01E04" in payload["done"]
+
+
 def test_ignorar_vira_pulo_decidido(temp_db):
     job = _job(2)
     rematch.apply_ignores(job, ["S01E02", "S09E99"])   # inexistente: ignora
@@ -153,8 +167,10 @@ def test_fim_do_merge_abre_gate_com_2_desalinhados(temp_db):
     job = _job(2)
     asyncio.run(merge_runner.merge_all(job))
     assert job["status"] == "awaiting"
-    gate = job["awaiting"]
-    assert gate["reason"] == "mismatched_pairs"
+    assert job["awaiting"] == {"reason": "mismatched_pairs", "payload": None}, \
+        "derivável do estado: nada de cópia gravada"
+    from services import jobs
+    gate = jobs._public(job)["awaiting"]
     assert sorted(gate["payload"]["mismatched"]) == ["S01E01", "S01E02"]
     assert gate["payload"]["mismatched"]["S01E01"]["dubbed"] == "dub_S01E01.mkv"
 

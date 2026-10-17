@@ -113,16 +113,15 @@ async def _wrap_up(job: dict):
     o usuário mandar finalizar), e só então o relatório + limpeza."""
     from services.series import pipeline, rematch
 
-    reviews = {k: v["edl"] for k, v in job["episodes"].items()
-               if v["state"] == "review"}
+    reviews = [k for k, v in job["episodes"].items() if v["state"] == "review"]
     if reviews:
-        pipeline._gate(job, "alignment_review", {"episodes": reviews},
+        pipeline._gate(job, "alignment_review", None,
                        f"⚠️ {len(reviews)} episódio(s) precisam de revisão de "
                        f"alinhamento")
         return
     conflicts = rematch.mismatched(job)
     if len(conflicts) >= 2 and not job.get("_rematch_done"):
-        pipeline._gate(job, "mismatched_pairs", rematch.gate_payload(job),
+        pipeline._gate(job, "mismatched_pairs", None,
                        f"⚠️ {len(conflicts)} episódio(s) desalinhados — "
                        f"tentar casar entre si, casar na mão ou finalizar?")
         return

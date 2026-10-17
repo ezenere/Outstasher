@@ -465,3 +465,45 @@ def test_manual_link_invalido(temp_db):
     with pytest.raises(ValueError, match="magnet"):
         pipeline._apply_manual(job, {"torrents": [
             {"link": "ftp://x/y.torrent", "role": "original", "episodes": ["S01E01"]}]})
+
+
+# -------------------- payload derivado (não gravado) --------------------
+
+def test_gate_de_lacunas_calcula_na_leitura(temp_db):
+    """Nada gravado: a lista de lacunas sai do plano atual na hora da leitura,
+    então acompanha qualquer mudança do plano (troca de torrent, por ex.)."""
+    from services import jobs
+    job = _job()
+    job["torrents"] = [_torrent(0, "original", ["S01E01", "S01E02"]),
+                       _torrent(1, "dubbed", ["S01E01"], "Serie Exemplo S01E01 Dublado")]
+    pipeline._gate(job, "gaps_confirm", None, "lacunas")
+    assert job["awaiting"]["payload"] is None
+    view = jobs._public(job)["awaiting"]["payload"]
+    assert [g["episode"] for g in view["missing"]] == ["S01E02"]
+    assert view["mid_download"] is False
+    # o plano mudou depois de o gate abrir: a tela acompanha
+    job["torrents"][1]["coverage"] = ["S01E01", "S01E02"]
+    job["torrents"][1]["hash"] = "a" * 40     # e o torrent já foi enviado
+    view = jobs._public(job)["awaiting"]["payload"]
+    assert view["missing"] == [] and view["mid_download"] is True
+
+
+def test_revisao_de_alinhamento_nao_duplica_as_edls(temp_db):
+    """A EDL já mora no episódio: o gate não grava uma segunda cópia dela."""
+    from services import jobs
+    job = _job()
+    edl = {"version": 1, "segments": []}
+    job["episodes"]["S01E02"].update(state="review", edl=edl)
+    pipeline._gate(job, "alignment_review", None, "revisar")
+    assert job["awaiting"]["payload"] is None
+    assert jobs._public(job)["awaiting"]["payload"] == {"episodes": {"S01E02": edl}}
+
+
+def test_gate_de_busca_continua_gravado(temp_db):
+    """Resultado de busca só existe em memória durante a busca: esse snapshot
+    precisa mesmo ficar gravado no gate."""
+    from services import jobs
+    job = _job()
+    pipeline._gate(job, "manual_pick", {"by_torrent": {"original": [], "dubbed": []}}, "manual")
+    assert job["awaiting"]["payload"] == {"by_torrent": {"original": [], "dubbed": []}}
+    assert jobs._public(job)["awaiting"] == job["awaiting"]
