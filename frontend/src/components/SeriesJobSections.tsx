@@ -654,6 +654,9 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
   }
 
   if (gate.reason === 'manual_pick') {
+    // job "só original"/"só dublado" escolhe torrents de um papel só
+    const jobRoles: ('original' | 'dubbed')[] = job.kind === 'original' ? ['original']
+      : job.kind === 'dubbed' ? ['dubbed'] : ['original', 'dubbed']
     const base = gate.payload.by_torrent ?? { original: [], dubbed: [] }
     const requested = gate.payload.requested ?? []
     // candidatos da busca + magnets próprios (o papel do custom vai no id)
@@ -747,7 +750,7 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
 
     function submit() {
       const torrents: Record<string, unknown>[] = []
-      for (const role of ['original', 'dubbed'] as const) {
+      for (const role of jobRoles) {
         for (const [cid, eps] of Object.entries(sel[role] ?? {})) {
           if (cid.startsWith('custom:')) {
             const url = customUrls[cid]
@@ -776,7 +779,7 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
           acontece depois do download. Sem candidato bom? Cole um magnet/link
           próprio no papel.
         </p>
-        {(['original', 'dubbed'] as const).map((role) => {
+        {jobRoles.map((role) => {
           const covered = coveredBy(role)
           const touched = Object.keys(sel[role] ?? {}).length > 0
           const missing = requested.filter((k) => !covered.has(k))

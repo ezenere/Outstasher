@@ -708,16 +708,18 @@ class SeriesJobRequest(BaseModel):
     convert: dict | None = None
     skip_search: bool = False          # manual: nem consulta o indexador
     advanced_merge: dict | None = None  # override da política do merge avançado
+    kind: str = "both"                 # both | original | dubbed (como nos filmes)
 
 
 @app.post("/api/jobs/series")
 async def create_series_job(req: SeriesJobRequest):
-    """Job de série: baixa original + dublado de cada episódio pedido."""
+    """Job de série: baixa original + dublado de cada episódio pedido e faz o
+    merge — ou, com kind original/dubbed, só um lado, entregue sem merge."""
     try:
         return await series_pipeline.create_series(
             req.tmdb_id, req.language, req.seasons, req.episodes, req.mode,
             req.destination_id, req.torrent_target_id, req.convert,
-            req.skip_search, req.advanced_merge)
+            req.skip_search, req.advanced_merge, req.kind)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

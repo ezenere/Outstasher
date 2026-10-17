@@ -19,8 +19,8 @@ def season_dir_name(season: int) -> str:
 
 
 def episode_file_name(title: str, year: str | None, season: int, episode: int,
-                      language: str) -> str:
-    """Nome do arquivo final do episódio (sem extensão): o merge sempre produz
-    [<lang>+orig], igual ao sufixo dos filmes."""
+                      language: str, tag: str | None = None) -> str:
+    """Nome do arquivo final do episódio (sem extensão). O merge produz
+    [<lang>+orig]; um lado só, como nos filmes, [orig] ou [<lang>]."""
     safe = catalog.safe_name(f"{title} ({year})" if year else title)
-    return f"{safe} S{season:02d}E{episode:02d} [{language}+orig]"
+    return f"{safe} S{season:02d}E{episode:02d} [{tag or f'{language}+orig'}]"

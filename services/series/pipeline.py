@@ -30,6 +30,25 @@ from services.series import parse, selector_tv, subs
 
 ROLES = ("original", "dubbed")
 ROLE_LABEL = {"original": "original", "dubbed": "dublado"}
+KIND_LABEL = {"both": "original + dublado (merge)",
+              "original": "só original", "dubbed": "só dublado"}
+
+
+def roles_of(job: dict) -> tuple[str, ...]:
+    """Papéis que este job baixa — o mesmo `kind` dos filmes. Job antigo
+    (kind "series", de antes da opção existir) baixa os dois."""
+    kind = job.get("kind")
+    if kind == "original":
+        return ("original",)
+    if kind == "dubbed":
+        return ("dubbed",)
+    return ROLES
+
+
+def single_role(job: dict) -> str | None:
+    """O papel único de um job "só original"/"só dublado" (None = merge)."""
+    roles = roles_of(job)
+    return roles[0] if len(roles) == 1 else None
 # modo do selector por papel (mesma semântica de filmes: video=imagem,
 # audio=exige dublagem)
 ROLE_MODE = {"original": "video", "dubbed": "audio"}
@@ -72,12 +91,18 @@ async def create_series(tmdb_id: int, language: str,
                         torrent_target_id: int | None = None,
                         convert: dict | None = None,
                         skip_search: bool = False,
-                        advanced_merge: dict | None = None) -> dict:
-    from services import advanced_merge as adv_merge
-    advanced_merge = adv_merge.validate_override(advanced_merge)
+                        advanced_merge: dict | None = None,
+                        kind: str = "both") -> dict:
     """Cria um job de série cobrindo temporadas inteiras e/ou episódios
-    avulsos ({"3": [1, 5]}). Sempre baixa os DOIS lados (original + dublado)
-    de cada episódio — é a razão de ser do serviço."""
+    avulsos ({"3": [1, 5]}). `kind` como nos filmes: "both" baixa os dois
+    lados de cada episódio e faz o merge; "original"/"dubbed" baixa um lado
+    só e entrega o arquivo do episódio direto, sem merge."""
+    from services import advanced_merge as adv_merge
+    if kind not in jobs.KINDS:
+        raise ValueError(f"kind inválido: {kind!r}")
+    # um lado só: não há merge, então a política do merge avançado não se aplica
+    advanced_merge = (adv_merge.validate_override(advanced_merge)
+                      if kind == "both" else None)
     if skip_search and mode != "manual":
         raise ValueError("Pular a busca só faz sentido no modo manual")
     seasons = sorted({int(s) for s in (seasons or [])})
@@ -112,7 +137,7 @@ async def create_series(tmdb_id: int, language: str,
         "tmdb_id": tmdb_id,
         "language": language,
         "mode": mode,
-        "kind": "series",
+        "kind": kind,
         "skip_search": skip_search,
         "advanced_merge": advanced_merge,   # override da política (None = global)
         "download_only": False,
@@ -147,8 +172,8 @@ async def create_series(tmdb_id: int, language: str,
     conv = transcode.describe(convert)
     cinfo = f" — conversão: {', '.join(conv)}" if conv else ""
     jobs._event(job, "status",
-                f"Job de série criado ({' + '.join(scope)}) — destino: "
-                f"{dest['label']}{cinfo}")
+                f"Job de série criado ({' + '.join(scope)}; {KIND_LABEL[kind]}) "
+                f"— destino: {dest['label']}{cinfo}")
     jobs._spawn(job["id"], _run(job))
     return jobs._public(job)
 
@@ -294,10 +319,13 @@ async def _search_series(job: dict):
                     add(f"{t} temporada {s}")
         return out
 
-    q_original = season_queries(titles_original, portuguese=False)
+    roles = roles_of(job)
+    q_original = (season_queries(titles_original, portuguese=False)
+                  if "original" in roles else [])
     # sem título localizado distinto, o lado dublado busca pelos mesmos nomes
     # (o marcador de idioma filtra depois)
-    q_dubbed = season_queries(loc_spellings or titles_original, portuguese=True)
+    q_dubbed = (season_queries(loc_spellings or titles_original, portuguese=True)
+                if "dubbed" in roles else [])
 
     jobs._set(job, "searching",
               f"Procurando série no Jackett ({len(q_original) + len(q_dubbed)} "
@@ -319,9 +347,12 @@ async def _search_series(job: dict):
     pool_dubbed = jobs._dedup_results(
         [r for res in all_res[len(q_original):] for r in res])
     _pools[job["id"]] = {"original": pool_original, "dubbed": pool_dubbed}
-    jobs._event(job, "search",
-                f"Pool: {len(pool_original)} resultados (original), "
-                f"{len(pool_dubbed)} ({label})")
+    partes = []
+    if "original" in roles:
+        partes.append(f"{len(pool_original)} resultados (original)")
+    if "dubbed" in roles:
+        partes.append(f"{len(pool_dubbed)} ({label})")
+    jobs._event(job, "search", "Pool: " + ", ".join(partes))
 
 
 def _rank_all(job: dict) -> dict[str, dict[tuple[int, int], list[dict]]]:
@@ -342,7 +373,7 @@ def _rank_all(job: dict) -> dict[str, dict[tuple[int, int], list[dict]]]:
     search_refs = {ep_key(s, e): _search_ref(job, ep_key(s, e)) for s, e in refs}
     ranked_all: dict[str, dict] = {}
     job["search_tv"] = {"original": {}, "dubbed": {}}
-    for role in ROLES:
+    for role in roles_of(job):
         titles = titles_original if role == "original" else titles_dubbed
         ranked_all[role] = {}
         for s, e in refs:
@@ -389,7 +420,7 @@ async def _plan_and_gate(job: dict):
         # fase 2: episódios sem candidato em algum papel ganham buscas dedicadas
         missing = {role: [ref for ref in _active_refs(job)
                           if not ranked_all[role].get(ref)]
-                   for role in ROLES}
+                   for role in roles_of(job)}
         if (any(missing.values()) and not job.get("_phase2_done")
                 and not job.get("skip_search")):
             job["_phase2_done"] = True
@@ -401,7 +432,7 @@ async def _plan_and_gate(job: dict):
             {(_search_ref(job, ep_key(s, e))): ranked_all[role][(s, e)]
              for s, e in _active_refs(job)},
             known_seasons=set(job.get("known_seasons") or []))
-            for role in ROLES}
+            for role in roles_of(job)}
         _store_plan(job, plans)
 
     if job["mode"] == "manual" and not job.get("_manual_done"):
@@ -471,7 +502,7 @@ def _store_plan(job: dict, plans: dict):
     resume dependem só disso, não dos pools em memória)."""
     torrents = []
     n = 0
-    for role in ROLES:
+    for role in roles_of(job):
         for t in plans[role]["torrents"]:
             entry = {
                 "n": n, "role": role,
@@ -512,12 +543,13 @@ def _plan_summary(job: dict) -> list[dict]:
 def _collect_gaps(job: dict) -> list[dict]:
     """Episódios pedidos sem torrent em um (ou nos dois) papéis. TODOS passam
     pelo gate — a regra do produto é nunca decidir lacuna sozinho."""
+    roles = roles_of(job)
     covered = {role: {ep for t in job["torrents"] if t["role"] == role
-                      for ep in t["coverage"]} for role in ROLES}
+                      for ep in t["coverage"]} for role in roles}
     gaps = []
     for s, e in _active_refs(job):
         key = ep_key(s, e)
-        roles_missing = [ROLE_LABEL[r] for r in ROLES if key not in covered[r]]
+        roles_missing = [ROLE_LABEL[r] for r in roles if key not in covered[r]]
         if roles_missing:
             gaps.append({"episode": key,
                          "name": job["episodes"][key].get("name"),
@@ -564,7 +596,7 @@ def _torrent_candidates(job: dict) -> dict[str, list[dict]]:
     known = set(job.get("known_seasons") or [])
     refs = _active_refs(job)
     out: dict[str, list[dict]] = {}
-    for role in ROLES:
+    for role in roles_of(job):
         seen: dict[str, dict] = {}
         for cands in (job.get("search_tv") or {}).get(role, {}).values():
             for c in cands:
@@ -800,11 +832,12 @@ async def _continue_after_gate(job: dict):
 def _apply_gaps(job: dict):
     """Continuar com lacunas: episódios sem cobertura completa viram
     skipped_missing (não contam para a execução, ficam no relatório)."""
+    roles = roles_of(job)
     covered = {role: {ep for t in job["torrents"] if t["role"] == role
-                      for ep in t["coverage"]} for role in ROLES}
+                      for ep in t["coverage"]} for role in roles}
     for s, e in _active_refs(job):
         key = ep_key(s, e)
-        if any(key not in covered[r] for r in ROLES):
+        if any(key not in covered[r] for r in roles):
             job["episodes"][key]["state"] = "skipped_missing"
     # torrents que só existiam por esses episódios saem do plano — só os que
     # ainda NÃO foram enviados (pending); um que já baixa/baixou fica no plano
@@ -902,8 +935,8 @@ def _apply_manual(job: dict, decision: dict):
         if key not in job["episodes"]:
             raise ValueError(f"Episódio desconhecido: {key}")
         for role, cid in roles.items():
-            if role not in ROLES:
-                raise ValueError(f"Papel inválido: {role}")
+            if role not in roles_of(job):
+                raise ValueError(f"Papel inválido para este job: {role}")
             cand = next((c for c in (search.get(role, {}).get(key) or [])
                          if c["id"] == cid), None)
             if cand is None:
@@ -999,8 +1032,8 @@ def _apply_manual_torrents(job: dict, decision: dict):
     n_custom = 0
     for sel in sels:
         role = sel.get("role")
-        if role not in ROLES:
-            raise ValueError(f"Papel inválido: {role!r}")
+        if role not in roles_of(job):
+            raise ValueError(f"Papel inválido para este job: {role!r}")
         if sel.get("magnet") or sel.get("link"):
             cand = _custom_candidate(sel)
             n_custom += 1
@@ -1481,13 +1514,13 @@ async def _resolve_episode_files(job: dict):
     for s, e in _active_refs(job):
         key = ep_key(s, e)
         ep = job["episodes"][key]
-        if all(r in ep["src"] for r in ROLES):
+        if all(r in ep["src"] for r in roles_of(job)):
             ep["state"] = "downloaded"
         elif job.get("force_continue"):
             # etapa forçada: o que não baixou foi PULADO pelo usuário, não falhou
             ep["state"] = "skipped_missing"
         else:
-            faltou = [ROLE_LABEL[r] for r in ROLES if r not in ep["src"]]
+            faltou = [ROLE_LABEL[r] for r in roles_of(job) if r not in ep["src"]]
             ep["state"] = "failed"
             ep["error"] = f"arquivo não baixado/encontrado: {', '.join(faltou)}"
     store.upsert_job(job)
@@ -1593,7 +1626,10 @@ async def retry(old: dict) -> dict:
         mode=old.get("mode", "auto"),
         destination_id=old.get("destination_id"),
         torrent_target_id=old.get("torrent_target_id"),
-        convert=old.get("convert"))
+        convert=old.get("convert"),
+        advanced_merge=old.get("advanced_merge"),
+        # job anterior à opção carrega kind "series": os dois lados
+        kind=old.get("kind") if old.get("kind") in jobs.KINDS else "both")
 
 
 def forget(job_id: str):

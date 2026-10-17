@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Calendar, Check, Download, NavArrowDown, NavArrowRight, Xmark } from 'iconoir-react'
+import { Calendar, Check, Download, MediaVideo, NavArrowDown, NavArrowRight, SoundHigh, Xmark } from 'iconoir-react'
 import {
   api, type AdvancedMergeConfig, post,
   type ConvertOptions, type Destination, type EpisodeInfo, type Job,
@@ -170,7 +170,8 @@ export default function SeriesModal({
 
   const hasSelection = selection.seasons.length > 0 || Object.keys(selection.episodes).length > 0
 
-  async function start() {
+  // mesmo `kind` dos filmes: os dois lados com merge, ou um lado só entregue direto
+  async function start(kind: 'both' | 'original' | 'dubbed') {
     if (!hasSelection || starting) return
     setStarting(true)
     try {
@@ -181,7 +182,9 @@ export default function SeriesModal({
         episodes: selection.episodes,
         mode: manual ? 'manual' : 'auto',
         skip_search: manual && skipSearch,
-        advanced_merge: advMerge,
+        // um lado só não passa por merge: a política do merge avançado não vale
+        advanced_merge: kind === 'both' ? advMerge : null,
+        kind,
         destination_id: destId,
         torrent_target_id: targetId,
         convert: advanced,
@@ -429,16 +432,32 @@ export default function SeriesModal({
 
         {/* ações */}
         <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
-          <span className="mr-auto text-xs text-zinc-500">
-            Baixa as versões original e dublada de cada episódio selecionado.
-          </span>
+          {!hasSelection && (
+            <span className="mr-auto text-xs text-zinc-500">Selecione temporadas ou episódios.</span>
+          )}
           <button
-            onClick={start}
+            onClick={() => start('original')}
             disabled={!hasSelection || starting || !destinations.length}
+            title="Baixa só a versão original de cada episódio, sem merge"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+          >
+            <MediaVideo width={15} height={15} /> Só original
+          </button>
+          <button
+            onClick={() => start('dubbed')}
+            disabled={!hasSelection || starting || !destinations.length}
+            title="Baixa só a versão dublada de cada episódio, sem merge"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+          >
+            <SoundHigh width={15} height={15} /> Só dublado
+          </button>
+          <button
+            onClick={() => start('both')}
+            disabled={!hasSelection || starting || !destinations.length}
+            title="Baixa as versões original e dublada de cada episódio e faz o merge"
             className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
           >
-            <Download width={15} height={15} />
-            {hasSelection ? 'Baixar seleção' : 'Selecione temporadas ou episódios'}
+            <Download width={15} height={15} /> Baixar e fazer merge
           </button>
         </div>
       </div>

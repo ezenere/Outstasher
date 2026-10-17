@@ -254,7 +254,7 @@ export default function Jobs() {
             </div>
             <div className="mt-1.5 flex flex-wrap items-center gap-1">
               {j.media_type === 'tv' && <Tag tone="info" title="Job de série">Série</Tag>}
-              <KindTags kind={j.media_type === 'tv' ? undefined : j.kind} language={j.language}
+              <KindTags kind={j.kind} language={j.language}
                 downloadOnly={j.download_only} convert={j.convert} mode={j.mode} />
               {j.media_type === 'tv' && j.series && (
                 <span className="text-xs text-zinc-500">

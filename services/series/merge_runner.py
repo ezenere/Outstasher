@@ -28,6 +28,7 @@ MIN_SUCCESS_RATIO = 0.75
 
 async def merge_all(job: dict):
     """Converte/entrega todos os episódios `downloaded` do job, um a um."""
+    from services.series import pipeline
     keys = sorted(k for k, v in job["episodes"].items()
                   if v["state"] == "downloaded")
     if not keys:
@@ -36,6 +37,8 @@ async def merge_all(job: dict):
         await _wrap_up(job)
         return
     jobs._set(job, "merging",
+              f"Entregando {len(keys)} episódio(s) (um por vez)..."
+              if pipeline.single_role(job) else
               f"Convertendo {len(keys)} episódio(s) (um por vez)...")
     job["merge_started_at"] = datetime.now().isoformat(timespec="seconds")
     convert_opts = (transcode.validate(job["convert"])
@@ -50,7 +53,10 @@ async def merge_all(job: dict):
             ep["state"] = "merging"
             job["detail"] = f"{key}: fazendo merge ({i}/{len(keys)})..."
             try:
-                if ep.get("edl"):
+                if pipeline.single_role(job):
+                    # só original / só dublado: não há o que alinhar
+                    await _deliver_episode(job, key, ep, convert_opts)
+                elif ep.get("edl"):
                     # EDL pronta (revisada ou limpa): renderiza por segmentos
                     await _render_from_edl(job, key, ep)
                 else:
@@ -358,10 +364,57 @@ async def _merge_episode(job: dict, key: str, ep: dict, convert_opts):
     await _attach_subs(job, key, ep, result.output, orig_fn, dub_fn, log=log)
 
 
+async def _deliver_episode(job: dict, key: str, ep: dict, convert_opts):
+    """Um episódio de job "só original"/"só dublado": o arquivo baixado vai
+    direto para o destino (layout Jellyfin), como o _deliver_single dos
+    filmes — hardlink (fallback cópia), ou conversão se o job pediu."""
+    from services.series import pipeline
+    role = pipeline.single_role(job)
+    src = Path(ep["src"][role])
+    m = job["movie"]
+    tag = "orig" if role == "original" else job["language"]
+    folder = naming.series_folder_name(m["original_title"], m["year"],
+                                       job.get("tmdb_id"))
+    stem = naming.episode_file_name(m["original_title"], m["year"],
+                                    ep["season"], ep["episode"],
+                                    job["language"], tag=tag)
+    out_dir = (Path(job.get("destination_path") or config.OUTPUT_DIR)
+               / folder / naming.season_dir_name(ep["season"]))
+    log, on_progress = jobs._ffmpeg_hooks(job)
+    if convert_opts is not None:
+        output = out_dir / f"{stem}.mkv"
+        job["output"] = str(output)   # cancel() apaga o parcial
+        try:
+            result = await asyncio.to_thread(
+                transcode.convert_single, str(src), str(output), convert_opts,
+                job["language"], m.get("original_language"),
+                log=log, on_progress=on_progress,
+                on_start=jobs._register_proc(job["id"]))
+        finally:
+            jobs._ffmpeg_procs.pop(job["id"], None)
+        ep["output"] = result.output
+        linked = result.linked
+    else:
+        output = out_dir / f"{stem}{src.suffix}"
+        notes: list[str] = []
+        await asyncio.to_thread(merger._link_or_copy, src, output, notes)
+        for n in notes:
+            jobs._event(job, "info", f"{key}: {n}")
+        ep["output"] = str(output)
+        linked = True
+    # legendas externas do torrent: arquivo hardlinkado não é reescrito (seria
+    # copiar o episódio inteiro para anexar uma legenda) — vão ao lado
+    fn = subs.shift_fn(0.0)
+    await _attach_subs(job, key, ep, ep["output"],
+                       fn if role == "original" else None,
+                       fn if role == "dubbed" else None,
+                       log=log, mode="sidecar" if linked else "mux")
+
+
 async def _attach_subs(job: dict, key: str, ep: dict, output: str,
-                       orig_fn, dub_fn, log=print):
-    """Muxa as legendas externas do episódio no arquivo entregue. Nunca
-    derruba o episódio: legenda é acessório."""
+                       orig_fn, dub_fn, log=print, mode: str = "mux"):
+    """Muxa as legendas externas do episódio no arquivo entregue (ou grava
+    ao lado, mode="sidecar"). Nunca derruba o episódio: legenda é acessório."""
     ext = ep.get("subs") or {}
     orig_subs = [p for p in ext.get("original") or [] if Path(p).exists()]
     dub_subs = [p for p in ext.get("dubbed") or [] if Path(p).exists()]
@@ -377,7 +430,7 @@ async def _attach_subs(job: dict, key: str, ep: dict, output: str,
         n = await asyncio.to_thread(
             subs.attach, output, orig_subs, dub_subs, orig_fn, dub_fn,
             ep["src"].get("original"), ep["src"].get("dubbed"),
-            orig_lang, dub_lang, log)
+            orig_lang, dub_lang, log, mode=mode)
         if n:
             jobs._event(job, "merge", f"{key}: {n} legenda(s) externa(s) anexada(s)")
     except asyncio.CancelledError:
