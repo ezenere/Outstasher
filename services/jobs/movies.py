@@ -71,8 +71,6 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
         "status": "searching",
         "detail": "Buscando informações do filme...",
         "movie": None,
-        "video_torrent": None,
-        "audio_torrent": None,
         "progress": {"video": None, "audio": None},
         "output": None,
         "destination_id": dest["id"] if dest else None,
@@ -83,9 +81,11 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
         "torrent_save_path": (target["save_path"] if target else "") or "",
         "torrent_local_path": (target["local_path"] if target else "") or "",
         "created_at": datetime.now().isoformat(timespec="seconds"),
-        "search": None,     # candidatos viaveis {audio: [...], video: [...]}
-        "fallbacks": None,  # reservas do mesmo corte para o watchdog
-        "current": None,    # candidato ativo por kind (com magnet/link p/ reinserir)
+        # consultas e candidatos da busca (lista escolhível, reservas do
+        # watchdog e o ativo de cada papel são atributos do candidato — ver
+        # services/candidates.py)
+        "search_queries": [],
+        "search_candidates": [],
     }
     _jobs[job["id"]] = job
     tinfo = f" — torrents: {target['label']}" if target else ""
@@ -182,8 +182,6 @@ async def create_manual(tmdb_id: int, language: str, video_path: str, audio_path
         "status": "merging",
         "detail": "Preparando conversão manual...",
         "movie": None,
-        "video_torrent": None,
-        "audio_torrent": None,
         "progress": {"video": None, "audio": None},
         "output": None,
         "destination_id": dest["id"],
@@ -191,9 +189,8 @@ async def create_manual(tmdb_id: int, language: str, video_path: str, audio_path
         "destination_path": dest["path"],
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "manual_files": {"video": str(vf), "audio": str(af)},
-        "search": None,
-        "fallbacks": None,
-        "current": None,
+        "search_queries": [],
+        "search_candidates": [],
     }
     _jobs[job["id"]] = job
     conv = transcode.describe(convert)
@@ -231,7 +228,6 @@ async def _run(job: dict):
             # (só o TMDB, que dá título/ano ao job) e o gate abre com a lista
             # vazia — é nele que o magnet é colado
             await search._load_movie(job)
-            job["search"] = {"audio": [], "video": []}
             _set(job, "awaiting", "Informe o magnet/link de cada torrent")
             return
         await search._search(job)

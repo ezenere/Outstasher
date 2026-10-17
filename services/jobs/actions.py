@@ -7,7 +7,7 @@ locais, recompressão) e por mídia (filme x série).
 import asyncio
 from pathlib import Path
 
-from services import catalog
+from services import candidates, catalog
 from services.jobs import downloads, movies, recompress, runtime, search
 from services.jobs.runtime import (
     _TERMINAL_STATUSES, _cancelling, _delete_output, _event, _has_torrents,
@@ -77,7 +77,6 @@ async def select(job_id: str, audio_id: str | None, video_id: str | None,
     job = _jobs.get(job_id)
     if not job or job["status"] != "awaiting":
         return None
-    busca = job.get("search") or {}
     needed = _needed_torrents(job)
     custom = custom or {}
     escolhidos: dict[str, dict] = {}
@@ -89,11 +88,11 @@ async def select(job_id: str, audio_id: str | None, video_id: str | None,
             cand = search.custom_candidate(proprio.get("url", ""),
                                            proprio.get("title", ""))
             # entra na busca do job: aparece na lista e serve de reserva depois
-            job.setdefault("search", {}).setdefault(kind, []).insert(0, cand)
+            cand = candidates.add_custom(job, kind, cand)
             _event(job, "chosen",
                    f"Torrent manual informado pelo usuário ({kind}): {cand['title']}")
         else:
-            cand = next((c for c in busca.get(kind, []) if c["id"] == cid), None)
+            cand = candidates.find(job, cid, kind, selectable_only=True)
             if not cand:
                 rotulo = "áudio" if kind == "audio" else "vídeo"
                 raise ValueError(
@@ -130,20 +129,19 @@ async def switch(job_id: str, kind: str, candidate_id: str | None = None,
         raise ValueError(f"Este job não baixa {kind}")
     if custom:
         nxt = search.custom_candidate(custom.get("url", ""), custom.get("title", ""))
-        job.setdefault("search", {}).setdefault(kind, []).insert(0, nxt)
+        nxt = candidates.add_custom(job, kind, nxt)
         _event(job, "chosen",
                f"Torrent manual informado pelo usuário ({kind}): {nxt['title']}")
     elif candidate_id:
-        cands = (job.get("search") or {}).get(kind) or []
-        nxt = next((c for c in cands if c["id"] == candidate_id), None)
+        nxt = candidates.find(job, candidate_id, kind, selectable_only=True)
         if not nxt:
             raise ValueError("Candidato não encontrado (a busca pode ter sido refeita)")
     else:
-        fb = (job.get("fallbacks") or {}).get(kind) or []
+        fb = candidates.fallbacks(job, kind)
         if not fb:
             raise ValueError(f"Sem candidato reserva de {kind} para tentar")
         nxt = fb[0]
-    cur = (job.get("current") or {}).get(kind)
+    cur = candidates.active(job, kind)
     if cur and cur.get("id") == nxt["id"]:
         raise ValueError("Este já é o torrent atual")
     # quem está no ar sai dentro do _replace_torrent (ele limpa a tag inteira)

@@ -171,10 +171,9 @@ def test_resume_pending(manual_env, monkeypatch):
 
     base = {"tmdb_id": 5, "language": "pt", "mode": "files", "kind": "both",
             "status": "merging", "detail": "", "movie": None,
-            "created_at": "2026-01-01T00:00:00", "video_torrent": None,
-            "audio_torrent": None, "output": None,
+            "created_at": "2026-01-01T00:00:00", "output": None,
             "progress": {"video": None, "audio": None},
-            "search": None, "fallbacks": None, "current": None}
+            "search_queries": [], "search_candidates": []}
     j_ok = {**base, "id": "mm1", "manual_files": {"video": str(vf), "audio": str(af)}}
     j_gone = {**base, "id": "mm2",
               "manual_files": {"video": str(vf.parent / "sumiu.mkv"), "audio": str(af)}}
@@ -206,13 +205,12 @@ def test_cancel_manual_job_ignores_qbittorrent(manual_env, monkeypatch):
 
     job = {"id": "mm9", "tmdb_id": 5, "language": "pt", "mode": "files", "kind": "both",
            "status": "awaiting", "detail": "", "movie": None,
-           "created_at": "2026-01-01T00:00:00", "video_torrent": None,
-           "audio_torrent": None, "output": None,
+           "created_at": "2026-01-01T00:00:00", "output": None,
            "progress": {"video": None, "audio": None},
            "manual_files": {"video": str(vf), "audio": str(af)},
            "drift_confirm": {"video_file": str(vf), "audio_file": str(af),
                              "tau1_ms": 0, "tau2_ms": 500},
-           "search": None, "fallbacks": None, "current": None}
+           "search_queries": [], "search_candidates": []}
     jobs._jobs["mm9"] = job
     store.upsert_job(job)
 

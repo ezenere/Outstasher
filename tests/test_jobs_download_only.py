@@ -10,9 +10,9 @@ def mkjob(**kw):
     j = {"id": "do1", "tmdb_id": 1, "language": "pt", "mode": "auto", "kind": "both",
          "download_only": True, "convert": None, "status": "downloading", "detail": "",
          "movie": None, "created_at": "2026-01-01T00:00:00",
-         "video_torrent": None, "audio_torrent": None, "output": None,
+         "output": None,
          "progress": {"video": {"pct": 100.0}, "audio": {"pct": 100.0}},
-         "search": None, "fallbacks": None, "current": None}
+         "search_queries": [], "search_candidates": []}
     j.update(kw)
     return j
 

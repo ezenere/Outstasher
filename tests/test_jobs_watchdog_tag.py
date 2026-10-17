@@ -10,8 +10,8 @@ def test_watchdog_pega_o_torrent_mais_recente_da_tag(temp_db, monkeypatch):
     job = {"id": "wd1", "kind": "dubbed", "status": "downloading", "detail": "",
            "progress": {"video": None, "audio": None}, "movie": None,
            "created_at": "2026-01-01T00:00:00", "tmdb_id": 1, "language": "pt",
-           "mode": "auto", "output": None, "search": None, "fallbacks": {},
-           "current": {}, "video_torrent": None, "audio_torrent": None}
+           "mode": "auto", "output": None,
+           "search_queries": [], "search_candidates": []}
     jobs._jobs["wd1"] = job
 
     def torrent(h, name, added_on, path):

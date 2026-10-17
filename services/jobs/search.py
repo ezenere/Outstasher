@@ -9,7 +9,7 @@ import re
 from urllib.parse import parse_qs, unquote_plus, urlparse
 
 import config
-from services import jackett, selector, store, tmdb
+from services import candidates, jackett, selector, store, tmdb
 from services.jobs.runtime import (
     MAX_SELECTABLE, _event, _needed_torrents, _persist, _set)
 
@@ -41,11 +41,36 @@ def custom_candidate(url: str, title: str = "") -> dict:
     }
 
 
-def _slim(cand: dict, cid: str) -> dict:
-    return {"id": cid, "title": cand["title"], "tracker": cand.get("tracker"),
-            "seeders": cand["seeders"], "size": cand["size"],
-            "edition": cand.get("edition"), "score": cand["score"],
-            "magnet": cand.get("magnet"), "link": cand.get("link")}
+def _record_trace(job: dict, role: str, query: str, results: int,
+                  trace: list[dict]) -> int:
+    """Grava a consulta e o rastro dela (todos os avaliados, com o motivo de
+    cada rejeição) como candidatos do job. Devolve o n da consulta — é o que o
+    evento "candidates" referencia, em vez de levar a lista inteira junto."""
+    n = candidates.add_query(job, role, query, results)
+    for i, t in enumerate(trace):
+        candidates.rows(job).append(
+            candidates.new(role, f"q{n}.{i}", t, query=n, trace=i))
+    return n
+
+
+def _store_selectable(job: dict, role: str, viable: list[dict]):
+    """Lista escolhível do papel (a ordem final da busca): cada viável é a
+    MESMA linha do rastro da consulta de onde veio, agora com rank e os dados
+    de download (magnet/link) — nada de uma segunda cópia do candidato."""
+    letter = candidates.ROLE_LETTER[role]
+    for i, c in enumerate(viable):
+        row = next((r for r in candidates.of_role(job, role)
+                    if r["rank"] is None and r["query"] == c.get("_query")
+                    and r["trace"] is not None
+                    and (r["title"], r["tracker"], r["size"], r["seeders"])
+                    == (c["title"], c.get("tracker"), c["size"], c["seeders"])),
+                   None)
+        if row is None:  # viável além do corte do rastro (MAX_TRACE)
+            row = candidates.new(role, "", c, query=c.get("_query"))
+            candidates.rows(job).append(row)
+        else:
+            row.update({k: c[k] for k in candidates.DATA_FIELDS if k in c})
+        row["id"], row["rank"] = f"{letter}{i}", i
 
 
 def _torrent_identity(r: dict) -> str | None:
@@ -169,7 +194,9 @@ async def _load_movie(job: dict) -> dict:
 
 
 async def _search(job: dict):
-    """Busca no Jackett e preenche job["search"] com os candidatos viáveis."""
+    """Busca no Jackett e grava no job as consultas, o rastro de cada uma e a
+    lista escolhível por papel (ver services/candidates.py)."""
+    candidates.reset(job)
     lang = job["language"]
     label = config.LANGUAGES[lang]["label"]
     movie = await _load_movie(job)
@@ -279,19 +306,24 @@ async def _search(job: dict):
         if localized_pool:
             ranked, trace = selector.rank(localized_pool, "audio", localized, year,
                                           language=lang, dubbed_title=dubbed_title)
+            q = query_localized or localized
+            qn = _record_trace(job, "audio", q, len(localized_pool), trace)
             _event(job, "candidates", f"Avaliação para ÁUDIO — título em {label} (+ buscas extras)",
-                   {"role": "audio", "query": query_localized or localized, "candidates": trace})
+                   {"role": "audio", "query": q, "search_query": qn})
             for c in ranked:
                 c["tier"] = 0  # titulo no idioma dublado: preferencia maxima
+                c["_query"] = qn
             audio_ranked.extend(ranked)
 
         ranked, trace = selector.rank(results_original, "audio", original_titles, year,
                                       language=lang, require_language=True,
                                       dubbed_title=dubbed_title)
+        qn = _record_trace(job, "audio", query_original, len(results_original), trace)
         _event(job, "candidates",
                f"Avaliação para ÁUDIO — busca '{query_original}' exigindo marcador de {label}",
-               {"role": "audio", "query": query_original, "candidates": trace})
+               {"role": "audio", "query": query_original, "search_query": qn})
         for c in ranked:
+            c["_query"] = qn
             # titulo original MAS com o titulo traduzido junto (release "Título / Title")
             # ainda conta como dublado confirmado; senao e so fallback
             c["tier"] = 0 if localized and selector.matches_title(c["title"], localized) else 1
@@ -324,18 +356,19 @@ async def _search(job: dict):
     video_viable = []
     if want_video:
         video_viable, trace = selector.rank(results_original, "video", original_titles, year)
+        qn = _record_trace(job, "video", query_original, len(results_original), trace)
+        for c in video_viable:
+            c["_query"] = qn
         _event(job, "candidates", f"Avaliação para VÍDEO — busca '{query_original}'",
-               {"role": "video", "query": query_original, "candidates": trace})
+               {"role": "video", "query": query_original, "search_query": qn})
 
     if want_audio and not audio_viable:
         raise RuntimeError(f"Nenhum torrent encontrado com áudio em {label}")
     if want_video and not video_viable:
         raise RuntimeError(f"Nenhum torrent de vídeo viável para '{original}'")
 
-    job["search"] = {
-        "audio": [_slim(c, f"a{i}") for i, c in enumerate(audio_viable[:MAX_SELECTABLE])],
-        "video": [_slim(c, f"v{i}") for i, c in enumerate(video_viable[:MAX_SELECTABLE])],
-    }
+    _store_selectable(job, "audio", audio_viable[:MAX_SELECTABLE])
+    _store_selectable(job, "video", video_viable[:MAX_SELECTABLE])
     _persist(job)
 
 
@@ -346,16 +379,17 @@ def _auto_pick(job: dict) -> tuple[dict | None, dict | None]:
     - original: melhor vídeo (sem áudio).
     - both:     melhor áudio define o corte; melhor vídeo do MESMO corte.
     """
-    search = job["search"]
+    audio = candidates.selectable(job, "audio")
+    video = candidates.selectable(job, "video")
     needed = _needed_torrents(job)
     if needed == ("audio",):
-        return search["audio"][0], None
+        return audio[0], None
     if needed == ("video",):
-        return None, search["video"][0]
+        return None, video[0]
 
-    for a in search["audio"]:
+    for a in audio:
         ed_label = a["edition"] or "normal"
-        vids = [v for v in search["video"] if v["edition"] == a["edition"]]
+        vids = [v for v in video if v["edition"] == a["edition"]]
         if vids:
             _event(job, "info",
                    f"Corte definido pelo áudio: '{ed_label}' — {len(vids)} vídeos compatíveis")

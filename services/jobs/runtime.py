@@ -18,7 +18,7 @@ from pathlib import Path
 import httpx
 
 import config
-from services import catalog, store
+from services import candidates, catalog, store
 from services.qbittorrent import QbitClient, QbitError
 
 
@@ -213,17 +213,24 @@ def load():
         _jobs[job["id"]] = job
 
 
+# seções do job que não vão no detalhe como estão: os eventos têm rota
+# própria e os candidatos chegam à UI pelas visões (lista de escolha no
+# get_job, payload dos gates de série, escolhido de cada papel abaixo)
+_NOT_PUBLIC = ("events", "search_queries", "search_candidates")
+
+
 def _public(job: dict) -> dict:
-    # search/search_tv ficam de fora do detalhe: são grandes e a UI recebe os
-    # candidatos pelo canal certo (job["search"] no manual de filmes entra via
-    # get_job; nos gates de série eles vêm no payload de job["awaiting"])
-    out = {k: v for k, v in job.items() if k not in ("events", "search",
-                                                     "search_tv")}
-    if job.get("media_type") == "tv" and job.get("awaiting"):
-        # gates de série deriváveis do estado: payload calculado aqui, não
-        # gravado (ver pipeline.DERIVED_GATES)
-        from services.series import pipeline
-        out["awaiting"] = pipeline.awaiting_view(job)
+    out = {k: v for k, v in job.items() if k not in _NOT_PUBLIC}
+    if job.get("media_type") == "tv":
+        if job.get("awaiting"):
+            # gates de série deriváveis do estado: payload calculado aqui, não
+            # gravado (ver pipeline.DERIVED_GATES)
+            from services.series import pipeline
+            out["awaiting"] = pipeline.awaiting_view(job)
+    else:
+        # filme: o escolhido de cada papel (video_torrent/audio_torrent) e o
+        # candidato ativo são atributos do candidato, não cópias no job
+        out.update(candidates.movie_fields(job))
     return out
 
 

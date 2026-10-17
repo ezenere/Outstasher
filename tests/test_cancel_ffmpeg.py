@@ -44,10 +44,10 @@ def test_cancel_kills_ffmpeg_and_deletes_output(temp_db, tmp_path, monkeypatch):
                     "preset": "veryslow"},
         "status": "merging", "detail": "",
         "movie": {"original_title": "Teste", "year": "2020", "original_language": "en"},
-        "video_torrent": None, "audio_torrent": None, "output": None,
+        "output": None,
         "progress": {"video": None, "audio": None, "merge": None},
         "destination_id": 1, "destination_label": "d", "destination_path": str(dest),
-        "created_at": "2026-01-01T00:00:00", "search": None, "fallbacks": None, "current": None,
+        "created_at": "2026-01-01T00:00:00", "search_queries": [], "search_candidates": [],
     }
     jobs._jobs["cxl1"] = job
     temp_db.upsert_job(job)

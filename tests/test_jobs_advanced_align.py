@@ -90,13 +90,12 @@ def _review_job(vf, af, needs_review=True):
         "id": "adv1", "tmdb_id": 5, "language": "pt", "mode": "files", "kind": "both",
         "status": "awaiting", "detail": "", "movie": {"original_title": "Filme Exemplo",
                                                      "year": "2014"},
-        "created_at": "2026-01-01T00:00:00", "video_torrent": None,
-        "audio_torrent": None, "output": None,
+        "created_at": "2026-01-01T00:00:00", "output": None,
         "progress": {"video": None, "audio": None},
         "manual_files": {"video": str(vf), "audio": str(af)},
         "advanced": {"video_file": str(vf), "audio_file": str(af), "edl": edl},
         "awaiting": {"reason": "alignment_review", "payload": {"episodes": {"filme": edl}}},
-        "search": None, "fallbacks": None, "current": None,
+        "search_queries": [], "search_candidates": [],
     }
 
 

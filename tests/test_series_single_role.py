@@ -40,7 +40,7 @@ def _job(kind: str, dest: str = "") -> dict:
         "report": None,
         "progress": {},
         "output": None,
-        "search_tv": {"original": {}, "dubbed": {}},
+        "search_queries": [], "search_candidates": [],
         "destination_path": dest,
         "created_at": "2026-10-16T00:00:00",
     }

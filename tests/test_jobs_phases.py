@@ -14,8 +14,7 @@ def _job(phase=None, pct=42.0):
             "kind": "both", "status": "merging", "detail": "", "progress": prog,
             "movie": {"original_title": "Filme Exemplo", "year": "2014"},
             "created_at": "2026-01-01T00:00:00", "output": None,
-            "video_torrent": None, "audio_torrent": None, "search": None,
-            "fallbacks": None, "current": None}
+            "search_queries": [], "search_candidates": []}
 
 
 def test_fase_vai_para_o_dropdown_e_para_o_card(temp_db):

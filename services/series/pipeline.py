@@ -24,7 +24,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 import config
-from services import jackett, jobs, store, tmdb, transcode
+from services import candidates, jackett, jobs, store, tmdb, transcode
 from services import selector
 from services.series import parse, selector_tv, subs
 
@@ -153,7 +153,10 @@ async def create_series(tmdb_id: int, language: str,
         "report": None,
         "progress": {},        # merge (M4+); download agregado vem dos torrents
         "output": None,
-        "search_tv": None,     # candidatos por papel/episódio (manual/trocas)
+        # candidatos da busca: únicos por papel, com a posição de cada um no
+        # ranking de cada episódio (manual/trocas — ver services/candidates.py)
+        "search_queries": [],
+        "search_candidates": [],
         "destination_id": dest["id"], "destination_label": dest["label"],
         "destination_path": dest["path"],
         "torrent_target_id": target["id"] if target else None,
@@ -356,8 +359,9 @@ async def _search_series(job: dict):
 
 
 def _rank_all(job: dict) -> dict[str, dict[tuple[int, int], list[dict]]]:
-    """Ranking por episódio×papel a partir dos pools. Também preenche
-    job["search_tv"] (candidatos enxutos para a UI/manual/trocas)."""
+    """Ranking por episódio×papel a partir dos pools. Também grava os
+    candidatos do job (únicos, com a posição em cada episódio) para a
+    UI/manual/trocas."""
     lang = job["language"]
     m = job["movie"]
     original, localized = m["original_title"], m["localized_title"]
@@ -372,10 +376,11 @@ def _rank_all(job: dict) -> dict[str, dict[tuple[int, int], list[dict]]]:
     refs = _active_refs(job)
     search_refs = {ep_key(s, e): _search_ref(job, ep_key(s, e)) for s, e in refs}
     ranked_all: dict[str, dict] = {}
-    job["search_tv"] = {"original": {}, "dubbed": {}}
+    candidates.reset(job)
     for role in roles_of(job):
         titles = titles_original if role == "original" else titles_dubbed
         ranked_all[role] = {}
+        per_episode: dict[str, list[dict]] = {}
         for s, e in refs:
             key = ep_key(s, e)
             ss, se = search_refs[key]
@@ -387,14 +392,15 @@ def _rank_all(job: dict) -> dict[str, dict[tuple[int, int], list[dict]]]:
                 requested=[search_refs[ep_key(a, b)] for a, b in refs],
                 known_seasons=known)
             ranked_all[role][(s, e)] = ranked
-            job["search_tv"][role][key] = [
-                _slim(c, f"{key}:{role[0]}{i}")
-                for i, c in enumerate(ranked[:MAX_PER_EPISODE])]
+            per_episode[key] = [_slim(c) for c in ranked[:MAX_PER_EPISODE]]
+        # o mesmo pack aparece no ranking de cada episódio que cobre: vira UM
+        # candidato (no servidor, 2.185 cópias gravadas eram 124 torrents)
+        candidates.set_series(job, role, per_episode)
     return ranked_all
 
 
-def _slim(cand: dict, cid: str) -> dict:
-    return {"id": cid, "title": cand["title"], "tracker": cand.get("tracker"),
+def _slim(cand: dict) -> dict:
+    return {"title": cand["title"], "tracker": cand.get("tracker"),
             "seeders": cand["seeders"], "size": cand["size"],
             "quality": cand.get("quality"), "coverage": cand.get("coverage"),
             "score": cand.get("score"), "tier": cand.get("tier"),
@@ -436,14 +442,7 @@ async def _plan_and_gate(job: dict):
         _store_plan(job, plans)
 
     if job["mode"] == "manual" and not job.get("_manual_done"):
-        _gate(job, "manual_pick", {
-            "candidates": job["search_tv"],
-            # visão INVERTIDA (torrent -> episódios): candidatos únicos por
-            # papel com os episódios pedidos que o TÍTULO de cada um cobre
-            "by_torrent": _torrent_candidates(job),
-            "requested": [ep_key(s, e) for s, e in _active_refs(job)],
-            "preselected": _plan_summary(job),
-        }, "Escolha os torrents (modo manual)")
+        _gate(job, "manual_pick", None, "Escolha os torrents (modo manual)")
         return
 
     gaps = _collect_gaps(job)
@@ -454,10 +453,8 @@ async def _plan_and_gate(job: dict):
 
     signals = _collect_signals(job)
     if signals and not job.get("_signals_accepted"):
-        _gate(job, "incompatible_torrents", {
-            "torrents": signals,
-            "episode_groups": job.get("episode_groups") or [],
-        }, "⚠️ Torrent(s) com sinal de incompatibilidade — confirme antes de baixar")
+        _gate(job, "incompatible_torrents", None,
+              "⚠️ Torrent(s) com sinal de incompatibilidade — confirme antes de baixar")
         return
 
     await _start_downloads(job)
@@ -598,21 +595,20 @@ def _torrent_candidates(job: dict) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = {}
     for role in roles_of(job):
         seen: dict[str, dict] = {}
-        for cands in (job.get("search_tv") or {}).get(role, {}).values():
-            for c in cands:
-                ident = parse.torrent_identity(c)
-                if ident in seen:
-                    continue
-                cov = parse.parse_coverage(c["title"])
-                matches = [ep_key(s, e) for s, e in refs
-                           if cov.covers(*_search_ref(job, ep_key(s, e)), known)]
-                seen[ident] = {
-                    "id": c["id"], "title": c["title"],
-                    "tracker": c.get("tracker"), "seeders": c.get("seeders"),
-                    "size": c.get("size"), "quality": c.get("quality"),
-                    "coverage": c.get("coverage"), "score": c.get("score"),
-                    "tier": c.get("tier"), "matches": matches,
-                }
+        for c in candidates.selectable(job, role):
+            ident = parse.torrent_identity(c)
+            if ident in seen:
+                continue
+            cov = parse.parse_coverage(c["title"])
+            matches = [ep_key(s, e) for s, e in refs
+                       if cov.covers(*_search_ref(job, ep_key(s, e)), known)]
+            seen[ident] = {
+                "id": c["id"], "title": c["title"],
+                "tracker": c.get("tracker"), "seeders": c.get("seeders"),
+                "size": c.get("size"), "quality": c.get("quality"),
+                "coverage": c.get("coverage"), "score": c.get("score"),
+                "tier": c.get("tier"), "matches": matches,
+            }
         out[role] = sorted(seen.values(),
                            key=lambda c: (-(c.get("tier") or 0),
                                           -len(c["matches"])))
@@ -621,10 +617,9 @@ def _torrent_candidates(job: dict) -> dict[str, list[dict]]:
 
 def _alternatives_for(job: dict, torrent: dict) -> list[dict]:
     """Candidatos alternativos que cobrem TODOS os episódios deste torrent."""
-    search = (job.get("search_tv") or {}).get(torrent["role"]) or {}
     if not torrent["coverage"]:
         return []
-    first = search.get(torrent["coverage"][0]) or []
+    first = candidates.for_episode(job, torrent["role"], torrent["coverage"][0])
     out = []
     for c in first:
         if c["title"] == torrent["title"]:
@@ -633,20 +628,22 @@ def _alternatives_for(job: dict, torrent: dict) -> list[dict]:
         known = set(job.get("known_seasons") or [])
         if all(cov.covers(*_search_ref(job, k), known)
                for k in torrent["coverage"]):
-            out.append(c)
+            out.append(candidates.series_view(c))
     return out[:30]
 
 
 # -------------------- gates --------------------
 
-# Gates cujo conteúdo é DERIVÁVEL do estado persistido do job (episódios e
-# torrents): o payload não é gravado — é calculado na hora em que a API
-# entrega o job (awaiting_view). Gravar uma cópia de algo derivável só cria o
-# risco de ela envelhecer (caso real: o gate de desalinhados ganhou os
-# doadores concluídos, e um gate aberto antes da atualização não os teria).
-# Os demais gates mostram RESULTADOS DE BUSCA, que só existem em memória
-# durante a busca — esses sim precisam do snapshot gravado.
-DERIVED_GATES = ("gaps_confirm", "alignment_review", "mismatched_pairs")
+# Gates cujo conteúdo é DERIVÁVEL do estado persistido do job (episódios,
+# torrents e candidatos da busca): o payload não é gravado — é calculado na
+# hora em que a API entrega o job (awaiting_view). Gravar uma cópia de algo
+# derivável só cria o risco de ela envelhecer (caso real: o gate de
+# desalinhados ganhou os doadores concluídos, e um gate aberto antes da
+# atualização não os teria). A escolha manual e os torrents incompatíveis
+# mostram resultados de busca — que agora são candidatos persistidos do job,
+# então também se recalculam (inclusive depois de um restart).
+DERIVED_GATES = ("gaps_confirm", "alignment_review", "mismatched_pairs",
+                 "manual_pick", "incompatible_torrents")
 
 
 def gate_payload(job: dict, reason: str) -> dict | None:
@@ -662,12 +659,21 @@ def gate_payload(job: dict, reason: str) -> dict | None:
     if reason == "mismatched_pairs":
         from services.series import rematch
         return rematch.gate_payload(job)
+    if reason == "manual_pick":
+        # visão INVERTIDA (torrent -> episódios): candidatos únicos por papel
+        # com os episódios pedidos que o TÍTULO de cada um cobre
+        return {"by_torrent": _torrent_candidates(job),
+                "requested": [ep_key(s, e) for s, e in _active_refs(job)],
+                "preselected": _plan_summary(job)}
+    if reason == "incompatible_torrents":
+        return {"torrents": _collect_signals(job),
+                "episode_groups": job.get("episode_groups") or []}
     return None
 
 
 def awaiting_view(job: dict) -> dict | None:
     """O `awaiting` como a UI o recebe: gate derivado com o payload calculado
-    agora; gate de busca com o snapshot gravado."""
+    agora; os outros (drift) com o que foi gravado."""
     gate = job.get("awaiting")
     if not gate or gate.get("reason") not in DERIVED_GATES:
         return gate
@@ -894,11 +900,7 @@ def _apply_replace(job: dict, decision: dict):
     entry = next((t for t in job["torrents"] if t["n"] == n), None)
     if entry is None:
         raise ValueError("Torrent não encontrado no plano")
-    cand = None
-    for cands in (job.get("search_tv") or {}).get(entry["role"], {}).values():
-        cand = next((c for c in cands if c["id"] == cid), None)
-        if cand:
-            break
+    cand = candidates.find(job, cid, entry["role"])
     if cand is None:
         raise ValueError("Candidato não encontrado (a busca pode ter sido refeita)")
     entry.update(title=cand["title"], tracker=cand.get("tracker"),
@@ -964,7 +966,6 @@ def _apply_manual(job: dict, decision: dict):
     if not picks:
         jobs._event(job, "chosen", "Modo manual: usuário manteve o plano automático")
         return
-    search = job.get("search_tv") or {}
     # agrupa escolhas por candidato (o mesmo pack escolhido para vários
     # episódios vira UM torrent)
     by_ident: dict[tuple[str, str], dict] = {}
@@ -974,8 +975,9 @@ def _apply_manual(job: dict, decision: dict):
         for role, cid in roles.items():
             if role not in roles_of(job):
                 raise ValueError(f"Papel inválido para este job: {role}")
-            cand = next((c for c in (search.get(role, {}).get(key) or [])
-                         if c["id"] == cid), None)
+            cand = candidates.find(job, cid, role)
+            if cand is not None and key not in cand["episodes"]:
+                cand = None  # existe, mas não está no ranking deste episódio
             if cand is None:
                 raise ValueError(f"Candidato {cid!r} não encontrado para {key}")
             ident = (role, parse.torrent_identity(cand))
@@ -1013,13 +1015,11 @@ def _apply_manual(job: dict, decision: dict):
 
 
 def _find_candidate(job: dict, role: str, candidate_id: str) -> dict:
-    """Candidato de um papel pelo id, procurando em todas as listas por
-    episódio (o mesmo torrent aparece em várias, com ids diferentes — o
-    primeiro id encontrado na busca vale como referência)."""
-    for cands in (job.get("search_tv") or {}).get(role, {}).values():
-        cand = next((c for c in cands if c["id"] == candidate_id), None)
-        if cand:
-            return cand
+    """Candidato de um papel pelo id (cada torrent é um candidato só, com a
+    posição em cada episódio; o id antigo "S01E02:o3" ainda resolve)."""
+    cand = candidates.find(job, candidate_id, role)
+    if cand is not None:
+        return cand
     raise ValueError(
         f"Candidato {candidate_id!r} não encontrado (a busca pode ter sido refeita)")
 
@@ -1412,8 +1412,8 @@ async def _readd(job: dict, t: dict):
 def _find_replacement(job: dict, t: dict) -> dict | None:
     """Próximo candidato do MESMO papel que cubra os MESMOS episódios do
     torrent `t` e ainda não esteja em uso no plano. None = sem reserva."""
-    search = (job.get("search_tv") or {}).get(t["role"]) or {}
-    first = search.get(t["coverage"][0]) if t["coverage"] else None
+    first = (candidates.for_episode(job, t["role"], t["coverage"][0])
+             if t["coverage"] else None)
     if not first:
         return None
     known = set(job.get("known_seasons") or [])

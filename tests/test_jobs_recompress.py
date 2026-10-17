@@ -72,7 +72,9 @@ def test_job_shape(library, monkeypatch):
         assert full["recompress"]["replace"] is False
         assert full["convert"]["video_codec"] == "hevc"
         # não é job de torrent: nada de busca/candidatos/kind
-        assert full["search"] is None and full["video_torrent"] is None
+        assert full["search_candidates"] == []
+        detail = jobs.get_job(job["id"])
+        assert detail["search"] is None and detail["video_torrent"] is None
         assert full["kind"] is None
     asyncio.run(go())
 
@@ -244,12 +246,12 @@ def test_resume_after_restart_uses_recompress_pipeline(library, monkeypatch):
         # sem manual_files, kind None) — recriado direto para simular o reload
         job = {"id": "rc1", "tmdb_id": None, "language": "pt", "mode": "recompress",
                "kind": None, "convert": CONV, "status": "merging", "detail": "",
-               "movie": None, "video_torrent": None, "audio_torrent": None,
+               "movie": None,
                "output": None, "destination_id": did,
                "created_at": "2026-01-01T00:00:00",
                "progress": {"video": None, "audio": None},
                "recompress": {"folder": folder, "rel": "filme.mkv", "replace": True},
-               "search": None, "fallbacks": None, "current": None}
+               "search_queries": [], "search_candidates": []}
         jobs._jobs["rc1"] = job
         jobs.resume_pending()
         await asyncio.gather(*jobs._tasks.values())
@@ -268,12 +270,12 @@ def test_resume_missing_source_errors(library, monkeypatch):
     async def go():
         job = {"id": "rc2", "tmdb_id": None, "language": "pt", "mode": "recompress",
                "kind": None, "convert": CONV, "status": "merging", "detail": "",
-               "movie": None, "video_torrent": None, "audio_torrent": None,
+               "movie": None,
                "output": None, "destination_id": did,
                "created_at": "2026-01-01T00:00:00",
                "progress": {"video": None, "audio": None},
                "recompress": {"folder": folder, "rel": "sumiu.mkv", "replace": True},
-               "search": None, "fallbacks": None, "current": None}
+               "search_queries": [], "search_candidates": []}
         jobs._jobs["rc2"] = job
         jobs.resume_pending()
         assert jobs._lookup("rc2")["status"] == "error"

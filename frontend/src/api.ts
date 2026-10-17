@@ -158,7 +158,6 @@ export interface JobGate {
     done?: Record<string, { dubbed: string }>
     attempts?: number
     /** manual_pick */
-    candidates?: Record<'original' | 'dubbed', Record<string, SeriesCandidate[]>>
     by_torrent?: Record<'original' | 'dubbed', TorrentChoice[]>
     requested?: string[]
     preselected?: { n: number; role: string; title: string; quality: string | null; coverage: string[] }[]
@@ -464,7 +463,9 @@ export interface JobEvent {
   ts: string
   kind: string
   message: string
-  data?: { role?: string; query?: string; candidates?: Candidate[] }
+  /** kind 'candidates': o evento grava só a referência à consulta
+   *  (search_query); o detalhe do job devolve o rastro dela em `candidates`. */
+  data?: { role?: string; query?: string; search_query?: number; candidates?: Candidate[] }
 }
 
 export interface MovieRef {

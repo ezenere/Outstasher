@@ -4,7 +4,7 @@ Cada tela da UI faz polling no seu ritmo, então cada função devolve SÓ o que
 aquela tela renderiza, em vez da lista completa de jobs.
 """
 
-from services import store
+from services import candidates, store
 from services.jobs import runtime
 from services.jobs.runtime import (
     _TERMINAL_STATUSES, _is_recompress, _jobs, _lookup, _needed_torrents,
@@ -31,7 +31,10 @@ def get_job(job_id: str) -> dict | None:
     job = _lookup(job_id)
     if not job:
         return None
-    return {**_public(job), "events": store.load_events(job_id), "search": job.get("search")}
+    # o evento "candidates" referencia a consulta; a lista que a lupa mostra
+    # é resolvida aqui, a partir dos candidatos do job
+    events = candidates.resolve_events(job, store.load_events(job_id))
+    return {**_public(job), "events": events, "search": candidates.search_view(job)}
 
 
 # -------------------- leituras enxutas (polling granular) --------------------
@@ -77,11 +80,13 @@ def _media_type(job: dict) -> str:
     return job.get("media_type", "movie")
 
 
-def _all_jobs(media: str | None = None) -> list[dict]:
+def _all_jobs(media: str | None = None, sections: bool = True) -> list[dict]:
     """Ativos (memória) + terminais (banco), sem duplicar. `media` filtra pela
-    dimensão de mídia (movie/tv)."""
+    dimensão de mídia (movie/tv); sections=False não lê os candidatos dos
+    terminais (quem só mostra título/estado/%)."""
     mem = [j for j in _jobs.values() if media is None or _media_type(j) == media]
-    return mem + store.load_jobs_by_status(_TERMINAL_STATUSES, media=media)
+    return mem + store.load_jobs_by_status(_TERMINAL_STATUSES, media=media,
+                                           sections=sections)
 
 
 def _movie_title(job: dict) -> str:
@@ -123,7 +128,8 @@ def summary() -> list[dict]:
     """Lista mínima de processos EM ANDAMENTO + erros, para o dropdown do
     cabeçalho. Só o essencial para o item da lista (sem candidatos/eventos)."""
     out = []
-    for j in _all_jobs():
+    # o dropdown faz polling: os candidatos do histórico não entram na conta
+    for j in _all_jobs(sections=False):
         state = _STATE_OF.get(j["status"])
         if state in (None, "done"):  # dropdown ignora concluídos e cancelados
             continue
@@ -186,8 +192,8 @@ def _slim_job(job: dict) -> dict:
         "status": job["status"], "detail": job.get("detail", ""),
         "movie": job.get("movie"), "created_at": job["created_at"],
         "destination_label": job.get("destination_label"),
-        "video_torrent": job.get("video_torrent"),
-        "audio_torrent": job.get("audio_torrent"),
+        "video_torrent": candidates.torrent_view(candidates.active(job, "video")),
+        "audio_torrent": candidates.torrent_view(candidates.active(job, "audio")),
         "output": job.get("output"),
         "progress": {
             "video": _slim_progress(job["progress"].get("video")),

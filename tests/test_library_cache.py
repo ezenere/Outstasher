@@ -70,10 +70,9 @@ def test_invalidation_on_job_done_and_delete_folder(library):
     # um job que conclui invalida o cache (entrou filme novo no destino)
     job = {"id": "x1", "tmdb_id": 1, "language": "pt", "mode": "auto", "kind": "both",
            "status": "merging", "detail": "", "movie": None,
-           "created_at": "2026-01-01T00:00:00", "video_torrent": None,
-           "audio_torrent": None, "output": None,
+           "created_at": "2026-01-01T00:00:00", "output": None,
            "progress": {"video": None, "audio": None},
-           "search": None, "fallbacks": None, "current": None}
+           "search_queries": [], "search_candidates": []}
     jobs._jobs["x1"] = job
     jobs._set(job, "done", "ok")
     assert catalog._library_cache["at"] is None

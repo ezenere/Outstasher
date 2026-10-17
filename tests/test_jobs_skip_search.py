@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from services import jobs
+from services import candidates, jobs
 from services.jobs import actions, movies
 from services.series import pipeline
 
@@ -30,8 +30,7 @@ def _job_awaiting(**extra):
         "movie": {"original_title": "Filme Exemplo", "year": "2020"},
         "created_at": "2026-01-01T00:00:00",
         "progress": {"video": None, "audio": None},
-        "search": {"video": [], "audio": []}, "fallbacks": {},
-        "video_torrent": None, "audio_torrent": None, "current": {},
+        "search_queries": [], "search_candidates": [],
     }
     job.update(extra)
     return job
@@ -56,7 +55,8 @@ def test_run_com_skip_search_nao_chama_o_indexador(temp_db, monkeypatch):
     asyncio.run(movies._run(job))
     assert chamou == []                       # nem busca nem download
     assert job["status"] == "awaiting"
-    assert job["search"] == {"audio": [], "video": []}
+    # o gate abre com as listas VAZIAS (é nele que o magnet é colado)
+    assert candidates.search_view(job) == {"audio": [], "video": []}
     assert job["movie"]["year"] == "2020"     # metadados do TMDB carregados
 
 
@@ -82,8 +82,9 @@ def test_select_aceita_magnet_proprio_nos_dois_papeis(temp_db, monkeypatch):
     assert baixados["video"]["link"] == "https://x/original.torrent"
     assert baixados["video"]["title"] == "original.torrent"   # título vem do link
     # entram na busca do job: aparecem na lista e servem de reserva depois
-    assert job["search"]["audio"][0]["tracker"] == "manual"
-    assert job["search"]["video"][0]["tracker"] == "manual"
+    busca = candidates.search_view(job)
+    assert busca["audio"][0]["tracker"] == "manual"
+    assert busca["video"][0]["tracker"] == "manual"
     assert not job.get("awaiting")     # o gate se resolveu
 
 
@@ -92,7 +93,8 @@ def test_select_mistura_candidato_da_busca_com_magnet_proprio(temp_db, monkeypat
     vídeo à mão."""
     cand = {"id": "a1", "title": "Dublado da busca", "seeders": 5, "size": 1,
             "score": 1, "edition": None, "magnet": "magnet:?xt=urn:btih:busca"}
-    job = _job_awaiting(search={"audio": [cand], "video": []})
+    job = _job_awaiting()
+    job["search_candidates"].append(candidates.new("audio", "a1", cand, rank=0))
     jobs._jobs["sk1"] = job
     baixados = {}
 
@@ -126,7 +128,7 @@ def test_select_recusa_url_invalida_e_mantem_o_gate(temp_db):
             await actions.select("sk1", None, None,
                                  custom={"audio": {"url": "ftp://x/y.torrent"}})
     asyncio.run(go())
-    assert job["search"]["audio"] == []
+    assert candidates.search_view(job)["audio"] == []
     assert job["status"] == "awaiting"
 
 
@@ -151,7 +153,7 @@ def test_serie_com_skip_search_gateia_manual_sem_buscar(temp_db, monkeypatch):
                                 "state": "pending", "src": {}, "output": None,
                                 "error": None}},
         "torrents": [], "awaiting": None, "report": None, "order_map": None,
-        "search_tv": {"original": {}, "dubbed": {}},
+        "search_queries": [], "search_candidates": [],
     }
     jobs._jobs["sr1"] = job
 
@@ -160,7 +162,8 @@ def test_serie_com_skip_search_gateia_manual_sem_buscar(temp_db, monkeypatch):
     assert job["status"] == "awaiting"
     assert job["awaiting"]["reason"] == "manual_pick"
     # a lista vem vazia: é no gate que o usuário cola os magnets
-    assert job["awaiting"]["payload"]["by_torrent"] == {"original": [], "dubbed": []}
+    payload = jobs._public(job)["awaiting"]["payload"]
+    assert payload["by_torrent"] == {"original": [], "dubbed": []}
 
 
 # -------------------- duplicata e cancel de duplicado --------------------

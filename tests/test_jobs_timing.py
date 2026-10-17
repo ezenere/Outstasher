@@ -19,10 +19,10 @@ def test_deliver_single_records_merge_started_at(temp_db, tmp_path, monkeypatch)
         "id": "t1", "tmdb_id": 1, "language": "pt", "mode": "auto", "kind": "original",
         "convert": None, "status": "downloading", "detail": "",
         "movie": {"original_title": "Filme", "year": "2020", "original_language": "en"},
-        "video_torrent": None, "audio_torrent": None, "output": None,
+        "output": None,
         "progress": {"video": None, "audio": None},
         "destination_id": 1, "destination_label": "d", "destination_path": str(dest),
-        "created_at": "2026-01-01T00:00:00", "search": None, "fallbacks": None, "current": None,
+        "created_at": "2026-01-01T00:00:00", "search_queries": [], "search_candidates": [],
     }
     jobs._jobs["t1"] = job
     temp_db.upsert_job(job)

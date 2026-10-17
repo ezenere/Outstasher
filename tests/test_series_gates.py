@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from services import candidates
 from services.series import pipeline
 
 
@@ -40,7 +41,8 @@ def _job(tmp_path: Path | None = None) -> dict:
         "report": None,
         "progress": {},
         "output": None,
-        "search_tv": {"original": {}, "dubbed": {}},
+        "search_queries": [],
+        "search_candidates": [],
         "created_at": "2026-08-16T00:00:00",
     }
 
@@ -181,7 +183,7 @@ def test_apply_manual_agrupa_pack(temp_db):
             "magnet": "magnet:?xt=urn:btih:" + "b" * 40, "link": None,
             "infohash": None, "files": None}
     pack2 = dict(pack, id="S01E02:d0")
-    job["search_tv"]["dubbed"] = {"S01E01": [pack], "S01E02": [pack2]}
+    candidates.set_series(job, "dubbed", {"S01E01": [pack], "S01E02": [pack2]})
 
     pipeline._apply_manual(job, {"picks": {
         "S01E01": {"dubbed": "S01E01:d0"},
@@ -222,7 +224,7 @@ def test_manual_torrents_auto_atribui_pelo_titulo(temp_db):
         _torrent(1, "dubbed", ["S01E01", "S01E02"], "BB S01 Dublado"),
     ]
     pack = _pack_cand("S01E01:d0", "Serie Exemplo S01 BluRay Dublado")
-    job["search_tv"]["dubbed"] = {"S01E01": [pack]}
+    candidates.set_series(job, "dubbed", {"S01E01": [pack]})
     pipeline._apply_manual(job, {"torrents": [
         {"candidate_id": "S01E01:d0", "role": "dubbed", "episodes": "auto"},
     ]})
@@ -241,7 +243,7 @@ def test_manual_torrents_explicito_vence_auto(temp_db):
     job["torrents"] = [_torrent(0, "dubbed", ["S01E01", "S01E02"], "auto plano")]
     pack = _pack_cand("a", "Serie Exemplo S01 WEB-DL Dublado")
     avulso = _pack_cand("b", "Serie Exemplo S01E02 BluRay Dublado")
-    job["search_tv"]["dubbed"] = {"S01E01": [pack, avulso]}
+    candidates.set_series(job, "dubbed", {"S01E01": [pack, avulso]})
     pipeline._apply_manual(job, {"torrents": [
         {"candidate_id": "a", "role": "dubbed", "episodes": "auto"},
         # E02 explícito no avulso: sai do auto do pack
@@ -258,7 +260,7 @@ def test_manual_torrents_titulo_sem_match_e_aceito(temp_db):
     job = _job()
     job["torrents"] = []
     cand = _pack_cand("a", "Serie Exemplo 1080p Coletânea Dublado")
-    job["search_tv"]["dubbed"] = {"S01E01": [cand]}
+    candidates.set_series(job, "dubbed", {"S01E01": [cand]})
     pipeline._apply_manual(job, {"torrents": [
         {"candidate_id": "a", "role": "dubbed", "episodes": ["S01E01", "S01E02"]},
     ]})
@@ -269,7 +271,7 @@ def test_manual_torrents_titulo_sem_match_e_aceito(temp_db):
 def test_manual_torrents_episodio_fora_do_pedido(temp_db):
     job = _job()
     cand = _pack_cand("a", "Serie Exemplo S01 Dublado")
-    job["search_tv"]["dubbed"] = {"S01E01": [cand]}
+    candidates.set_series(job, "dubbed", {"S01E01": [cand]})
     with pytest.raises(ValueError, match="fora do pedido"):
         pipeline._apply_manual(job, {"torrents": [
             {"candidate_id": "a", "role": "dubbed", "episodes": ["S09E09"]},
@@ -285,7 +287,7 @@ def test_find_replacement_mesma_cobertura(temp_db):
     reserva_boa = _pack_cand("r1", "Serie Exemplo S01 720p WEB-DL")
     reserva_parcial = _pack_cand("r2", "Serie Exemplo S01E01 1080p")
     # a parcial vem primeiro no rank, mas não cobre S01E02 -> pula
-    job["search_tv"]["original"] = {"S01E01": [reserva_parcial, reserva_boa]}
+    candidates.set_series(job, "original", {"S01E01": [reserva_parcial, reserva_boa]})
     nxt = pipeline._find_replacement(job, stalled)
     assert nxt["id"] == "r1"
 
@@ -298,7 +300,7 @@ def test_switch_torrent_valida_estado_e_cobertura(temp_db):
     t["state"] = "downloading"
     job["torrents"] = [t]
     parcial = _pack_cand("p", "Serie Exemplo S01E01 1080p")
-    job["search_tv"]["original"] = {"S01E01": [parcial]}
+    candidates.set_series(job, "original", {"S01E01": [parcial]})
     import services.jobs as jobs_mod
     jobs_mod._jobs[job["id"]] = job
     try:
@@ -338,8 +340,10 @@ def test_gaps_edit_volta_para_o_manual(temp_db):
         assert job["mode"] == "manual"
         assert job["status"] == "awaiting"
         assert job["awaiting"]["reason"] == "manual_pick"
-        # a visão invertida vai no payload do gate reaberto
-        assert "by_torrent" in job["awaiting"]["payload"]
+        # a visão invertida vai no payload do gate reaberto (calculado na
+        # leitura: nada gravado)
+        assert job["awaiting"]["payload"] is None
+        assert "by_torrent" in jobs_mod._public(job)["awaiting"]["payload"]
     finally:
         jobs_mod._jobs.pop(job["id"], None)
 
@@ -420,7 +424,7 @@ def test_manual_torrents_mid_download_preserva_o_que_ja_baixou(temp_db):
     done["state"] = "done"
     job["torrents"] = [done]
     cand = _pack_cand("x", "Serie Exemplo S01E02 WEB-DL Dublado")
-    job["search_tv"]["dubbed"] = {"S01E02": [cand]}
+    candidates.set_series(job, "dubbed", {"S01E02": [cand]})
     pipeline._apply_manual(job, {"torrents": [
         {"candidate_id": "x", "role": "dubbed", "episodes": ["S01E02"]},
     ]})
@@ -499,11 +503,36 @@ def test_revisao_de_alinhamento_nao_duplica_as_edls(temp_db):
     assert jobs._public(job)["awaiting"]["payload"] == {"episodes": {"S01E02": edl}}
 
 
-def test_gate_de_busca_continua_gravado(temp_db):
-    """Resultado de busca só existe em memória durante a busca: esse snapshot
-    precisa mesmo ficar gravado no gate."""
+def test_gates_de_busca_tambem_sao_derivados(temp_db):
+    """Os candidatos da busca agora são persistidos no job: a escolha manual
+    e os torrents incompatíveis não gravam mais snapshot — o payload sai dos
+    candidatos e do plano na hora da leitura (e sobrevive a um restart)."""
     from services import jobs
     job = _job()
-    pipeline._gate(job, "manual_pick", {"by_torrent": {"original": [], "dubbed": []}}, "manual")
-    assert job["awaiting"]["payload"] == {"by_torrent": {"original": [], "dubbed": []}}
-    assert jobs._public(job)["awaiting"] == job["awaiting"]
+    job["torrents"] = [_torrent(0, "original", ["S01E01", "S01E02"])]
+    pack = _pack_cand(None, "Serie Exemplo S01 1080p BluRay")
+    avulso = _pack_cand(None, "Serie Exemplo S01E02 720p WEB-DL")
+    candidates.set_series(job, "original", {"S01E01": [pack],
+                                            "S01E02": [pack, avulso]})
+    pipeline._gate(job, "manual_pick", {"by_torrent": "snapshot"}, "manual")
+    assert job["awaiting"]["payload"] is None
+    view = jobs._public(job)["awaiting"]["payload"]
+    assert set(view) == {"by_torrent", "requested", "preselected"}
+    assert view["requested"] == ["S01E01", "S01E02"]
+    by = {c["title"]: c for c in view["by_torrent"]["original"]}
+    # o pack é UM candidato (estava no ranking dos dois episódios)
+    assert len(view["by_torrent"]["original"]) == 2
+    assert by["Serie Exemplo S01 1080p BluRay"]["matches"] == ["S01E01", "S01E02"]
+    assert by["Serie Exemplo S01E02 720p WEB-DL"]["matches"] == ["S01E02"]
+    assert view["preselected"][0]["coverage"] == ["S01E01", "S01E02"]
+
+    # torrent com nome ambíguo (numeração absoluta) -> sinal + alternativas
+    job["torrents"] = [_torrent(0, "original", ["S01E01", "S01E02"],
+                                "Serie Exemplo - 015 [1080p]")]
+    pipeline._gate(job, "incompatible_torrents", {"torrents": "snapshot"}, "sinais")
+    assert job["awaiting"]["payload"] is None
+    view = jobs._public(job)["awaiting"]["payload"]
+    assert [t["n"] for t in view["torrents"]] == [0]
+    assert [a["title"] for a in view["torrents"][0]["alternatives"]] == [
+        "Serie Exemplo S01 1080p BluRay"]
+    assert view["episode_groups"] == []

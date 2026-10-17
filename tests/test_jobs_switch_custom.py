@@ -3,7 +3,7 @@ import asyncio
 
 import pytest
 
-from services import jobs
+from services import candidates, jobs
 from services.jobs import search
 
 
@@ -38,13 +38,12 @@ def _job(status="downloading"):
                                                   "year": "2014"},
         "created_at": "2026-01-01T00:00:00", "output": None,
         "progress": {"video": None, "audio": None},
-        "video_torrent": {"title": "antigo", "seeders": 9, "size": 1, "score": 1,
-                          "edition": None},
-        "audio_torrent": None,
-        "search": {"video": [], "audio": []}, "fallbacks": {},
-        "current": {"video": {"id": "v0", "title": "antigo", "seeders": 9,
-                              "size": 1, "score": 1, "edition": None,
-                              "magnet": "magnet:?xt=urn:btih:old"}},
+        "search_queries": [],
+        # o torrent no ar (ativo) não está na lista escolhível
+        "search_candidates": [candidates.new(
+            "video", "v0", {"title": "antigo", "seeders": 9, "size": 1,
+                            "score": 1, "edition": None,
+                            "magnet": "magnet:?xt=urn:btih:old"}, active=True)],
     }
 
 
@@ -84,10 +83,10 @@ def test_switch_com_magnet_proprio(temp_db, monkeypatch):
         assert qbit.added and qbit.added[0][0] == "magnet:?xt=urn:btih:novo"
         assert qbit.deleted == ["h0"]
         # virou o torrent atual e entrou na lista da busca (dá para voltar nele)
-        assert job["video_torrent"]["title"] == "Filme Exemplo 2160p Remux"
-        assert job["search"]["video"][0]["tracker"] == "manual"
+        assert jobs._public(job)["video_torrent"]["title"] == "Filme Exemplo 2160p Remux"
+        assert candidates.search_view(job)["video"][0]["tracker"] == "manual"
         # o antigo virou reserva
-        assert [c["id"] for c in job["fallbacks"]["video"]] == ["v0"]
+        assert [c["id"] for c in candidates.fallbacks(job, "video")] == ["v0"]
     asyncio.run(go())
 
 
@@ -103,8 +102,8 @@ def test_switch_custom_valida_url_e_estado(temp_db, monkeypatch):
         with pytest.raises(ValueError, match="magnet"):
             await jobs.switch("sw1", "video", custom={"url": "sei lá"})
         # url inválida não mexeu no job
-        assert job["search"]["video"] == []
-        assert job["video_torrent"]["title"] == "antigo"
+        assert candidates.selectable(job, "video") == []
+        assert jobs._public(job)["video_torrent"]["title"] == "antigo"
     asyncio.run(go())
 
 
@@ -190,16 +189,16 @@ def test_escolher_outro_na_pausa_descarta_o_torrent_anterior(temp_db, monkeypatc
     from services.jobs import downloads
     job = _job(status="awaiting")
     job["kind"] = "both"
-    job["search"] = {
-        "video": [{"id": "v0", "title": "vídeo escolhido", "seeders": 5, "size": 1,
-                   "score": 1, "edition": None, "magnet": "magnet:?xt=urn:btih:v0"}],
-        "audio": [{"id": "a1", "title": "áudio novo", "seeders": 4, "size": 1,
-                   "score": 1, "edition": None, "magnet": "magnet:?xt=urn:btih:a1"}],
-    }
-    job["current"] = {"video": job["search"]["video"][0],
-                      "audio": {"id": "a0", "title": "áudio velho", "seeders": 1,
-                                "size": 1, "score": 1, "edition": None,
-                                "magnet": "magnet:?xt=urn:btih:a0"}}
+    video = candidates.new("video", "v0", {
+        "title": "vídeo escolhido", "seeders": 5, "size": 1, "score": 1,
+        "edition": None, "magnet": "magnet:?xt=urn:btih:v0"}, rank=0, active=True)
+    audio_novo = candidates.new("audio", "a1", {
+        "title": "áudio novo", "seeders": 4, "size": 1, "score": 1,
+        "edition": None, "magnet": "magnet:?xt=urn:btih:a1"}, rank=0)
+    audio_velho = candidates.new("audio", "a0", {
+        "title": "áudio velho", "seeders": 1, "size": 1, "score": 1,
+        "edition": None, "magnet": "magnet:?xt=urn:btih:a0"}, active=True)
+    job["search_candidates"] = [video, audio_novo, audio_velho]
     jobs._jobs["sw1"] = job
 
     class PorPapel(FakeQbit):
@@ -211,10 +210,12 @@ def test_escolher_outro_na_pausa_descarta_o_torrent_anterior(temp_db, monkeypatc
     qbit = PorPapel()
     monkeypatch.setattr(jobs.runtime, "_qbit", qbit)
 
-    asyncio.run(downloads._start_download(job, job["search"]["audio"][0],
-                                          job["search"]["video"][0]))
+    asyncio.run(downloads._start_download(job, audio_novo, video))
     # o áudio anterior saiu (tag + torrent); o vídeo, que não mudou, ficou
     assert qbit.untagged == [("audio_velho", "dl-sw1-audio")]
     assert qbit.deleted == ["audio_velho"]
     assert sorted(u for u, _ in qbit.added) == ["magnet:?xt=urn:btih:a1",
                                                 "magnet:?xt=urn:btih:v0"]
+    # o escolhido virou o ativo do papel; o velho deixou de ser
+    assert candidates.active(job, "audio")["id"] == "a1"
+    assert candidates.active(job, "video")["id"] == "v0"

@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import config
+from services import candidates
 from services.jobs import runtime
 from services.jobs.runtime import (
     VIDEO_EXTENSIONS, _CONN_ERRORS, _event, _map_qbit_path, _needed_torrents,
@@ -45,35 +46,29 @@ async def _start_download(job: dict, a: dict | None, v: dict | None):
     # refeita): o torrent anterior de cada papel TROCADO sai do qBittorrent —
     # senão ele fica com a tag do job e o watchdog continua lendo o progresso
     # dele, e a UI nunca mostra o novo
+    a = candidates.ensure(job, "audio", a) if a else None
+    v = candidates.ensure(job, "video", v) if v else None
     for kind, cand in (("video", v), ("audio", a)):
-        cur = (job.get("current") or {}).get(kind)
+        cur = candidates.active(job, kind)
         if cand and cur and cur.get("id") != cand.get("id"):
             await _drop_tagged(job, kind)
 
     if a:
         _event(job, "chosen", f"🔊 Áudio: {a['title']} (score {a['score']}, "
                               f"{a['seeders']} seeds, corte {a['edition'] or 'normal'})")
-        job["audio_torrent"] = {"title": a["title"], "seeders": a["seeders"],
-                                "size": a["size"], "score": a["score"], "edition": a["edition"],
-                                "id": a.get("id"), "tracker": a.get("tracker")}
     if v:
         _event(job, "chosen", f"Vídeo: {v['title']} (score {v['score']}, "
                               f"{v['seeders']} seeds, corte {v['edition'] or 'normal'})")
-        job["video_torrent"] = {"title": v["title"], "seeders": v["seeders"],
-                                "size": v["size"], "score": v["score"], "edition": v["edition"],
-                                "id": v.get("id"), "tracker": v.get("tracker")}
 
-    # reservas do mesmo corte, para o watchdog trocar se o download travar
-    search = job.get("search") or {"audio": [], "video": []}
-    job["fallbacks"] = {
-        "audio": [x for x in search["audio"]
-                  if a and x["edition"] == a["edition"] and x["id"] != a["id"]],
-        "video": [x for x in search["video"]
-                  if v and x["edition"] == v["edition"] and x["id"] != v["id"]],
-    }
-    # candidato ativo (com magnet/link): usado para reinserir se o torrent
-    # sumir do qBittorrent e para a troca manual saber o que está rodando
-    job["current"] = {"video": v, "audio": a}
+    # reservas do mesmo corte, para o watchdog trocar se o download travar, e
+    # o candidato ativo de cada papel (com magnet/link): usado para reinserir
+    # se o torrent sumir do qBittorrent e para a troca manual saber o que está
+    # rodando. Os dois são ATRIBUTOS do candidato — nada de copiá-lo.
+    for kind, chosen in (("audio", a), ("video", v)):
+        candidates.set_fallbacks(job, kind, [
+            x for x in candidates.selectable(job, kind)
+            if chosen and x["edition"] == chosen["edition"] and x["id"] != chosen["id"]])
+        candidates.set_active(job, kind, chosen)
 
     _set(job, "searching", "Enviando torrents para o qBittorrent...")
     save_path = job.get("torrent_save_path") or config.QBIT_SAVE_PATH or None
@@ -252,12 +247,7 @@ async def _wait_downloads(job: dict) -> dict:
 
 async def _readd_torrent(job: dict, kind: str):
     """Reinsere o torrent atual de `kind` que sumiu do qBittorrent."""
-    cand = (job.get("current") or {}).get(kind)
-    if not cand:
-        # jobs antigos (sem "current"): tenta achar o candidato pelo título escolhido
-        title = (job.get(f"{kind}_torrent") or {}).get("title")
-        cands = (job.get("search") or {}).get(kind) or []
-        cand = next((c for c in cands if c["title"] == title), None)
+    cand = candidates.active(job, kind)
     if not cand or not (cand.get("magnet") or cand.get("link")):
         _event(job, "qbit",
                f"⚠️ Torrent de {kind} sumiu do qBittorrent e não tenho o link para "
@@ -271,10 +261,10 @@ async def _readd_torrent(job: dict, kind: str):
 
 async def _switch_torrent(job: dict, kind: str, current: dict, limit_min: int) -> bool:
     """Watchdog: troca um download travado pelo próximo candidato do mesmo corte."""
-    fallbacks = (job.get("fallbacks") or {}).get(kind) or []
-    if not fallbacks:
+    reservas = candidates.fallbacks(job, kind)
+    if not reservas:
         return False
-    nxt = fallbacks[0]
+    nxt = reservas[0]
     await _replace_torrent(job, kind, current, nxt,
                            f"⏳ Download de {kind} travado há {limit_min} min — trocado por")
     return True
@@ -288,13 +278,12 @@ async def _replace_torrent(job: dict, kind: str, current: dict | None, nxt: dict
     O candidato substituído volta para o FIM da lista de reservas — dá para
     tentar de novo mais tarde.
     """
-    if not job.get("fallbacks"):
-        job["fallbacks"] = {}
-    fb = job["fallbacks"].get(kind) or []
-    job["fallbacks"][kind] = [c for c in fb if c["id"] != nxt["id"]]
-    cur_cand = (job.get("current") or {}).get(kind)
+    nxt = candidates.ensure(job, kind, nxt)
+    fb = [c for c in candidates.fallbacks(job, kind) if c["id"] != nxt["id"]]
+    cur_cand = candidates.active(job, kind)
     if cur_cand and cur_cand["id"] != nxt["id"]:
-        job["fallbacks"][kind].append(cur_cand)
+        fb.append(cur_cand)
+    candidates.set_fallbacks(job, kind, fb)
 
     tag = _tag(job, kind)
     # limpa a tag inteira (não só o `current` que o chamador viu): torrent
@@ -305,12 +294,7 @@ async def _replace_torrent(job: dict, kind: str, current: dict | None, nxt: dict
     save_path = job.get("torrent_save_path") or config.QBIT_SAVE_PATH or None
     await runtime._qbit.add(nxt.get("magnet") or nxt["link"], tag, save_path)
 
-    job[f"{kind}_torrent"] = {"title": nxt["title"], "seeders": nxt["seeders"],
-                              "size": nxt["size"], "score": nxt["score"],
-                              "edition": nxt["edition"]}
-    if not job.get("current"):
-        job["current"] = {}
-    job["current"][kind] = nxt
+    candidates.set_active(job, kind, nxt)
     # o progresso do torrent que saiu não vale mais: mostra JÁ o novo em 0%
     # ("Obtendo metadados") em vez de deixar na tela o nome/percentual antigo
     # até o watchdog passar
