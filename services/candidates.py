@@ -24,7 +24,7 @@ cada candidato existe UMA vez e o resto é atributo ou referência:
     }]
 
 Espelha as tabelas search_queries / search_candidates / candidate_episodes
-(services/store.py decompõe e recompõe). As VISÕES que a UI conhece
+(services/store/candidates.py decompõe e recompõe). As VISÕES que a UI conhece
 (`search`, `video_torrent`, `current`, o rastro dos eventos...) são montadas
 na leitura pelas funções daqui.
 

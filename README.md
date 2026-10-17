@@ -247,7 +247,8 @@ segmentos com cortes de preto/silêncio), `--align-report` (triagem de séries).
 | `services/selector.py` | escolha do melhor torrent (filmes) |
 | `services/jobs/` | jobs de filme em camadas: estado (`runtime.py`), leituras (`views.py`), busca (`search.py`), qBittorrent (`downloads.py`), entrega (`delivery.py`), alinhamento avançado (`advanced.py`), recompressão (`recompress.py`), pipeline (`movies.py`) e ações da UI (`actions.py`) |
 | `services/merger.py`, `transcode.py` | merge, GCC-PHAT, opções de conversão |
-| `services/store.py`, `catalog.py` | SQLite, catálogo |
+| `services/store/` | SQLite: conexão e schema (`db.py`), configuração (`configuration.py`), eventos (`events.py`), persistência do job (`jobs.py`) e uma seção por módulo — candidatos (`candidates.py`), série (`series.py`), EDLs (`edls.py`), escalares e metadados do TMDB (`scalars.py`, `scalar_rows.py`) |
+| `services/catalog.py` | catálogo |
 | `services/series/` | séries: `pipeline.py` (gates), `selector_tv.py`, `parse.py`, `merge_runner.py`, `subs.py` (legendas externas), `recompress.py`, `naming.py` |
 | `services/series/align/` | alinhador: `fingerprint.py`, `dp.py`, `classify.py`, `refine.py`, `edl.py`, `render.py`, `rules.py` |
 | `merge.py` | CLI avulso |
