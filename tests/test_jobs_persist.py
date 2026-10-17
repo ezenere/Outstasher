@@ -19,20 +19,38 @@ def _job(status="downloading") -> dict:
             "episodes": {}}
 
 
+class _GravacoesDoJob:
+    """Gravações da linha do job na tabela `jobs`, por id, observadas no SQL
+    que o SQLite executa DE VERDADE (trace da conexão).
+
+    Não substitui função nenhuma do store: interceptar `store.upsert_job` só
+    enxergava quem chama pelo pacote, e as chamadas internas entre os módulos
+    do store passavam por fora. No trace toda gravação aparece, venha de onde
+    vier."""
+
+    def __init__(self):
+        self.stmts: list[str] = []
+
+    def __call__(self, sql: str):
+        w = sql.lstrip().split(None, 3)
+        if len(w) >= 3 and ((w[0].upper() == "INSERT" and w[2] == "jobs")
+                            or (w[0].upper() == "UPDATE" and w[1] == "jobs")):
+            self.stmts.append(sql)
+
+    def __getitem__(self, job_id: str) -> int:
+        return sum(1 for s in self.stmts if f"'{job_id}'" in s)
+
+
 @pytest.fixture
 def writes(temp_db, monkeypatch):
-    """Conta as gravações do DOCUMENTO do job (upsert_job), por id."""
-    count: dict[str, int] = {}
-    real = temp_db.upsert_job
-
-    def _counting(job, create=True):
-        count[job["id"]] = count.get(job["id"], 0) + 1
-        return real(job, create=create)
-
-    monkeypatch.setattr(temp_db, "upsert_job", _counting)
+    """Conta as gravações do DOCUMENTO do job, por id (ver _GravacoesDoJob)."""
+    contador = _GravacoesDoJob()
+    temp_db._conn.set_trace_callback(contador)
     # janela longa: o teste controla a passagem do tempo à mão
     monkeypatch.setattr(config, "EVENT_PERSIST_SECONDS", 60.0)
-    return count
+    yield contador
+    if temp_db._conn is not None:
+        temp_db._conn.set_trace_callback(None)
 
 
 def _janela_passou(job):

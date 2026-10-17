@@ -363,14 +363,15 @@ def test_progresso_do_merge_e_efemero_o_do_download_nao(temp_db):
     assert sql.writes() == {"jobs"}
 
 
-def test_hooks_do_ffmpeg_nao_gravam_o_job(temp_db, monkeypatch):
+def test_hooks_do_ffmpeg_nao_gravam_o_job(temp_db):
+    """A barra do merge é efêmera: andar de 0 a 4% não escreve nada no banco
+    (observado no SQL executado, não interceptando função do store)."""
     job = _filme("ph1", status="merging")
-    calls = []
-    monkeypatch.setattr(store, "upsert_job", lambda *a, **k: calls.append(a))
     _log, on_progress = jobs.runtime._ffmpeg_hooks(job)
-    for i in range(5):
-        on_progress({"pct": float(i)})
-    assert calls == [] and job["progress"]["merge"]["pct"] == 4.0
+    with _Sql() as sql:
+        for i in range(5):
+            on_progress({"pct": float(i)})
+    assert sql.writes() == set() and job["progress"]["merge"]["pct"] == 4.0
 
 
 def test_create_false_sem_linha_nao_grava_nada(temp_db):
