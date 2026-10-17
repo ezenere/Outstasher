@@ -30,6 +30,7 @@ na leitura pelas funções daqui.
 
 Módulo folha: não importa nada do projeto.
 """
+import hashlib
 import re
 from datetime import datetime
 
@@ -149,6 +150,14 @@ def ensure(job: dict, role: str, cand: dict) -> dict:
     row = new(role, cand.get("id") or f"x:{len(rows(job))}", cand)
     rows(job).append(row)
     return row
+
+
+def custom_id(url: str) -> str:
+    """Id do candidato de um magnet/link do usuário: o MESMO link dá o mesmo
+    id em qualquer processo. Era hash() do Python, que muda a cada execução
+    (PYTHONHASHSEED): com os candidatos em tabela, o mesmo link colado de novo
+    depois de um restart virava outra linha em vez de achar a que já existe."""
+    return "custom:" + hashlib.sha1(url.strip().encode("utf-8")).hexdigest()[:12]
 
 
 def add_custom(job: dict, role: str, cand: dict) -> dict:

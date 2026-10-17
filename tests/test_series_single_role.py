@@ -135,7 +135,7 @@ def test_entrega_direta_sem_merge(temp_db, tmp_path, kind, tag):
         assert out.is_file(), f"faltou {out}"
         assert out.stat().st_ino == (src / f"Serie.Exemplo.S01E0{e}.mkv").stat().st_ino
         assert job["episodes"][f"S01E0{e}"]["state"] == "done"
-    assert job["report"]["succeeded"] == 2
+    assert merge_runner.report_view(job)["succeeded"] == 2
 
 
 def test_refazer_mantem_o_kind(temp_db, monkeypatch):

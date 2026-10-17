@@ -64,8 +64,8 @@ def test_75_rule_aborta(temp_db, tmp_path):
     }
     merge_runner._finish(job)  # 2/4 = 50% < 75%
     assert job["status"] == "error"
-    assert job["report"]["succeeded"] == 2
-    assert job["report"]["failed"] == ["S01E03", "S01E04"]
+    assert merge_runner.report_view(job)["succeeded"] == 2
+    assert merge_runner.report_view(job)["failed"] == ["S01E03", "S01E04"]
 
 
 def test_75_rule_no_limite_passa(temp_db, tmp_path):
@@ -91,8 +91,8 @@ def test_skipped_fora_do_denominador(temp_db, tmp_path):
     }
     merge_runner._finish(job)  # 1/1 = 100%
     assert job["status"] == "done"
-    assert job["report"]["attempted"] == 1
-    assert job["report"]["skipped"] == ["S01E02", "S01E03"]
+    assert merge_runner.report_view(job)["attempted"] == 1
+    assert merge_runner.report_view(job)["skipped"] == ["S01E02", "S01E03"]
 
 
 def test_nada_tentado_falha(temp_db, tmp_path):
@@ -126,7 +126,7 @@ def test_merge_all_entrega_layout_jellyfin(temp_db, tmp_path, make_media):
         out = season / f"Serie Exemplo (2008) S01E0{e} [pt+orig].mkv"
         assert out.is_file(), f"faltou {out}"
         assert job["episodes"][f"S01E0{e}"]["state"] == "done"
-    assert job["report"]["succeeded"] == 2
+    assert merge_runner.report_view(job)["succeeded"] == 2
 
 
 @pytest.mark.ffmpeg
@@ -151,7 +151,7 @@ def test_merge_all_falha_parcial_continua(temp_db, tmp_path, make_media):
 
     assert job["status"] == "done", job["detail"]
     assert job["episodes"]["S01E04"]["state"] == "failed"
-    assert job["report"] == {"attempted": 4, "succeeded": 3,
-                             "failed": ["S01E04"], "skipped": []}
+    assert merge_runner.report_view(job) == {"attempted": 4, "succeeded": 3,
+                                             "failed": ["S01E04"], "skipped": []}
     for e in (1, 2, 3):
         assert job["episodes"][f"S01E0{e}"]["state"] == "done"

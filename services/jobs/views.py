@@ -80,10 +80,12 @@ def _media_type(job: dict) -> str:
     return job.get("media_type", "movie")
 
 
-def _all_jobs(media: str | None = None, sections: bool = True) -> list[dict]:
+def _all_jobs(media: str | None = None,
+              sections: bool | tuple[str, ...] = True) -> list[dict]:
     """Ativos (memória) + terminais (banco), sem duplicar. `media` filtra pela
-    dimensão de mídia (movie/tv); sections=False não lê os candidatos dos
-    terminais (quem só mostra título/estado/%)."""
+    dimensão de mídia (movie/tv); `sections` escolhe as seções em tabela que
+    os terminais trazem (store.SECTIONS) — quem só mostra título/estado/% não
+    precisa dos candidatos nem dos episódios."""
     mem = [j for j in _jobs.values() if media is None or _media_type(j) == media]
     return mem + store.load_jobs_by_status(_TERMINAL_STATUSES, media=media,
                                            sections=sections)
@@ -128,8 +130,9 @@ def summary() -> list[dict]:
     """Lista mínima de processos EM ANDAMENTO + erros, para o dropdown do
     cabeçalho. Só o essencial para o item da lista (sem candidatos/eventos)."""
     out = []
-    # o dropdown faz polling: os candidatos do histórico não entram na conta
-    for j in _all_jobs(sections=False):
+    # o dropdown faz polling: do histórico só os torrents (o % do download de
+    # série sai deles); candidatos e episódios não entram na conta
+    for j in _all_jobs(sections=("torrents",)):
         state = _STATE_OF.get(j["status"])
         if state in (None, "done"):  # dropdown ignora concluídos e cancelados
             continue

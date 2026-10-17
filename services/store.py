@@ -2,7 +2,9 @@
 
 - jobs: um documento JSON por job (upsert pequeno a cada mudanca), com as
   listas padronizadas fora dele, em tabelas próprias (ver upsert_job):
-  search_queries / search_candidates / candidate_episodes.
+  search_queries / search_candidates / candidate_episodes (candidatos) e,
+  nos jobs de série, job_episodes / episode_subs / job_torrents /
+  torrent_coverage / torrent_files.
 - events: append-only, um INSERT por evento — nada de regravar tudo.
 - WAL + lock: seguro para o event loop e para a thread do merge.
 - Migracao automatica: se existir jobs.json (formato antigo), importa e
@@ -107,6 +109,7 @@ def init():
             sort_order INTEGER NOT NULL DEFAULT 0
         )""")
     _create_candidate_tables()
+    _create_series_tables()
     _conn.commit()
     _migrate_from_json()
     _seed_default_destination()
@@ -545,8 +548,16 @@ _LEGACY_KEYS = ("search", "fallbacks", "current", "video_torrent",
 
 # hash das últimas linhas GRAVADAS das seções de cada job: o upsert só
 # reescreve as linhas quando elas mudaram (a maioria das gravações do job é
-# progresso/estado — candidatos mudam na busca, na escolha e nas trocas)
-_section_hash: dict[str, str] = {}
+# progresso/estado — candidatos mudam na busca, na escolha e nas trocas).
+#   {job_id: {"candidates": hash da seção,
+#             "episodes": {ep_key: hash da linha},
+#             "torrents": {n: (hash da linha, hash de cobertura+arquivos)}}}
+# Candidatos mudam em bloco e a seção inteira é reescrita; episódios e
+# torrents mudam um de cada vez (o merge conclui UM episódio, o watchdog
+# atualiza o progresso de UM torrent), então o hash é por linha e só a linha
+# que mudou é regravada. Sem entrada para a seção (processo novo, ou o job
+# veio do formato antigo), o próximo upsert reescreve a seção inteira.
+_section_hash: dict[str, dict] = {}
 
 
 def _section_rows(job: dict) -> tuple[list, list]:
@@ -594,7 +605,7 @@ def _write_sections(job_id: str, rows: tuple[list, list]):
                 "VALUES (?, ?, ?)", [(cur.lastrowid, k, pos) for k, pos in eps])
 
 
-def _load_sections(job_ids: list[str]) -> dict[str, dict]:
+def _load_candidates(job_ids: list[str]) -> dict[str, dict]:
     """{job_id: {search_queries, search_candidates}} lidos das tabelas (com
     _lock já tomado). Em lotes, para a lista de jobs não virar N consultas."""
     out = {jid: {"search_queries": [], "search_candidates": []} for jid in job_ids}
@@ -683,36 +694,515 @@ def _legacy_candidates(doc: dict) -> dict:
     return doc
 
 
-def _compose(doc: dict, sections: dict | None) -> dict:
-    """Documento de jobs.data + linhas das tabelas -> o dict do job."""
-    if _is_legacy(doc):
-        # gravado antes das tabelas: as linhas ainda não existem; o próximo
-        # upsert (job ativo) grava no formato novo
-        return _legacy_candidates(doc)
-    doc.update(sections or {"search_queries": [], "search_candidates": []})
-    # o que acabou de ser lido É o que está gravado: o próximo upsert sem
-    # mudança nos candidatos não reescreve as linhas
-    _section_hash[doc["id"]] = _rows_digest(_section_rows(doc))
+# -------------------- episódios e torrents (jobs de série) --------------------
+# Formato em memória (o mesmo de sempre, quem muta o dict não muda):
+#   job["episodes"]  = {ep_key: {season, episode, name, air_date, runtime,
+#                       state, error, output, src{original,dubbed|file},
+#                       subs{papel: [caminhos]}, rel, edl}}
+#   job["order_map"] = {ep_key: [s, e]} na ordem alternativa (ou None)
+#   job["torrents"]  = [{n, role, tag, title, tracker, ..., coverage,
+#                        coverage_shrunk, state, hash, progress{...},
+#                        selected_files, content_path}]
+# Vira: job_episodes (+ alt_season/alt_episode do order_map) e episode_subs;
+# job_torrents (progresso em colunas) com torrent_coverage e torrent_files.
+#
+# O torrent do plano é uma CÓPIA do candidato escolhido (título, tracker,
+# magnet...). Gravado, ele aponta para o candidato por (job_id, cid) e não
+# repete os campos; os campos só vão na linha quando não há candidato igual
+# (magnet/link próprio do usuário, torrent do plano fora do top do ranking,
+# job sem candidatos carregados). O id da linha de search_candidates não serve
+# de referência: muda a cada reescrita da seção de candidatos.
+#
+# A EDL do episódio ainda vai como JSON numa coluna da própria linha (o passo
+# das tabelas de EDL a tira dali); chaves que este formato não conhece vão
+# para `extra` (JSON), para nada se perder no caminho.
+
+def _create_series_tables():
+    _conn.execute("""
+        CREATE TABLE IF NOT EXISTS job_episodes (
+            job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+            ep_key TEXT NOT NULL,
+            pos INTEGER NOT NULL,
+            season INTEGER,
+            episode INTEGER,
+            name TEXT,
+            air_date TEXT,
+            runtime INTEGER,
+            state TEXT,
+            error TEXT,
+            output TEXT,
+            src_original TEXT,
+            src_dubbed TEXT,
+            src_file TEXT,
+            rel TEXT,
+            alt_season INTEGER,
+            alt_episode INTEGER,
+            edl TEXT,
+            extra TEXT,
+            PRIMARY KEY (job_id, ep_key)
+        )""")
+    _conn.execute("""
+        CREATE TABLE IF NOT EXISTS episode_subs (
+            job_id TEXT NOT NULL,
+            ep_key TEXT NOT NULL,
+            role TEXT NOT NULL,
+            pos INTEGER NOT NULL,
+            path TEXT NOT NULL,
+            PRIMARY KEY (job_id, ep_key, role, pos),
+            FOREIGN KEY (job_id, ep_key)
+                REFERENCES job_episodes(job_id, ep_key) ON DELETE CASCADE
+        )""")
+    # FK do candidato ADIADA para o commit: a seção de candidatos é reescrita
+    # com DELETE + INSERT dentro da mesma transação, e o torrent que aponta
+    # para (job_id, cid) só precisa achá-lo de novo no fim
+    _conn.execute("""
+        CREATE TABLE IF NOT EXISTS job_torrents (
+            job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+            n INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            tag TEXT,
+            cid TEXT,
+            title TEXT,
+            tracker TEXT,
+            seeders INTEGER,
+            size INTEGER,
+            quality TEXT,
+            coverage_label TEXT,
+            magnet TEXT,
+            link TEXT,
+            infohash TEXT,
+            files_count INTEGER,
+            state TEXT,
+            hash TEXT,
+            content_path TEXT,
+            files_selected INTEGER NOT NULL DEFAULT 0,
+            progress_pct REAL,
+            progress_speed INTEGER,
+            progress_eta INTEGER,
+            progress_state TEXT,
+            progress_seeds INTEGER,
+            progress_name TEXT,
+            progress_size INTEGER,
+            progress_downloaded INTEGER,
+            extra TEXT,
+            PRIMARY KEY (job_id, n),
+            FOREIGN KEY (job_id, cid) REFERENCES search_candidates(job_id, cid)
+                DEFERRABLE INITIALLY DEFERRED
+        )""")
+    _conn.execute("CREATE INDEX IF NOT EXISTS idx_job_torrents_cand "
+                  "ON job_torrents(job_id, cid)")
+    # pos NULL = o episódio saiu da cobertura (só está ali pela flag shrunk:
+    # o pack não tinha o arquivo — ver pipeline._ensure_file_selection)
+    _conn.execute("""
+        CREATE TABLE IF NOT EXISTS torrent_coverage (
+            job_id TEXT NOT NULL,
+            n INTEGER NOT NULL,
+            ep_key TEXT NOT NULL,
+            pos INTEGER,
+            shrunk INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (job_id, n, ep_key),
+            FOREIGN KEY (job_id, n)
+                REFERENCES job_torrents(job_id, n) ON DELETE CASCADE
+        )""")
+    _conn.execute("""
+        CREATE TABLE IF NOT EXISTS torrent_files (
+            job_id TEXT NOT NULL,
+            n INTEGER NOT NULL,
+            pos INTEGER NOT NULL,
+            path TEXT NOT NULL,
+            PRIMARY KEY (job_id, n, pos),
+            FOREIGN KEY (job_id, n)
+                REFERENCES job_torrents(job_id, n) ON DELETE CASCADE
+        )""")
+
+
+# chaves do job de série que moram em tabela (ou são derivadas: `report` sai
+# do estado dos episódios — merge_runner.report_view) e nunca vão em jobs.data
+_SERIES_KEYS = ("episodes", "order_map", "torrents", "report")
+
+_EP_PLAIN = ("season", "episode", "name", "air_date", "runtime", "state",
+             "error", "output")
+_SRC_KEYS = ("original", "dubbed", "file")   # file: recompressão em lote
+_EP_KNOWN = set(_EP_PLAIN) | {"src", "subs", "rel", "edl"}
+_EP_COLS = ("pos", *_EP_PLAIN, "src_original", "src_dubbed", "src_file", "rel",
+            "alt_season", "alt_episode", "edl", "extra")
+_EP_EDL = _EP_COLS.index("edl")
+
+# (chave do torrent, chave do candidato) — os campos copiados do candidato
+_TOR_DISPLAY = (("title", "title"), ("tracker", "tracker"),
+                ("seeders", "seeders"), ("size", "size"),
+                ("quality", "quality"), ("coverage_label", "coverage"),
+                ("magnet", "magnet"), ("link", "link"),
+                ("infohash", "infohash"), ("files_count", "files"))
+_PROGRESS_KEYS = ("pct", "speed", "eta", "state", "seeds", "name", "size",
+                  "downloaded")
+_TOR_KNOWN = ({"n", "role", "tag", "coverage", "coverage_shrunk", "state",
+               "hash", "progress", "selected_files", "content_path"}
+              | {k for k, _ in _TOR_DISPLAY})
+_TOR_COLS = ("role", "tag", "cid", *(k for k, _ in _TOR_DISPLAY), "state",
+             "hash", "content_path", "files_selected",
+             *(f"progress_{k}" for k in _PROGRESS_KEYS), "extra")
+
+
+def _json(v) -> str | None:
+    return None if v is None else json.dumps(v, ensure_ascii=False)
+
+
+def _digest(*parts) -> str:
+    """Hash de partes já prontas (str entra crua — a EDL, grande, não é
+    serializada de novo só para o hash)."""
+    h = hashlib.sha1()
+    for p in parts:
+        h.update(p.encode("utf-8") if isinstance(p, str)
+                 else json.dumps(p, ensure_ascii=False).encode("utf-8"))
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _episode_row(pos: int, ep: dict, alt) -> tuple[tuple, tuple]:
+    """Episódio em memória -> (linha de job_episodes, linhas de episode_subs)."""
+    src = ep.get("src") or {}
+    extra = {k: v for k, v in ep.items() if k not in _EP_KNOWN}
+    src_extra = {k: v for k, v in src.items() if k not in _SRC_KEYS}
+    if src_extra:
+        extra["_src"] = src_extra
+    alt_s, alt_e = (alt[0], alt[1]) if alt else (None, None)
+    row = (pos, *(ep.get(k) for k in _EP_PLAIN), *(src.get(k) for k in _SRC_KEYS),
+           ep.get("rel"), alt_s, alt_e, _json(ep.get("edl")), _json(extra or None))
+    subs = tuple((role, i, p) for role, paths in (ep.get("subs") or {}).items()
+                 for i, p in enumerate(paths or []))
+    return row, subs
+
+
+def _episode_from_row(row: tuple, subs) -> tuple[dict, list | None]:
+    """Linha de job_episodes (+ legendas) -> (episódio, [s, e] alternativo)."""
+    v = dict(zip(_EP_COLS, row))
+    extra = json.loads(v["extra"]) if v["extra"] else {}
+    src = {k: v[f"src_{k}"] for k in _SRC_KEYS if v[f"src_{k}"] is not None}
+    src.update(extra.pop("_src", None) or {})
+    ep = {k: v[k] for k in _EP_PLAIN}
+    ep["src"] = src
+    for role, _pos, path in subs or ():
+        ep.setdefault("subs", {}).setdefault(role, []).append(path)
+    if v["rel"] is not None:
+        ep["rel"] = v["rel"]
+    if v["edl"] is not None:
+        ep["edl"] = json.loads(v["edl"])
+    ep.update(extra)
+    alt = ([v["alt_season"], v["alt_episode"]]
+           if v["alt_season"] is not None else None)
+    return ep, alt
+
+
+def _episode_items(job: dict) -> dict[str, tuple]:
+    """{ep_key: (linha, legendas, hash)} do job — montado fora do lock."""
+    om = job.get("order_map") or {}
+    out = {}
+    for pos, (key, ep) in enumerate((job.get("episodes") or {}).items()):
+        row, subs = _episode_row(pos, ep, om.get(key))
+        out[key] = (row, subs, _digest(row[:_EP_EDL] + row[_EP_EDL + 1:],
+                                       row[_EP_EDL] or "", subs))
+    return out
+
+
+def _candidate_index(job: dict) -> dict | None:
+    """(papel, campos copiados) -> cid dos candidatos do job; None quando o
+    dict não tem os candidatos (aí o torrent grava os próprios campos)."""
+    cands = job.get("search_candidates")
+    if cands is None:
+        return None
+    idx: dict = {}
+    for c in cands:
+        idx.setdefault((c["role"], tuple(c.get(ck) for _, ck in _TOR_DISPLAY)),
+                       c["id"])
+    return idx
+
+
+def _torrent_row(t: dict, cand_idx: dict | None) -> tuple[tuple, tuple]:
+    """Torrent em memória -> (linha de job_torrents, (cobertura, arquivos))."""
+    display = tuple(t.get(k) for k, _ in _TOR_DISPLAY)
+    cid = (cand_idx or {}).get((t.get("role"), display))
+    if cid is not None:
+        display = (None,) * len(_TOR_DISPLAY)   # vêm do candidato na leitura
+    prog = t.get("progress")
+    if isinstance(prog, dict):
+        pvals = tuple(prog.get(k) for k in _PROGRESS_KEYS)
+    else:  # None, ou o número solto de jobs muito antigos
+        pvals = (prog,) + (None,) * (len(_PROGRESS_KEYS) - 1)
+    sel = t.get("selected_files")
+    extra = {k: v for k, v in t.items() if k not in _TOR_KNOWN}
+    row = (t.get("role"), t.get("tag"), cid, *display, t.get("state"),
+           t.get("hash"), t.get("content_path"), 0 if sel is None else 1,
+           *pvals, _json(extra or None))
+    shrunk = set(t.get("coverage_shrunk") or [])
+    cov, seen = [], set()
+    for i, k in enumerate(t.get("coverage") or []):
+        if k not in seen:
+            seen.add(k)
+            cov.append((k, i, 1 if k in shrunk else 0))
+    cov += [(k, None, 1) for k in sorted(shrunk - seen)]
+    return row, (tuple(cov), tuple(enumerate(sel or [])))
+
+
+def _torrent_from_row(n: int, row: tuple, kids: tuple,
+                      cand: tuple | None) -> dict:
+    """Linha de job_torrents (+ filhos, + campos do candidato) -> torrent."""
+    v = dict(zip(_TOR_COLS, row))
+    cov, files = kids
+    t = {"n": n, "role": v["role"], "tag": v["tag"]}
+    inherit = v["cid"] is not None and cand is not None
+    for (k, _), cv in zip(_TOR_DISPLAY, cand if inherit else
+                          (v[k] for k, _ in _TOR_DISPLAY)):
+        t[k] = cv
+    t["coverage"] = [k for k, pos, _ in sorted((c for c in cov if c[1] is not None),
+                                               key=lambda c: c[1])]
+    shrunk = sorted(k for k, _, sh in cov if sh)
+    if shrunk:
+        t["coverage_shrunk"] = shrunk
+    t["state"], t["hash"] = v["state"], v["hash"]
+    pvals = [v[f"progress_{k}"] for k in _PROGRESS_KEYS]
+    t["progress"] = (None if all(p is None for p in pvals)
+                     else dict(zip(_PROGRESS_KEYS, pvals)))
+    t["selected_files"] = [p for _, p in files] if v["files_selected"] else None
+    t["content_path"] = v["content_path"]
+    if v["extra"]:
+        t.update(json.loads(v["extra"]))
+    return t
+
+
+def _torrent_items(job: dict) -> dict[int, tuple]:
+    """{n: (linha, filhos, hash da linha, hash dos filhos)} — fora do lock.
+    O hash da linha inclui o progresso: o watchdog que anda 1% num torrent
+    regrava SÓ a linha dele (nem os episódios, nem a cobertura)."""
+    idx = _candidate_index(job)
+    out = {}
+    for t in job.get("torrents") or []:
+        row, kids = _torrent_row(t, idx)
+        out[t["n"]] = (row, kids, _digest(row), _digest(kids))
+    return out
+
+
+def _write_episodes(job_id: str, items: dict, cached: dict | None):
+    """Grava os episódios que mudaram desde a última gravação (todos, sem
+    cache). Com _lock, dentro da transação do upsert."""
+    if cached is None:
+        _conn.execute("DELETE FROM job_episodes WHERE job_id = ?", (job_id,))
+        changed = list(items)
+    else:
+        gone = [(job_id, k) for k in cached if k not in items]
+        if gone:
+            _conn.executemany(
+                "DELETE FROM job_episodes WHERE job_id = ? AND ep_key = ?", gone)
+        changed = [k for k, it in items.items() if cached.get(k) != it[2]]
+    if not changed:
+        return
+    cols = ", ".join(_EP_COLS)
+    ph = ", ".join("?" for _ in range(len(_EP_COLS) + 2))
+    upd = ", ".join(f"{c} = excluded.{c}" for c in _EP_COLS)
+    _conn.executemany(
+        f"INSERT INTO job_episodes (job_id, ep_key, {cols}) VALUES ({ph}) "
+        f"ON CONFLICT(job_id, ep_key) DO UPDATE SET {upd}",
+        [(job_id, k) + items[k][0] for k in changed])
+    if cached is not None:
+        _conn.executemany(
+            "DELETE FROM episode_subs WHERE job_id = ? AND ep_key = ?",
+            [(job_id, k) for k in changed])
+    _conn.executemany(
+        "INSERT INTO episode_subs (job_id, ep_key, role, pos, path) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [(job_id, k) + s for k in changed for s in items[k][1]])
+
+
+def _write_torrents(job_id: str, items: dict, cached: dict | None):
+    """Grava os torrents que mudaram: a linha (estado, hash, progresso) e os
+    filhos (cobertura, arquivos selecionados) têm hashes separados. Upsert
+    com ON CONFLICT DO UPDATE — INSERT OR REPLACE apagaria a linha e, pelo
+    CASCADE, os filhos junto."""
+    if cached is None:
+        _conn.execute("DELETE FROM job_torrents WHERE job_id = ?", (job_id,))
+        rows, kids = list(items), list(items)
+    else:
+        gone = [(job_id, n) for n in cached if n not in items]
+        if gone:
+            _conn.executemany(
+                "DELETE FROM job_torrents WHERE job_id = ? AND n = ?", gone)
+        old = {n: cached.get(n, (None, None)) for n in items}
+        rows = [n for n, it in items.items() if old[n][0] != it[2]]
+        kids = [n for n, it in items.items() if old[n][1] != it[3]]
+    if rows:
+        cols = ", ".join(_TOR_COLS)
+        ph = ", ".join("?" for _ in range(len(_TOR_COLS) + 2))
+        upd = ", ".join(f"{c} = excluded.{c}" for c in _TOR_COLS)
+        _conn.executemany(
+            f"INSERT INTO job_torrents (job_id, n, {cols}) VALUES ({ph}) "
+            f"ON CONFLICT(job_id, n) DO UPDATE SET {upd}",
+            [(job_id, n) + items[n][0] for n in rows])
+    if not kids:
+        return
+    if cached is not None:
+        keys = [(job_id, n) for n in kids]
+        _conn.executemany(
+            "DELETE FROM torrent_coverage WHERE job_id = ? AND n = ?", keys)
+        _conn.executemany(
+            "DELETE FROM torrent_files WHERE job_id = ? AND n = ?", keys)
+    _conn.executemany(
+        "INSERT INTO torrent_coverage (job_id, n, ep_key, pos, shrunk) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [(job_id, n) + c for n in kids for c in items[n][1][0]])
+    _conn.executemany(
+        "INSERT INTO torrent_files (job_id, n, pos, path) VALUES (?, ?, ?, ?)",
+        [(job_id, n) + f for n in kids for f in items[n][1][1]])
+
+
+def _in_chunks(job_ids: list[str]):
+    for i in range(0, len(job_ids), 500):
+        chunk = job_ids[i:i + 500]
+        yield chunk, ",".join("?" for _ in chunk)
+
+
+def _load_episodes(job_ids: list[str]) -> dict[str, tuple[dict, dict | None]]:
+    """{job_id: (episodes, order_map)} lidos das tabelas (com _lock)."""
+    out: dict[str, tuple[dict, dict | None]] = {}
+    cols = ", ".join(_EP_COLS)
+    for chunk, ph in _in_chunks(job_ids):
+        subs: dict[tuple, list] = {}
+        for jid, key, role, pos, path in _conn.execute(
+                f"SELECT job_id, ep_key, role, pos, path FROM episode_subs "
+                f"WHERE job_id IN ({ph}) ORDER BY job_id, ep_key, rowid", chunk):
+            subs.setdefault((jid, key), []).append((role, pos, path))
+        for r in _conn.execute(
+                f"SELECT job_id, ep_key, {cols} FROM job_episodes "
+                f"WHERE job_id IN ({ph}) ORDER BY job_id, pos", chunk):
+            eps, om = out.setdefault(r[0], ({}, {}))
+            ep, alt = _episode_from_row(r[2:], subs.get((r[0], r[1])))
+            eps[r[1]] = ep
+            if alt:
+                om[r[1]] = alt
+    return {jid: (eps, om or None) for jid, (eps, om) in out.items()}
+
+
+# colunas de search_candidates com os campos que o torrent copia
+_CAND_COL_OF = {k: c for c, k in _CAND_COLS}
+_TOR_CAND_COLS = tuple(_CAND_COL_OF[ck] for _, ck in _TOR_DISPLAY)
+
+
+def _load_torrents(job_ids: list[str]) -> dict[str, list[dict]]:
+    """{job_id: torrents} lidos das tabelas (com _lock). Os campos de um
+    torrent que aponta para candidato vêm do candidato (JOIN)."""
+    out: dict[str, list[dict]] = {}
+    tcols = ", ".join(f"t.{c}" for c in _TOR_COLS)
+    ccols = ", ".join(f"c.{c}" for c in _TOR_CAND_COLS)
+    ncand = len(_TOR_CAND_COLS)
+    for chunk, ph in _in_chunks(job_ids):
+        kids: dict[tuple, tuple[list, list]] = {}
+        for jid, n, key, pos, shrunk in _conn.execute(
+                f"SELECT job_id, n, ep_key, pos, shrunk FROM torrent_coverage "
+                f"WHERE job_id IN ({ph})", chunk):
+            kids.setdefault((jid, n), ([], []))[0].append((key, pos, shrunk))
+        for jid, n, pos, path in _conn.execute(
+                f"SELECT job_id, n, pos, path FROM torrent_files "
+                f"WHERE job_id IN ({ph}) ORDER BY job_id, n, pos", chunk):
+            kids.setdefault((jid, n), ([], []))[1].append((pos, path))
+        for r in _conn.execute(
+                f"SELECT t.job_id, t.n, {tcols}, c.cid IS NOT NULL, {ccols} "
+                f"FROM job_torrents t LEFT JOIN search_candidates c "
+                f"ON c.job_id = t.job_id AND c.cid = t.cid "
+                f"WHERE t.job_id IN ({ph}) ORDER BY t.job_id, t.n", chunk):
+            row = r[2:2 + len(_TOR_COLS)]
+            has_cand = r[2 + len(_TOR_COLS)]
+            cand = tuple(r[-ncand:]) if has_cand else None
+            out.setdefault(r[0], []).append(_torrent_from_row(
+                r[1], row, kids.get((r[0], r[1]), ([], [])), cand))
+    return out
+
+
+def _legacy_series(doc: dict) -> dict:
+    """Documento de série no formato antigo (episódios, order_map e torrents
+    dentro de jobs.data) -> o dict como as tabelas o devolvem (função pura).
+
+    Passa cada episódio/torrent pela MESMA conversão das tabelas (ida e
+    volta), então o dict é igual ao que sai do banco depois do próximo
+    upsert: legenda vazia some, chave desconhecida é preservada, torrents
+    em ordem de n. `report` sai — é derivado (merge_runner.report_view)."""
+    doc = dict(doc)
+    doc.pop("report", None)
+    if "episodes" in doc:
+        om_old = doc.get("order_map") or {}
+        eps, om = {}, {}
+        for pos, (key, ep) in enumerate((doc.get("episodes") or {}).items()):
+            eps[key], alt = _episode_from_row(*_episode_row(pos, ep, om_old.get(key)))
+            if alt:
+                om[key] = alt
+        doc["episodes"], doc["order_map"] = eps, om or None
+    if "torrents" in doc:
+        doc["torrents"] = [
+            _torrent_from_row(t["n"], *_torrent_row(t, None), None)
+            for t in sorted(doc.get("torrents") or [], key=lambda t: t["n"])]
     return doc
 
 
-def _prepare_upsert(job: dict) -> tuple[str, tuple | None, str | None]:
-    """(data, linhas das seções, hash) do job — tudo serializado ANTES de
-    tocar no banco: dict mexido por outra thread no meio (RuntimeError) não
-    pode deixar gravação pela metade."""
-    doc = {k: v for k, v in job.items()
-           if k != "events" and k not in _SECTIONS and k not in _LEGACY_KEYS}
-    data = json.dumps(doc, ensure_ascii=False)
-    # dict sem as seções (carregado sem elas, ou montado à mão) não mexe nas
-    # linhas gravadas — só quem tem as listas pode reescrevê-las
-    rows = _section_rows(job) if all(k in job for k in _SECTIONS) else None
-    return data, rows, (_rows_digest(rows) if rows is not None else None)
+# -------------------- composição / decomposição do job --------------------
+
+def _compose(doc: dict, loaded: dict) -> dict:
+    """Documento de jobs.data + linhas das tabelas -> o dict do job.
+
+    `loaded` traz só as seções pedidas ({"candidates"|"episodes"|"torrents":
+    linhas do job ou None}); seção não pedida fica fora do dict. Documento no
+    formato antigo (seção ainda dentro de jobs.data) é normalizado: gravado
+    antes das tabelas, as linhas ainda não existem, e o próximo upsert (job
+    ativo) grava no formato novo."""
+    jid = doc["id"]
+    cache = _section_hash.setdefault(jid, {})
+    if _is_legacy(doc):
+        doc = _legacy_candidates(doc)
+        cache.pop("candidates", None)
+    elif "candidates" in loaded:
+        doc.update(loaded["candidates"]
+                   or {"search_queries": [], "search_candidates": []})
+        # o que acabou de ser lido É o que está gravado: o próximo upsert sem
+        # mudança nos candidatos não reescreve as linhas
+        cache["candidates"] = _rows_digest(_section_rows(doc))
+    if doc.get("media_type") == "tv":
+        legacy = [k for k in ("episodes", "torrents") if k in doc]
+        if legacy or "report" in doc or "order_map" in doc:
+            doc = _legacy_series(doc)
+            for k in legacy:
+                cache.pop(k, None)   # tabela desatualizada: reescreve inteira
+        if "episodes" not in legacy and "episodes" in loaded:
+            doc["episodes"], doc["order_map"] = loaded["episodes"] or ({}, None)
+        if "torrents" not in legacy and "torrents" in loaded:
+            doc["torrents"] = loaded["torrents"] or []
+    if not cache:
+        _section_hash.pop(jid, None)
+    return doc
 
 
-def _apply_upsert(job: dict, prepared: tuple, create: bool) -> bool:
+def _prepare_upsert(job: dict) -> dict:
+    """Documento + linhas de cada seção do job (com os hashes) — tudo
+    serializado ANTES de tocar no banco: dict mexido por outra thread no
+    meio (RuntimeError) não pode deixar gravação pela metade.
+
+    Seção ausente do dict (carregado sem ela, ou montado à mão) não mexe nas
+    linhas gravadas — só quem tem a lista pode reescrevê-la."""
+    tv = job.get("media_type") == "tv"
+    skip = {"events", *_SECTIONS, *_LEGACY_KEYS, *(_SERIES_KEYS if tv else ())}
+    doc = {k: v for k, v in job.items() if k not in skip}
+    prepared: dict = {"data": json.dumps(doc, ensure_ascii=False),
+                      "candidates": None, "episodes": None, "torrents": None}
+    if all(k in job for k in _SECTIONS):
+        rows = _section_rows(job)
+        prepared["candidates"] = (rows, _rows_digest(rows))
+    if tv and "episodes" in job:
+        prepared["episodes"] = _episode_items(job)
+    if tv and "torrents" in job:
+        prepared["torrents"] = _torrent_items(job)
+    return prepared
+
+
+def _apply_upsert(job: dict, prepared: dict, create: bool) -> bool:
     """Escreve o job preparado (com _lock, dentro de uma transação aberta;
     quem chama faz o commit). False = linha inexistente com create=False."""
-    data, rows, digest = prepared
+    data = prepared["data"]
     if create:
         _conn.execute(
             "INSERT INTO jobs (id, created_at, status, data) VALUES (?, ?, ?, ?) "
@@ -723,9 +1213,28 @@ def _apply_upsert(job: dict, prepared: tuple, create: bool) -> bool:
                             (job["status"], data, job["id"]))
         if cur.rowcount == 0:
             return False
-    if rows is not None and _section_hash.get(job["id"]) != digest:
-        _write_sections(job["id"], rows)
+    cache = _section_hash.get(job["id"]) or {}
+    if prepared["candidates"] is not None:
+        rows, digest = prepared["candidates"]
+        if cache.get("candidates") != digest:
+            _write_sections(job["id"], rows)
+    if prepared["episodes"] is not None:
+        _write_episodes(job["id"], prepared["episodes"], cache.get("episodes"))
+    if prepared["torrents"] is not None:
+        _write_torrents(job["id"], prepared["torrents"], cache.get("torrents"))
     return True
+
+
+def _remember(job_id: str, prepared: dict):
+    """Depois do commit: o que foi preparado É o que está gravado."""
+    cache = _section_hash.setdefault(job_id, {})
+    if prepared["candidates"] is not None:
+        cache["candidates"] = prepared["candidates"][1]
+    if prepared["episodes"] is not None:
+        cache["episodes"] = {k: it[2] for k, it in prepared["episodes"].items()}
+    if prepared["torrents"] is not None:
+        cache["torrents"] = {n: (it[2], it[3])
+                             for n, it in prepared["torrents"].items()}
 
 
 def upsert_job(job: dict, create: bool = True):
@@ -734,8 +1243,8 @@ def upsert_job(job: dict, create: bool = True):
     meio da janela, a gravação atrasada não pode recriá-lo (nem as linhas das
     tabelas filhas: sem a linha em `jobs`, nada é inserido).
 
-    As seções em tabela própria (candidatos) só são reescritas quando mudaram
-    desde a última gravação (hash por job)."""
+    As seções em tabela própria só são reescritas quando mudaram desde a
+    última gravação (hash por job; por linha nos episódios e torrents)."""
     prepared = _prepare_upsert(job)
     with _lock:
         try:
@@ -746,8 +1255,7 @@ def upsert_job(job: dict, create: bool = True):
         except BaseException:
             _conn.rollback()
             raise
-        if prepared[2] is not None:
-            _section_hash[job["id"]] = prepared[2]
+        _remember(job["id"], prepared)
 
 
 def _legacy_candidate_events(doc: dict, events: list[dict]
@@ -820,7 +1328,7 @@ def migrate_candidate_events(job_id: str) -> int:
         except BaseException:
             _conn.rollback()
             raise
-        _section_hash[job_id] = prepared[2]
+        _remember(job_id, prepared)
     return len(updates)
 
 
@@ -833,15 +1341,27 @@ def add_event(job_id: str, ev: dict):
         _conn.commit()
 
 
-def _load_docs(rows: list, with_sections: bool = True) -> list[dict]:
+# seções que moram em tabela própria (o que `sections=` escolhe na leitura)
+SECTIONS = ("candidates", "episodes", "torrents")
+
+
+def _load_docs(rows: list, sections: bool | tuple[str, ...] = True) -> list[dict]:
     """Linhas (id, data) de `jobs` -> dicts dos jobs, com as seções em tabela
-    (chamado com _lock). Sem as seções (listas que não as usam), o dict sai
-    sem as chaves — nunca deve ser regravado."""
-    docs = [json.loads(r[1]) for r in rows]
-    if not with_sections:
-        return [_legacy_candidates(d) if _is_legacy(d) else d for d in docs]
-    sections = _load_sections([r[0] for r in rows])
-    return [_compose(d, sections.get(r[0])) for d, r in zip(docs, rows)]
+    (chamado com _lock). `sections`: True = todas, False = nenhuma, ou uma
+    tupla de SECTIONS. Seção não lida fica FORA do dict — dict carregado sem
+    alguma seção nunca deve ser regravado (o upsert não mexe nela, mas o
+    documento é sobrescrito)."""
+    names = SECTIONS if sections is True else tuple(sections or ())
+    ids = [r[0] for r in rows]
+    loaded = {}
+    if "candidates" in names:
+        loaded["candidates"] = _load_candidates(ids)
+    if "episodes" in names:
+        loaded["episodes"] = _load_episodes(ids)
+    if "torrents" in names:
+        loaded["torrents"] = _load_torrents(ids)
+    return [_compose(json.loads(r[1]), {k: v.get(r[0]) for k, v in loaded.items()})
+            for r in rows]
 
 
 def load_jobs() -> list[dict]:
@@ -856,15 +1376,16 @@ _MEDIA_EXPR = "IFNULL(json_extract(data, '$.media_type'), 'movie')"
 
 def load_jobs_by_status(statuses: tuple[str, ...], limit: int | None = None,
                         offset: int = 0, media: str | None = None,
-                        sections: bool = True) -> list[dict]:
+                        sections: bool | tuple[str, ...] = True) -> list[dict]:
     """Carrega os jobs cujo status está na lista (ex.: só os ativos, ou só os
     terminais). Usa a coluna `status` indexada em vez de ler tudo.
 
     Com `limit`, pagina no SQL (ordenado por created_at desc, o mesmo critério
     da tela) — assim uma biblioteca com milhares de jobs terminais não vira um
     JSON gigante a cada abertura da lista. `media` ("movie"/"tv") filtra pela
-    dimensão de mídia direto no SQL. `sections=False` não carrega os
-    candidatos (telas que não os mostram — o resumo do cabeçalho).
+    dimensão de mídia direto no SQL. `sections` escolhe as seções em tabela
+    que vêm junto (False = nenhuma; ex.: o resumo do cabeçalho só precisa dos
+    torrents, para o % do download).
     """
     if not statuses:
         return []

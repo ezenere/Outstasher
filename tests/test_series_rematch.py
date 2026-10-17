@@ -186,7 +186,7 @@ def test_finalizar_processamento_fecha_sem_gate(temp_db):
     job = _job(2)
     asyncio.run(rematch.finish_now(job))
     assert job["status"] == "error"          # 0/2 concluído: < 75%
-    assert job["report"]["failed"] == ["S01E01", "S01E02"]
+    assert merge_runner.report_view(job)["failed"] == ["S01E01", "S01E02"]
     # e um novo fim de laço NÃO reabre o gate
     job["status"] = "merging"
     asyncio.run(merge_runner.merge_all(job))
@@ -200,7 +200,7 @@ def test_ignorados_ficam_fora_da_conta_dos_75(temp_db):
     rematch.apply_ignores(job, ["S01E02", "S01E03"])
     asyncio.run(merge_runner.merge_all(job))
     assert job["status"] == "done"           # 1/1 tentado; ignorados fora
-    assert job["report"]["skipped"] == ["S01E02", "S01E03"]
+    assert merge_runner.report_view(job)["skipped"] == ["S01E02", "S01E03"]
 
 
 # -------------------- cache de fingerprint --------------------

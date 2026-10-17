@@ -32,7 +32,7 @@ def custom_candidate(url: str, title: str = "") -> dict:
     if not title:
         title = url.rsplit("/", 1)[-1].split("?", 1)[0] or "torrent manual"
     return {
-        "id": f"custom:{abs(hash(url)) % 10 ** 8}", "title": title,
+        "id": candidates.custom_id(url), "title": title,
         "tracker": "manual", "seeders": None, "size": 0,
         "edition": selector.edition_of(title), "score": None,
         "quality": selector.quality_tier(title)[1],

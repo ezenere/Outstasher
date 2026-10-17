@@ -438,25 +438,48 @@ async def _attach_subs(job: dict, key: str, ep: dict, output: str,
         jobs._event(job, "merge", f"⚠️ {key}: legendas externas não anexadas ({e})")
 
 
-def _finish(job: dict):
-    """Relatório final + regra dos 75%: só os episódios TENTADOS contam
-    (skipped_* ficam fora do denominador — foram decisão, não falha)."""
-    done = [k for k, v in job["episodes"].items() if v["state"] == "done"]
-    failed = sorted(k for k, v in job["episodes"].items()
-                    if v["state"] in ("failed", "review"))
-    skipped = sorted(k for k, v in job["episodes"].items()
+def _tally(job: dict) -> dict:
+    """Contagem do relatório a partir do estado dos episódios: só os TENTADOS
+    contam (skipped_* ficam fora do denominador — foram decisão, não falha)."""
+    eps = job.get("episodes") or {}
+    done = [k for k, v in eps.items() if v["state"] == "done"]
+    failed = sorted(k for k, v in eps.items() if v["state"] in ("failed", "review"))
+    skipped = sorted(k for k, v in eps.items()
                      if v["state"] in ("skipped_future", "skipped_missing",
                                        "skipped_mismatch"))
-    attempted = len(done) + len(failed)
-    job["report"] = {"attempted": attempted, "succeeded": len(done),
-                     "failed": failed, "skipped": skipped}
+    return {"attempted": len(done) + len(failed), "succeeded": len(done),
+            "failed": failed, "skipped": skipped}
+
+
+# episódio ainda a caminho da conversão: com algum assim, não há relatório
+_IN_FLIGHT = ("pending", "downloading", "downloaded", "aligning", "merging")
+
+
+def report_view(job: dict) -> dict | None:
+    """O `report` que a UI lê (job.report). Era gravado no _finish, mas é 100%
+    derivável dos episódios — calculado na leitura (jobs._public), não fica
+    cópia para envelhecer. None enquanto algum episódio ainda está a caminho
+    (o _finish só roda quando todos pararam) ou sem episódios."""
+    eps = job.get("episodes") or {}
+    if not eps or any(v["state"] in _IN_FLIGHT for v in eps.values()):
+        return None
+    return _tally(job)
+
+
+def _finish(job: dict):
+    """Relatório final + regra dos 75%: só os episódios TENTADOS contam
+    (skipped_* ficam fora do denominador — foram decisão, não falha). O
+    relatório em si não é gravado: report_view o deriva dos episódios."""
+    rep = _tally(job)
+    done, failed, skipped = rep["succeeded"], rep["failed"], rep["skipped"]
+    attempted = rep["attempted"]
     job["output"] = None
 
     if attempted == 0:
         jobs._fail(job, "Nenhum episódio chegou à conversão")
         return
-    ratio = len(done) / attempted
-    summary = (f"{len(done)}/{attempted} episódio(s) concluído(s)"
+    ratio = done / attempted
+    summary = (f"{done}/{attempted} episódio(s) concluído(s)"
                + (f", {len(failed)} falha(s)" if failed else "")
                + (f", {len(skipped)} pulado(s)" if skipped else ""))
     if ratio < MIN_SUCCESS_RATIO:

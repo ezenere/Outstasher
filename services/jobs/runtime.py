@@ -227,6 +227,9 @@ def _public(job: dict) -> dict:
             # gravado (ver pipeline.DERIVED_GATES)
             from services.series import pipeline
             out["awaiting"] = pipeline.awaiting_view(job)
+        # relatório final: derivado do estado dos episódios, nunca gravado
+        from services.series import merge_runner
+        out["report"] = merge_runner.report_view(job)
     else:
         # filme: o escolhido de cada papel (video_torrent/audio_torrent) e o
         # candidato ativo são atributos do candidato, não cópias no job

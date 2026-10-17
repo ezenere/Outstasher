@@ -150,7 +150,6 @@ async def create_series(tmdb_id: int, language: str,
         "torrents": [],        # torrents planejados/ativos (as duas línguas)
         "awaiting": None,      # gate ativo {reason, payload} ou None
         "order_map": None,     # ep_key -> [s, e] na ordem alternativa escolhida
-        "report": None,
         "progress": {},        # merge (M4+); download agregado vem dos torrents
         "output": None,
         # candidatos da busca: únicos por papel, com a posição de cada um no
@@ -1042,7 +1041,7 @@ def _custom_candidate(sel: dict) -> dict:
         title = url.rsplit("/", 1)[-1].split("?", 1)[0] or "torrent manual"
     cov = parse.parse_coverage(title)
     return {
-        "id": f"custom:{abs(hash(url)) % 10**8}", "title": title,
+        "id": candidates.custom_id(url), "title": title,
         "tracker": "manual", "seeders": None, "size": 0,
         "quality": parse.pack_resolution_tier(title)[1],
         "coverage": cov.label(), "score": None, "tier": None,
