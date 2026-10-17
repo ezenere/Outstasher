@@ -11,6 +11,9 @@
 - metadados do TMDB (títulos, pôster, temporadas, ordens alternativas): uma
   vez por obra em media / media_localized / media_seasons /
   media_episode_groups, compartilhados pelos jobs do mesmo tmdb_id.
+- configuração: chave/valor em settings e JSON opaco onde é forma livre
+  (presets, merge avançado); as listas da configuração em tabelas —
+  language_markers (por idioma), subtitle_markers e search_rules.
 - events: append-only, um INSERT por evento — nada de regravar tudo.
 - WAL + lock: seguro para o event loop e para a thread do merge.
 - Migracao automatica: se existir jobs.json (formato antigo), importa e
@@ -103,7 +106,9 @@ def init():
             name TEXT NOT NULL UNIQUE,
             options TEXT NOT NULL
         )""")
-    # idiomas da faixa dublada (editaveis pela UI). markers_* guardados como JSON.
+    # idiomas da faixa dublada (editaveis pela UI). Os marcadores moram em
+    # language_markers; as colunas markers_* (JSON) são do formato antigo —
+    # lidas uma vez por _migrate_config_lists e sem uso depois.
     _conn.execute("""
         CREATE TABLE IF NOT EXISTS languages (
             code TEXT PRIMARY KEY,
@@ -113,6 +118,7 @@ def init():
             markers_weak TEXT NOT NULL DEFAULT '[]',
             sort_order INTEGER NOT NULL DEFAULT 0
         )""")
+    _create_config_list_tables()
     _create_candidate_tables()
     _create_series_tables()
     _create_edl_tables()
@@ -121,6 +127,7 @@ def init():
     _migrate_from_json()
     _seed_default_destination()
     _seed_default_torrent_target()
+    _migrate_config_lists()   # antes do seed: banco novo não tem o que migrar
     _seed_languages()
     load_language_config()
 
@@ -143,26 +150,68 @@ def set_setting(key: str, value: str):
 
 
 # -------------------- regras de busca extra (idioma x variante x indexers) --------------------
-# Guardadas como um único JSON em settings. Formato:
+# Uma linha por (idioma, regra, tracker) em search_rules. Na API e para quem
+# lê, o formato continua:
 #   { "<lang>": { "no_year": ["indexerId", ...], "roman": [...], "roman_no_year": [...] } }
 # lang = código do idioma (pt/es/...); as chaves de variante são fixas.
-_EXTRA_SEARCH_KEY = "extra_search_rules"
+# `pos` é a ordem da gravação inteira: a leitura devolve o dict na mesma ordem
+# de idiomas, regras e trackers (os trackers de uma regra viram buscas nessa
+# ordem — services/jobs/search.py).
+_EXTRA_SEARCH_KEY = "extra_search_rules"   # formato antigo (JSON em settings)
 EXTRA_SEARCH_VARIANTS = ("no_year", "roman", "roman_no_year")
 
 
-def get_extra_search_rules() -> dict:
-    raw = get_setting(_EXTRA_SEARCH_KEY)
+def _search_rule_rows(rules) -> list[tuple[str, str, str]]:
+    """{idioma: {regra: [trackers]}} -> [(idioma, regra, tracker)] na ordem.
+    O que não tem a forma (idioma sem dict, regra sem lista) fica de fora."""
+    out = []
+    if not isinstance(rules, dict):
+        return out
+    for lang, variants in rules.items():
+        if not isinstance(variants, dict):
+            continue
+        for rule, trackers in variants.items():
+            if not isinstance(trackers, list):
+                continue
+            out.extend((str(lang), str(rule), str(t)) for t in trackers
+                       if t is not None and t != "")
+    return out
+
+
+def _legacy_search_rules(raw: str | None) -> list[tuple[str, str, str]]:
+    """settings.extra_search_rules (JSON do formato antigo) -> linhas de
+    search_rules. Função pura; JSON inválido = sem regras (era o que a
+    leitura antiga devolvia)."""
     if not raw:
-        return {}
+        return []
     try:
-        data = json.loads(raw)
+        return _search_rule_rows(json.loads(raw))
     except (ValueError, TypeError):
-        return {}
-    return data if isinstance(data, dict) else {}
+        return []
+
+
+def _write_search_rules(rows: list[tuple[str, str, str]]):
+    """Substitui as regras (com _lock, na transação de quem chama)."""
+    _conn.execute("DELETE FROM search_rules")
+    _conn.executemany(
+        "INSERT INTO search_rules (pos, language, rule, tracker) "
+        "VALUES (?, ?, ?, ?)", [(i, *r) for i, r in enumerate(rows)])
+
+
+def get_extra_search_rules() -> dict:
+    with _lock:
+        rows = _conn.execute("SELECT language, rule, tracker FROM search_rules "
+                             "ORDER BY pos").fetchall()
+    out: dict = {}
+    for lang, rule, tracker in rows:
+        out.setdefault(lang, {}).setdefault(rule, []).append(tracker)
+    return out
 
 
 def set_extra_search_rules(rules: dict):
-    set_setting(_EXTRA_SEARCH_KEY, json.dumps(rules, ensure_ascii=False))
+    with _lock:
+        _write_search_rules(_search_rule_rows(rules))
+        _conn.commit()
 
 
 # -------------------- presets de conversao --------------------
@@ -399,52 +448,146 @@ def _seed_default_torrent_target():
 
 
 # -------------------- idiomas da faixa dublada (editaveis) --------------------
+# Os marcadores de cada idioma (fortes e fracos) e os de legenda são linhas,
+# na ordem em que a tela os mostra. O seletor só pergunta "algum casa?"
+# (selector.marker_strength, any()) e a regex de legenda é uma alternância
+# entre \b — a ordem não muda o resultado hoje, mas a lista volta para a
+# tela como foi editada.
 
-def _lang_row(r) -> dict:
-    return {"code": r[0], "label": r[1], "tmdb": r[2],
-            "markers_strong": json.loads(r[3] or "[]"),
-            "markers_weak": json.loads(r[4] or "[]"),
-            "sort_order": r[5]}
+def _create_config_list_tables():
+    _conn.execute("""
+        CREATE TABLE IF NOT EXISTS language_markers (
+            language TEXT NOT NULL REFERENCES languages(code) ON DELETE CASCADE,
+            strength TEXT NOT NULL CHECK (strength IN ('strong', 'weak')),
+            pos INTEGER NOT NULL,
+            marker TEXT NOT NULL,
+            PRIMARY KEY (language, strength, pos)
+        )""")
+    _conn.execute("""
+        CREATE TABLE IF NOT EXISTS subtitle_markers (
+            pos INTEGER PRIMARY KEY,
+            marker TEXT NOT NULL
+        )""")
+    # sem FK para languages: as regras de um idioma sobrevivem a regravar a
+    # tabela de idiomas (save_languages apaga e reinsere todos), como no JSON
+    _conn.execute("""
+        CREATE TABLE IF NOT EXISTS search_rules (
+            pos INTEGER PRIMARY KEY,
+            language TEXT NOT NULL,
+            rule TEXT NOT NULL,
+            tracker TEXT NOT NULL
+        )""")
+    _conn.execute("CREATE INDEX IF NOT EXISTS idx_search_rules_lang "
+                  "ON search_rules(language)")
+
+
+_STRENGTHS = (("strong", "markers_strong"), ("weak", "markers_weak"))
+# chave em settings que marca a migração das listas (JSON -> tabelas) feita
+_CONFIG_LISTS_FLAG = "config_lists_in_tables"
+
+
+def _legacy_markers(raw) -> list[str]:
+    """Lista JSON do formato antigo (languages.markers_*, settings.
+    subtitle_markers) -> marcadores na ordem. Função pura; inválido = []
+    (era o que a leitura antiga devolvia)."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw or "[]")
+        except (ValueError, TypeError):
+            return []
+    return [str(m) for m in raw] if isinstance(raw, list) else []
+
+
+def _write_language_markers(code: str, lg: dict):
+    """Marcadores de UM idioma (com _lock, na transação de quem chama)."""
+    _conn.executemany(
+        "INSERT INTO language_markers (language, strength, pos, marker) "
+        "VALUES (?, ?, ?, ?)",
+        [(code, strength, i, m) for strength, key in _STRENGTHS
+         for i, m in enumerate(lg.get(key) or [])])
+
+
+def _write_subtitle_markers(markers: list[str]):
+    _conn.execute("DELETE FROM subtitle_markers")
+    _conn.executemany("INSERT INTO subtitle_markers (pos, marker) VALUES (?, ?)",
+                      list(enumerate(markers)))
+
+
+def _migrate_config_lists():
+    """Banco anterior às tabelas: lê UMA vez os JSON antigos (markers_* de
+    languages, settings.subtitle_markers, settings.extra_search_rules) e grava
+    as linhas. Tudo numa transação, com a marca junto: rodar de novo (init()
+    outra vez, restart) não duplica nem volta a ler o JSON — que fica no banco
+    sem uso. Banco novo (sem a chave de legenda): os marcadores padrão."""
+    with _lock:
+        if _conn.execute("SELECT 1 FROM settings WHERE key = ?",
+                         (_CONFIG_LISTS_FLAG,)).fetchone():
+            return
+        try:
+            langs = _conn.execute(
+                "SELECT code, markers_strong, markers_weak FROM languages"
+            ).fetchall()
+            _conn.execute("DELETE FROM language_markers")
+            for code, strong, weak in langs:
+                _write_language_markers(code, {
+                    "markers_strong": _legacy_markers(strong),
+                    "markers_weak": _legacy_markers(weak)})
+            r = _conn.execute("SELECT value FROM settings WHERE key = ?",
+                              ("subtitle_markers",)).fetchone()
+            # chave vazia/ausente: a leitura antiga caía nos padrões
+            _write_subtitle_markers(
+                _legacy_markers(r[0]) if r and r[0]
+                else list(config._DEFAULT_SUBTITLE_MARKERS))
+            r = _conn.execute("SELECT value FROM settings WHERE key = ?",
+                              (_EXTRA_SEARCH_KEY,)).fetchone()
+            _write_search_rules(_legacy_search_rules(r[0] if r else None))
+            _conn.execute("INSERT INTO settings (key, value) VALUES (?, '1')",
+                          (_CONFIG_LISTS_FLAG,))
+            _conn.commit()
+        except BaseException:
+            _conn.rollback()
+            raise
 
 
 def _seed_languages():
     """Na primeira execução, popula a tabela com os idiomas padrão do config."""
     with _lock:
         count = _conn.execute("SELECT COUNT(*) FROM languages").fetchone()[0]
-    if count:
-        return
-    for i, (code, info) in enumerate(config._DEFAULT_LANGUAGES.items()):
-        with _lock:
+        if count:
+            return
+        for i, (code, info) in enumerate(config._DEFAULT_LANGUAGES.items()):
             _conn.execute(
-                "INSERT INTO languages (code, label, tmdb, markers_strong, "
-                "markers_weak, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
-                (code, info["label"], info["tmdb"],
-                 json.dumps(info["markers_strong"], ensure_ascii=False),
-                 json.dumps(info["markers_weak"], ensure_ascii=False), i))
-            _conn.commit()
-    # marcadores de legenda: settings (lista unica, nao por idioma)
-    if get_setting("subtitle_markers") is None:
-        set_setting("subtitle_markers",
-                    json.dumps(config._DEFAULT_SUBTITLE_MARKERS, ensure_ascii=False))
+                "INSERT INTO languages (code, label, tmdb, sort_order) "
+                "VALUES (?, ?, ?, ?)", (code, info["label"], info["tmdb"], i))
+            _write_language_markers(code, info)
+        _conn.commit()
 
 
 def list_languages() -> list[dict]:
     with _lock:
         rows = _conn.execute(
-            "SELECT code, label, tmdb, markers_strong, markers_weak, sort_order "
-            "FROM languages ORDER BY sort_order, code").fetchall()
-    return [_lang_row(r) for r in rows]
+            "SELECT code, label, tmdb, sort_order FROM languages "
+            "ORDER BY sort_order, code").fetchall()
+        marks = _conn.execute(
+            "SELECT language, strength, marker FROM language_markers "
+            "ORDER BY language, strength, pos").fetchall()
+    by_lang: dict[str, dict[str, list]] = {}
+    for code, strength, marker in marks:
+        by_lang.setdefault(code, {}).setdefault(strength, []).append(marker)
+    out = []
+    for code, label, tmdb, order in rows:
+        m = by_lang.get(code, {})
+        out.append({"code": code, "label": label, "tmdb": tmdb,
+                    **{key: list(m.get(strength, ())) for strength, key in _STRENGTHS},
+                    "sort_order": order})
+    return out
 
 
 def get_subtitle_markers() -> list[str]:
-    raw = get_setting("subtitle_markers")
-    if not raw:
-        return list(config._DEFAULT_SUBTITLE_MARKERS)
-    try:
-        val = json.loads(raw)
-        return [str(m) for m in val] if isinstance(val, list) else []
-    except (ValueError, TypeError):
-        return []
+    with _lock:
+        rows = _conn.execute(
+            "SELECT marker FROM subtitle_markers ORDER BY pos").fetchall()
+    return [r[0] for r in rows]
 
 
 def load_language_config():
@@ -462,16 +605,21 @@ def load_language_config():
 def save_languages(languages: list[dict], subtitle_markers: list[str]):
     """Substitui TODA a configuração de idiomas + marcadores e recarrega o runtime."""
     with _lock:
-        _conn.execute("DELETE FROM languages")
-        for i, lg in enumerate(languages):
-            _conn.execute(
-                "INSERT INTO languages (code, label, tmdb, markers_strong, "
-                "markers_weak, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
-                (lg["code"], lg["label"], lg["tmdb"],
-                 json.dumps(lg["markers_strong"], ensure_ascii=False),
-                 json.dumps(lg["markers_weak"], ensure_ascii=False), i))
-        _conn.commit()
-    set_setting("subtitle_markers", json.dumps(subtitle_markers, ensure_ascii=False))
+        try:
+            # o CASCADE já leva os marcadores; o DELETE explícito não depende
+            # do PRAGMA foreign_keys
+            _conn.execute("DELETE FROM language_markers")
+            _conn.execute("DELETE FROM languages")
+            for i, lg in enumerate(languages):
+                _conn.execute(
+                    "INSERT INTO languages (code, label, tmdb, sort_order) "
+                    "VALUES (?, ?, ?, ?)", (lg["code"], lg["label"], lg["tmdb"], i))
+                _write_language_markers(lg["code"], lg)
+            _write_subtitle_markers(list(subtitle_markers))
+            _conn.commit()
+        except BaseException:
+            _conn.rollback()
+            raise
     load_language_config()
 
 
@@ -1637,7 +1785,8 @@ def _without_edls(doc: dict) -> dict:
 #   movie            -> media (tmdb_id + tipo) + media_localized (+ idioma)
 #   known_seasons    -> media_seasons        (por série, compartilhada)
 #   episode_groups   -> media_episode_groups (por série, compartilhada)
-#   progress         -> job_progress (download do filme; o merge é efêmero)
+#   progress         -> job_progress (download do filme; o merge é efêmero:
+#                       só a etapa em que parou, colunas merge_*)
 #   request          -> job_requests;  manual_rows -> manual_rows
 #   recompress.rels  -> recompress_items;  drift_confirm.profile -> drift_profile
 #   awaiting         -> awaiting_reason (o payload é sempre derivado)
@@ -1694,6 +1843,9 @@ _JOB_COLUMNS = (
     ("drift_video_file", "TEXT"), ("drift_audio_file", "TEXT"),
     ("drift_tau1_ms", "REAL"), ("drift_tau2_ms", "REAL"),
     ("drift_verdict", "TEXT"), ("drift_profiled", "INTEGER"),
+    # em que etapa o merge PAROU (ver _enc_progress): fase + qual arquivo o
+    # fingerprint lia — não a barra
+    ("merge_phase", "TEXT"), ("merge_step", "INTEGER"), ("merge_label", "TEXT"),
 )
 _JCOLS = tuple(c for c, _ in _JOB_COLUMNS)
 
@@ -1873,10 +2025,33 @@ def _dec_awaiting(c, kids):
 _PROG_TYPES = dict(zip(_PROGRESS_KEYS, "fiisisii"))
 
 
+# o que sobra da barra do merge no banco: a ETAPA, não o andamento
+_MERGE_STAGE = (("phase", "merge_phase", "s"), ("step", "merge_step", "i"),
+                ("label", "merge_label", "s"))
+# só job que parou no meio do merge mostra a etapa relida do banco: ativo
+# recomeça o merge do zero depois de um restart (a etapa gravada é velha) e
+# job concluído já zerou a barra
+_MERGE_STAGE_STATUSES = ("error", "cancelled")
+
+
+def _merge_stage_cols(m) -> dict:
+    """progress.merge -> colunas merge_* (o que não tiver a forma vira None:
+    a barra é efêmera, não há o que preservar no documento)."""
+    m = m if isinstance(m, dict) else {}
+    return {col: (m.get(k) if m.get(k) is not None and _fit(t, m.get(k))
+                  else None)
+            for k, col, t in _MERGE_STAGE}
+
+
 def _enc_progress(v, job):
-    """Download do filme (video/audio). `merge` é efêmero: a barra do ffmpeg
-    só existe enquanto o merge roda neste processo — depois de um restart o
-    merge recomeça do zero, e job terminal não mostra a barra."""
+    """Download do filme (video/audio). A barra do `merge` é efêmera: só
+    existe enquanto o merge roda neste processo — depois de um restart o
+    merge recomeça do zero. Fica só a ETAPA em que ele estava (colunas
+    merge_*): um job que falhou no fingerprint mostrava "Buscando
+    alinhamento (Áudio)" no detalhe e, sem ela, passou a mostrar "Conversão".
+    As colunas vão na linha da `jobs`, que toda gravação já reescreve — e o
+    on_progress do ffmpeg não grava nada (só a próxima gravação do job leva
+    a etapa que estiver em memória): nenhuma escrita a mais por %."""
     if not isinstance(v, dict):
         return None
     roles = () if job.get("media_type") == "tv" else ("video", "audio")
@@ -1891,7 +2066,7 @@ def _enc_progress(v, job):
                 and all(_fit(_PROG_TYPES[k], p[k]) for k in _PROGRESS_KEYS)):
             return None
         rows.append((role, *(p[k] for k in _PROGRESS_KEYS)))
-    return {}, {"job_progress": tuple(rows)}, {}
+    return _merge_stage_cols(v.get("merge")), {"job_progress": tuple(rows)}, {}
 
 
 # as duas linhas de job_progress vêm no próprio SELECT do job (LEFT JOIN
@@ -1912,11 +2087,15 @@ def _progress_cols(rows) -> dict:
 
 
 def _dec_progress(c, kids):
-    if c["media_type"] == "tv":
-        return {}
-    return {role: ({k: c[f"{pre}_{k}"] for k in _PROGRESS_KEYS}
-                   if c[f"{pre}_role"] is not None else None)
-            for role, pre in _PROG_PREFIX}
+    out = {} if c["media_type"] == "tv" else {
+        role: ({k: c[f"{pre}_{k}"] for k in _PROGRESS_KEYS}
+               if c[f"{pre}_role"] is not None else None)
+        for role, pre in _PROG_PREFIX}
+    if c.get("status") in _MERGE_STAGE_STATUSES:
+        stage = {k: c[col] for k, col, _ in _MERGE_STAGE if c[col] is not None}
+        if stage:
+            out["merge"] = stage
+    return out
 
 
 def _enc_pair(cols: tuple[str, str], keys: tuple[str, str], partial: bool,
@@ -2262,7 +2441,8 @@ def _legacy_scalars(doc: dict) -> dict:
 
     - request: as temporadas dos episódios avulsos voltam a int (o JSON as
       tinha virado texto: {"3": [1, 5]});
-    - progress: a barra do merge sai (efêmera);
+    - progress: a barra do merge sai (efêmera) — num job que parou no meio
+      do merge fica só a etapa (ver _enc_progress);
     - awaiting de série com gate derivado: o payload gravado sai."""
     doc = dict(doc)
     req = doc.get("request")
@@ -2277,7 +2457,8 @@ def _legacy_scalars(doc: dict) -> dict:
         doc["awaiting"] = {**gate, "payload": None}
     enc = _encode(doc)
     mcols, mkids = _shared_view(enc["shared"])
-    c = {**enc["cols"], **mcols, **_progress_cols(enc["kids"]["job_progress"])}
+    c = {**enc["cols"], **mcols, **_progress_cols(enc["kids"]["job_progress"]),
+         "status": doc.get("status")}
     kids = {**{t: list(r) for t, r in enc["kids"].items()}, **mkids}
     for key in enc["fitted"]:
         val = _CODECS[key][1](c, kids)

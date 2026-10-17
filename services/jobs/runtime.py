@@ -135,7 +135,9 @@ def _ffmpeg_hooks(job: dict, phase: str = PHASE_CONVERT):
     def on_progress(info: dict):
         # só em memória: a barra do merge não vai para o banco (store,
         # _enc_progress) — depois de um restart o merge recomeça do zero, e
-        # regravar o job a cada 15s só para ela não guardava nada útil
+        # regravar o job a cada 15s só para ela não guardava nada útil. A
+        # ETAPA (phase/step/label) vai junto da próxima gravação do job, para
+        # o detalhe de um job que falhou no meio dizer onde ele parou
         job["progress"]["merge"] = {**info, "phase": info.get("phase", phase)}
 
     return log, on_progress
