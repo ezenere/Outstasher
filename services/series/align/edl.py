@@ -1,6 +1,7 @@
 """Estágio 5: a EDL (edit decision list) — o produto do alinhador.
 
-JSON versionado, persistido dentro do job (job["episodes"][k]["edl"]). O
+JSON versionado, guardado no job (job["episodes"][k]["edl"]; no filme,
+job["advanced"]["edl"]) e gravado nas tabelas edls/edl_segments (store). O
 campo `offset` é redundante com a_start/b_start de propósito: o merge não
 recalcula nada e a inspeção humana lê direto. `review.required` TRAVA o
 avanço do job — substituição nunca passa sem decisão humana.

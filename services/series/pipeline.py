@@ -653,7 +653,8 @@ def gate_payload(job: dict, reason: str) -> dict | None:
                 # algum torrent já foi enviado ao qBittorrent
                 "mid_download": any(t.get("hash") for t in job["torrents"])}
     if reason == "alignment_review":
-        return {"episodes": {k: v["edl"] for k, v in sorted(job["episodes"].items())
+        # .get: o dict de uma listagem não carrega as EDLs (store.LIST_SECTIONS)
+        return {"episodes": {k: v.get("edl") for k, v in sorted(job["episodes"].items())
                              if v["state"] == "review"}}
     if reason == "mismatched_pairs":
         from services.series import rematch

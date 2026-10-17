@@ -17,7 +17,8 @@ def list_jobs() -> list[dict]:
     Junta os ativos (memória, com progresso ao vivo) com os terminais (banco,
     histórico) e ordena por data de criação.
     """
-    terminal = store.load_jobs_by_status(_TERMINAL_STATUSES)
+    terminal = store.load_jobs_by_status(_TERMINAL_STATUSES,
+                                         sections=store.LIST_SECTIONS)
     combined = list(_jobs.values()) + terminal
     ordered = sorted(combined, key=lambda j: j["created_at"], reverse=True)
     return [_public(j) for j in ordered]
@@ -81,11 +82,12 @@ def _media_type(job: dict) -> str:
 
 
 def _all_jobs(media: str | None = None,
-              sections: bool | tuple[str, ...] = True) -> list[dict]:
+              sections: bool | tuple[str, ...] = store.LIST_SECTIONS) -> list[dict]:
     """Ativos (memória) + terminais (banco), sem duplicar. `media` filtra pela
     dimensão de mídia (movie/tv); `sections` escolhe as seções em tabela que
     os terminais trazem (store.SECTIONS) — quem só mostra título/estado/% não
-    precisa dos candidatos nem dos episódios."""
+    precisa dos candidatos nem dos episódios, e listagem nenhuma precisa das
+    EDLs (só o detalhe)."""
     mem = [j for j in _jobs.values() if media is None or _media_type(j) == media]
     return mem + store.load_jobs_by_status(_TERMINAL_STATUSES, media=media,
                                            sections=sections)
@@ -252,11 +254,13 @@ def list_group(group: str = "active", page: int = 1,
             raise ValueError(f"grupo inválido: {group!r}")
         total = sum(store.count_jobs_by_status(media).get(s, 0) for s in statuses)
         if per_page is None:
-            rows = store.load_jobs_by_status(statuses, media=media)
+            rows = store.load_jobs_by_status(statuses, media=media,
+                                             sections=store.LIST_SECTIONS)
         else:
             page = max(1, page)
             rows = store.load_jobs_by_status(statuses, per_page,
-                                             (page - 1) * per_page, media=media)
+                                             (page - 1) * per_page, media=media,
+                                             sections=store.LIST_SECTIONS)
         return _page(rows, page, per_page, total)
 
     jobs_.sort(key=lambda j: j["created_at"], reverse=True)

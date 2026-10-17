@@ -215,8 +215,10 @@ def load():
 
 # seções do job que não vão no detalhe como estão: os eventos têm rota
 # própria e os candidatos chegam à UI pelas visões (lista de escolha no
-# get_job, payload dos gates de série, escolhido de cada papel abaixo)
-_NOT_PUBLIC = ("events", "search_queries", "search_candidates")
+# get_job, payload dos gates de série, escolhido de cada papel abaixo). A
+# marca de dict carregado sem as EDLs é da persistência, não do job.
+_NOT_PUBLIC = ("events", "search_queries", "search_candidates",
+               store.EDLS_UNLOADED)
 
 
 def _public(job: dict) -> dict:
@@ -234,6 +236,12 @@ def _public(job: dict) -> dict:
         # filme: o escolhido de cada papel (video_torrent/audio_torrent) e o
         # candidato ativo são atributos do candidato, não cópias no job
         out.update(candidates.movie_fields(job))
+        gate = job.get("awaiting")
+        if gate and gate.get("reason") == "alignment_review":
+            # revisão de alinhamento do filme: a EDL já está em
+            # job["advanced"]; o payload é calculado aqui, não gravado
+            from services.jobs import advanced
+            out["awaiting"] = {**gate, "payload": advanced.review_payload(job)}
     return out
 
 

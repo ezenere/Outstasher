@@ -164,8 +164,8 @@ async def _run_advanced(job: dict, video_file: Path, audio_file: Path):
         _event(job, "merge", f"EDL: {st.get('match_pct', 0):.0f}% casado, "
                              f"{len(edl_dict['segments'])} segmento(s)")
         if needs:
-            job["awaiting"] = {"reason": "alignment_review",
-                               "payload": {"episodes": {"filme": edl_dict}}}
+            # payload derivado (review_payload): a EDL já está em job["advanced"]
+            job["awaiting"] = {"reason": "alignment_review", "payload": None}
             _set(job, "awaiting", "⚠️ Cena(s) substituída(s) sem decisão — "
                                   "revisão de alinhamento necessária")
             return
@@ -244,6 +244,16 @@ async def _render_advanced(job: dict):
     await delivery._cleanup_torrents(job)
 
 
+def review_payload(job: dict) -> dict | None:
+    """Conteúdo do gate de revisão de alinhamento do FILME, no formato das
+    séries ({"episodes": {"filme": edl}}). Derivado de job["advanced"], como
+    os gates de série (pipeline.DERIVED_GATES): gravar uma cópia da EDL no
+    gate duplicava ~100 KB no job e a cópia podia envelhecer em relação à
+    EDL que o render usa."""
+    edl = (job.get("advanced") or {}).get("edl")
+    return {"episodes": {"filme": edl}} if edl is not None else None
+
+
 async def resolve_review(job_id: str, reason: str, decision: dict) -> dict | None:
     """Gate de revisão de alinhamento num job de FILME (mesmo formato de
     decisão da UI das séries: actions {'filme': {idx: ação}}, rules, skip)."""
@@ -279,7 +289,6 @@ async def resolve_review(job_id: str, reason: str, decision: dict) -> dict | Non
             raw["action"] = seg.extra["action"]
     edl_dict["review"]["required"] = needs
     if needs:
-        job["awaiting"]["payload"] = {"episodes": {"filme": edl_dict}}
         runtime._persist(job)
         return _public(job)
     job.pop("awaiting", None)
