@@ -216,7 +216,10 @@ export default function Movies() {
             <button
               key={m.id}
               onClick={() => (mediaKind === 'tv' ? setSelectedSeries(m) : setSelected(m))}
-              className={`flex flex-col relative overflow-hidden rounded-xl border-2 bg-zinc-900 text-left transition-transform hover:-translate-y-1 ${
+              // isolate: o z-10 do selo de estado (acima do pôster) fica
+              // contido no card — sem isso ele empatava com o cabeçalho fixo
+              // (também z-10) e, vindo depois no DOM, passava por cima dele
+              className={`isolate flex flex-col relative overflow-hidden rounded-xl border-2 bg-zinc-900 text-left transition-transform hover:-translate-y-1 ${
                 (mediaKind === 'tv' ? selectedSeries?.id === m.id : selected?.id === m.id)
                   ? 'border-blue-500' : state ? 'border-zinc-700' : 'border-transparent'
               }`}
