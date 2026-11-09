@@ -33,7 +33,7 @@ from services import merger
 from services.merger import MergeError, MergeResult
 
 # offsets de segmentos que diferem menos que isto são "o mesmo offset"
-# (mesmo limiar da validação em duas janelas do merge clássico)
+# (mesmo limiar da validação do offset do merge clássico, merger.ALIGN_AGREE_TOL)
 OFFSET_AGREEMENT = 0.15   # s
 MIN_MEASURE_WINDOW = 8.0  # s de áudio no mínimo para o GCC-PHAT ser confiável
 

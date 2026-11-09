@@ -72,8 +72,10 @@ Busque, clique, escolha idioma e destino. Modos: **Baixar e fazer merge**,
   próximo candidato do mesmo corte. Durante o download dá para trocar à mão:
   *Próximo*, *Escolher outro…* (lista da busca) ou **magnet/link próprio**,
   que entra direto no qBittorrent sem passar pelo indexador.
-- **Drift**: se as duas janelas de offset divergirem, o job mede o offset a
-  cada 5 min (drift × corte), pausa e você decide: **alinhamento avançado**
+- **Drift**: o offset é medido numa janela a cada ~20 min do filme inteiro.
+  Constante → stream copy; numa reta (velocidade levemente diferente) → a
+  velocidade do áudio é corrigida; degrau ou janelas sem correlação → o job
+  mede o offset a cada 5 min (drift × corte), pausa e você decide: **alinhamento avançado**
   (o alinhador das séries, com EDL e revisão — resolve cena/junção diferente
   no mesmo corte), continuar com o offset do início, trocar de torrent ou
   cancelar.

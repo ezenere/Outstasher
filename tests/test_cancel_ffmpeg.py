@@ -30,7 +30,7 @@ def _make_long(path, lang, dur=60, w=1280, h=536):
 def test_cancel_kills_ffmpeg_and_deletes_output(temp_db, tmp_path, monkeypatch):
     # merge com conversão pesada (CRF veryslow) força um re-encode lento; o
     # offset é fixado para o foco ser o cancelamento, não o alinhamento
-    monkeypatch.setattr(merger, "_measure_offset", lambda *a, **k: 0.0)
+    monkeypatch.setattr(merger, "_measure_window", lambda *a, **k: (0.0, 100.0))
 
     f1, f2 = tmp_path / "orig.mkv", tmp_path / "dub.mkv"
     _make_long(f1, "eng")

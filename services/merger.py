@@ -10,14 +10,18 @@
   o que os metadados nao expressam: comentario, audiodescricao, SDH, forcada,
   ou o titulo enxuto quando o idioma e desconhecido
 - copia CAPITULOS do arquivo de melhor video (ou do outro, se so ele tiver)
-- mede o OFFSET entre os arquivos via correlacao GCC-PHAT (2 janelas)
+- mede o OFFSET entre os arquivos via correlacao GCC-PHAT numa janela a cada
+  ~20 min do arquivo inteiro (ver classify_offsets para a regra de decisão)
 - offset CONSTANTE (janelas concordam — o caso comum): aplica o sync no
   container via -itsoffset com stream copy TOTAL — a trilha dublada
   (TrueHD/DTS/EAC3...) sobrevive intacta, sem re-encode
-- offset com DRIFT (janelas divergem): ajusta os audios do "outro" arquivo
-  via -filter_complex (aresample=async=1:first_pts=0, asetpts, adelay/atrim)
-  e re-encoda (AAC p/ mono-estereo; AC3 p/ multicanal, que preserva a ordem
-  dos canais — o AAC nativo do ffmpeg embaralha layouts surround)
+- DRIFT LINEAR (offsets numa reta): ajusta os audios do "outro" arquivo via
+  -filter_complex (aresample=async=1:first_pts=0, asetpts, adelay/atrim e
+  a velocidade pela inclinação) e re-encoda (AAC p/ mono-estereo; AC3 p/
+  multicanal, que preserva a ordem dos canais — o AAC nativo do ffmpeg
+  embaralha layouts surround)
+- qualquer outro padrão (degrau = cena cortada/adicionada, janelas sem
+  correlação) é VersionMismatch: quem trata corte é o alinhador por conteúdo
 - flags plex-friendly: -fflags +genpts, -avoid_negative_ts make_zero,
   -max_interleave_delta DIMENSIONADO por um orçamento de memória (na prática
   estrito — sem limite nenhum, stream esparsa de legenda faz o muxer 'forçar
@@ -30,6 +34,7 @@ Requer ffmpeg + ffprobe no PATH e numpy.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -46,7 +51,58 @@ import numpy as np
 # ---------- parametros do alinhamento ----------
 ALIGN_SR = 8000
 ALIGN_START = 30.0        # pula intros/logos
-ALIGN_DURATION = 300.0    # janela de analise (s)
+# Validação em janelas ESPAÇADAS ao longo do arquivo inteiro. Eram duas (0:30
+# e ~60%): um corte/cena a mais nos últimos 40% passava despercebido, e duas
+# medidas não distinguem degrau (corte) de drift. Uma janela a cada no máximo
+# 20 min, o meio da faixa de 15-30 min (episódio de 45 min: 3 janelas; filme
+# de 2 h: 7; de 3 h: 9): um corte entre 0:30 e 85% da duração cai entre duas
+# janelas medidas e aparece como degrau.
+ALIGN_STEP = 20 * 60.0
+# Janela de 60 s (eram 300): com N janelas, 300 s num REMUX 4K seriam ~3 GB
+# lidos POR JANELA (o -ss pula, mas os 300 s de vídeo intercalado são lidos e
+# descartados). 60 s ainda dão pico folgado: em ruído com o fundo comum 12 dB
+# abaixo do "diálogo" a qualidade fica 34-55 (o ruído puro dá 7-9). Custo de
+# um filme de 2 h: 7 × 61 s do arquivo de referência (o de melhor vídeo, o
+# pesado) contra 2 × 300 s antes, e 7 × 121 s do outro (com a folga) contra
+# 600 s; CPU medida: 0,24 s por janela (eram 0,71), ~1,7 s no total. Janela
+# curta também sofre menos com drift: a deriva DENTRO dela borra o pico do
+# GCC-PHAT (6 ms espalhados já o derrubam ao nível do ruído: em 300 s isso é
+# 0,002% de drift, em 60 s é 0,01%).
+ALIGN_DURATION = 60.0     # janela de analise (s) do arquivo de referência
+# A janela do OUTRO arquivo leva esta folga de cada lado: com as duas janelas
+# no mesmo instante, um offset de 50 s deixaria 10 s em comum e o pico some;
+# com a folga o conteúdo da referência cabe inteiro na busca até ±30 s e
+# ainda sobra metade da janela a 55 s.
+ALIGN_PAD = 30.0
+ALIGN_PREROLL = 1.0       # decodificado antes de cada janela e descartado (ver _extract_mono_wav)
+# A última janela termina antes de 85% da duração: créditos ocupam 5-10% de
+# um filme e costumam diferir entre versões (créditos da dublagem, logos de
+# distribuidora) — um "degrau" ali não é corte do filme.
+ALIGN_TAIL_FRAC = 0.85
+ALIGN_TAIL_MIN = 60.0     # ... e nunca a menos de 60 s do fim
+# Qualidade mínima do pico (razão pico/média) para a janela VOTAR. Não é o
+# MIN_PEAK_QUALITY (6) do refino de séries: aquele busca ±0,6 s; aqui a
+# busca é ±60 s (+folga), e só o máximo do ruído puro em ~1,4 M lags já dá
+# 7-9 (medido). 12 fica acima do ruído com margem; janela abaixo disto
+# (silêncio, música com mixagem diferente, conteúdo que não existe no
+# outro arquivo) é descartada.
+ALIGN_MIN_QUALITY = 12.0
+ALIGN_MIN_GOOD = 3        # janelas boas mínimas para decidir (ou todas, se houver menos)
+# Janelas boas que concordam dentro disto = offset constante (o mesmo limiar
+# das duas janelas antigas e do OFFSET_AGREEMENT do merge por segmentos).
+ALIGN_AGREE_TOL = 0.15
+# Drift LINEAR (velocidade levemente diferente): reta pelos offsets com
+# resíduo baixo, em pelo menos 4 janelas boas (2 graus de liberdade sobrando
+# — com 3 pontos um degrau ainda se disfarça de reta).
+ALIGN_LINE_MIN = 4
+ALIGN_LINE_RESID_TOL = 0.030
+# Inclinação máxima aceita como drift (s/s; 1e-4 = 0,36 s/h). Acima disto a
+# deriva dentro da própria janela de 60 s (>6 ms) apaga o pico — o GCC-PHAT
+# em janela não MEDE drift maior (frame rate 23,976 vs 24 = 1e-3, PAL =
+# 4e-2): esse vira janelas fracas -> alinhador por conteúdo. O teto também
+# limita o estrago de uma escada de cortes que caísse alinhada com as
+# janelas: no máximo 1e-4 × 20 min / 2 = 60 ms de erro entre janelas.
+ALIGN_MAX_DRIFT_RATE = 1e-4
 MAX_OFFSET_SECONDS = 60.0
 ZERO_THRESHOLD_MS = 0.5
 
@@ -104,6 +160,9 @@ class MergeResult:
     # tempo_no_arquivo + input_shifts[i] — para quem anexa material externo
     # (legendas do torrent) depois do merge
     input_shifts: tuple[float, float] = (0.0, 0.0)
+    # velocidade relativa de cada input quando o drift linear foi corrigido:
+    # tempo_saída = tempo_no_arquivo / input_rates[i] + input_shifts[i]
+    input_rates: tuple[float, float] = (1.0, 1.0)
 
 
 class MergeError(RuntimeError):
@@ -117,17 +176,30 @@ class MuxOutOfMemory(MergeError):
 
 
 class VersionMismatch(MergeError):
-    """Offsets divergem entre as duas janelas de validação: os arquivos parecem
-    ser de cortes/versões diferentes e o merge tende a sair dessincronizado.
-    Levantada ANTES do ffmpeg pesado, para o chamador poder perguntar ao usuário
-    se vale a pena gastar a conversão mesmo assim (merge(allow_drift=True))."""
+    """O offset não é constante (nem uma reta) ao longo do arquivo, ou não deu
+    para confirmá-lo: os arquivos parecem ser de cortes/versões diferentes e o
+    merge tende a sair dessincronizado. Levantada ANTES do ffmpeg pesado, para
+    o chamador poder perguntar ao usuário se vale a pena gastar a conversão
+    mesmo assim (merge(allow_drift=True)) ou rodar o alinhador por conteúdo.
 
-    def __init__(self, tau1_ms: float, tau2_ms: float):
-        super().__init__(
-            f"offsets divergem entre o início ({tau1_ms:+.0f} ms) e o meio "
-            f"({tau2_ms:+.0f} ms) do filme — possível corte/versão diferente")
+    tau1_ms: offset da primeira janela boa; tau2_ms: o da janela boa que mais
+    se afasta dele (verdict 'cut') — ou igual a tau1_ms quando o offset não
+    foi confirmado (verdict 'unknown': janelas sem correlação confiável, não
+    há "segundo offset" para mostrar). windows: [(início_s, offset_ms,
+    qualidade)] de TODAS as janelas medidas, inclusive as descartadas."""
+
+    def __init__(self, tau1_ms: float, tau2_ms: float,
+                 windows: list[tuple[float, float, float]] | None = None,
+                 verdict: str = "cut", reason: str = ""):
         self.tau1_ms = tau1_ms
         self.tau2_ms = tau2_ms
+        self.windows = list(windows or [])
+        self.verdict = verdict
+        if verdict == "unknown":
+            self.summary = f"offset não confirmado ({reason or 'janelas sem correlação confiável'})"
+        else:
+            self.summary = f"offsets divergentes ({tau1_ms:+.0f} → {tau2_ms:+.0f} ms)"
+        super().__init__(f"{self.summary} — possível corte/versão diferente")
 
 
 # -------------------- ffprobe helpers --------------------
@@ -321,12 +393,21 @@ def usable_subtitles(probe: dict) -> list[dict]:
 # -------------------- offset (GCC-PHAT) --------------------
 
 def _extract_mono_wav(input_path: str, a_type_index: int, output_wav: str,
-                      start: float = ALIGN_START):
+                      start: float = ALIGN_START, duration: float = ALIGN_DURATION):
+    """Áudio mono a ALIGN_SR de [start, start + duration], com precisão de
+    amostra. O -ss de ENTRADA sozinho erra quando o alvo cai exatamente num
+    keyframe/cluster do MKV: o pacote de áudio que cobre o instante fica no
+    cluster anterior e é pulado — medido em mídia de teste: 16-32 ms de
+    atraso com PCM/FLAC/AC3 e 220 ms com AAC (o pré-roll do decoder some
+    junto). Com N janelas isso aparece como degrau falso. Por isso a busca
+    de entrada para ALIGN_PREROLL antes e o -ss de SAÍDA (por timestamp,
+    exato) descarta o excesso."""
+    seek = max(0.0, start - ALIGN_PREROLL)
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-           "-ss", str(start), "-i", input_path,
+           "-ss", f"{seek:.3f}", "-i", input_path, "-ss", f"{start - seek:.3f}",
            "-map", f"0:a:{a_type_index}", "-vn", "-sn",
            "-ac", "1", "-ar", str(ALIGN_SR), "-acodec", "pcm_s16le",
-           "-t", str(ALIGN_DURATION), output_wav]
+           "-t", f"{duration:.3f}", output_wav]
     p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if p.returncode != 0:
         raise MergeError(f"falha ao extrair áudio de '{input_path}': {p.stderr.strip()}")
@@ -469,14 +550,160 @@ def _total_frames(probe: dict, duration_s: float) -> int:
     return 0
 
 
-def _measure_offset(ref_path: str, ref_a: int, oth_path: str, oth_a: int,
-                    start: float) -> float:
-    """Offset (s) numa janela de ALIGN_DURATION a partir de `start`."""
+def _measure_window(ref_path: str, ref_a: int, oth_path: str, oth_a: int,
+                    start: float) -> tuple[float, float]:
+    """(offset s, qualidade do pico) numa janela de ALIGN_DURATION da
+    referência a partir de `start`. A janela do outro arquivo leva ALIGN_PAD
+    de folga de cada lado (ver a constante): o lag medido entre as duas é
+    offset + folga_esquerda, descontada aqui."""
+    oth_start = max(0.0, start - ALIGN_PAD)
+    lead = start - oth_start
     with tempfile.TemporaryDirectory(prefix="merge_align_") as td:
         wref, woth = str(Path(td) / "ref.wav"), str(Path(td) / "oth.wav")
-        _extract_mono_wav(ref_path, ref_a, wref, start)
-        _extract_mono_wav(oth_path, oth_a, woth, start)
-        return gcc_phat_delay_seconds(_read_wav(woth), _read_wav(wref), ALIGN_SR)
+        _extract_mono_wav(ref_path, ref_a, wref, start, ALIGN_DURATION)
+        _extract_mono_wav(oth_path, oth_a, woth, oth_start,
+                          ALIGN_DURATION + lead + ALIGN_PAD)
+        lag, quality = gcc_phat_delay_with_confidence(
+            _read_wav(woth), _read_wav(wref), ALIGN_SR,
+            max_tau=MAX_OFFSET_SECONDS + lead)
+    return lag - lead, quality
+
+
+def alignment_windows(duration: float) -> list[float]:
+    """Inícios (s) das janelas de validação do offset: a primeira em
+    ALIGN_START (pula logos/intro), a última TERMINANDO em 85% da duração
+    (fora dos créditos), as do meio igualmente espaçadas a no máximo
+    ALIGN_STEP. Arquivo curto demais para duas janelas: uma só."""
+    if duration <= 0:
+        return [ALIGN_START]  # duração desconhecida: o comportamento antigo
+    last = min(duration * ALIGN_TAIL_FRAC, duration - ALIGN_TAIL_MIN) - ALIGN_DURATION
+    if last - ALIGN_START < ALIGN_DURATION:
+        # sem espaço para uma segunda janela que não se sobreponha à primeira;
+        # arquivo menor que ALIGN_START + janela mede do começo
+        return [max(0.0, min(ALIGN_START, duration - ALIGN_DURATION))]
+    n = math.ceil((last - ALIGN_START) / ALIGN_STEP)
+    return [ALIGN_START + i * (last - ALIGN_START) / n for i in range(n + 1)]
+
+
+def _hms(t: float) -> str:
+    t = int(round(t))
+    h, m, s = t // 3600, t // 60 % 60, t % 60
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def measure_offsets(ref_path: str, ref_a: int, oth_path: str, oth_a: int,
+                    duration: float, log=print) -> list[tuple[float, float, float]]:
+    """Mede o offset em todas as janelas de alignment_windows: [(início_s,
+    offset_s, qualidade)], em ordem. Uma janela sem correlação NA PONTA (a
+    primeira ou a última) é medida de novo uma janela para dentro antes de
+    desistir: silêncio ou música numa posição não pode derrubar a verificação
+    das pontas, enquanto conteúdo que não existe no outro arquivo continua
+    fraco na posição vizinha também. Erro do ffmpeg numa janela = janela sem
+    correlação; em TODAS = o erro sobe (arquivo/faixa quebrados)."""
+    starts = alignment_windows(duration)
+    n = len(starts)
+    out: list[tuple[float, float, float]] = []
+    first_error: MergeError | None = None
+
+    def measure(t: float) -> tuple[float, float]:
+        nonlocal first_error
+        try:
+            return _measure_window(ref_path, ref_a, oth_path, oth_a, t)
+        except MergeError as e:
+            first_error = first_error or e
+            return 0.0, 0.0
+
+    for i, t in enumerate(starts):
+        tau, q = measure(t)
+        if q < ALIGN_MIN_QUALITY and n > 1 and i in (0, n - 1):
+            alt = t + ALIGN_DURATION if i == 0 else t - ALIGN_DURATION
+            log(f"Janela {i + 1}/{n} ({_hms(t)}) sem correlação confiável "
+                f"(pico {q:.1f}) — medindo de novo em {_hms(alt)}")
+            tau2, q2 = measure(alt)
+            if q2 > q:
+                t, tau, q = alt, tau2, q2
+        if q >= ALIGN_MIN_QUALITY:
+            log(f"Offset na janela {i + 1}/{n} ({_hms(t)}): {tau * 1000:+.1f} ms "
+                f"(pico {q:.0f})")
+        else:
+            log(f"Offset na janela {i + 1}/{n} ({_hms(t)}): sem correlação "
+                f"confiável (pico {q:.1f} < {ALIGN_MIN_QUALITY:.0f}) — descartada")
+        out.append((t, tau, q))
+    if first_error is not None and all(q == 0.0 for _, _, q in out):
+        raise first_error
+    return out
+
+
+@dataclass
+class OffsetCheck:
+    """Veredito sobre as janelas de offset (classify_offsets)."""
+    verdict: str          # 'constant' | 'drift' | 'cut' | 'unknown'
+    offset: float         # s: o offset a aplicar (ver classify_offsets)
+    rate: float = 0.0     # s/s: inclinação do drift linear (só 'drift')
+    windows: list = field(default_factory=list)   # todas: (início, offset, q)
+    good: list = field(default_factory=list)      # as que votaram
+    diverge: bool = False  # as janelas boas discordam entre si
+    reason: str = ""      # por que 'unknown'
+    tau1_ms: float = 0.0  # primeira janela boa
+    tau2_ms: float = 0.0  # a boa mais distante dela (= tau1_ms em 'unknown')
+
+
+def classify_offsets(windows: list[tuple[float, float, float]],
+                     win: float = ALIGN_DURATION) -> OffsetCheck:
+    """Decide o que fazer com os offsets medidos nas janelas.
+
+    Só votam as janelas com pico >= ALIGN_MIN_QUALITY. Regra:
+    - 'unknown' (não confirmado) se votam menos de ALIGN_MIN_GOOD janelas
+      (ou menos que todas, quando há menos que isso), ou se a PRIMEIRA ou a
+      ÚLTIMA janela não vota: o trecho antes da primeira janela boa / depois
+      da última não está verificado — e uma cena longa a mais (> busca de
+      ±60 s) deixa TODAS as janelas depois dela sem correlação, o que
+      "descartar e seguir" transformaria em offset constante errado;
+    - 'constant' se as janelas boas concordam dentro de ALIGN_AGREE_TOL: o
+      offset é a MEDIANA (uma janela torta não puxa o resultado);
+    - 'drift' se, com >= ALIGN_LINE_MIN janelas boas, os offsets caem numa
+      reta (resíduo <= ALIGN_LINE_RESID_TOL) de inclinação plausível
+      (|b| <= ALIGN_MAX_DRIFT_RATE): offset = intercepto em t=0, rate = b;
+    - 'cut' em qualquer outro padrão — degrau (cena cortada/adicionada) ou
+      irregular. Com duas janelas um degrau e um drift eram indistinguíveis.
+    Em 'cut' (e 'unknown' com janelas discordando) o offset é o da primeira
+    janela boa — o "offset do início" que o merge forçado (allow_drift) usa.
+    O tempo de cada janela é o seu CENTRO (início + win/2)."""
+    good = [w for w in windows if w[2] >= ALIGN_MIN_QUALITY]
+    n = len(windows)
+    if not good:
+        tau0 = windows[0][1] if windows else 0.0
+        return OffsetCheck("unknown", tau0, windows=list(windows), good=[],
+                           reason=f"nenhuma de {n} janela(s) com correlação confiável",
+                           tau1_ms=round(tau0 * 1000, 1), tau2_ms=round(tau0 * 1000, 1))
+    offs = np.array([w[1] for w in good])
+    tau1 = float(offs[0])
+    far = float(offs[int(np.argmax(np.abs(offs - tau1)))])
+    spread = float(offs.max() - offs.min())
+    diverge = spread > ALIGN_AGREE_TOL
+    base = dict(windows=list(windows), good=good, diverge=diverge,
+                tau1_ms=round(tau1 * 1000, 1), tau2_ms=round(far * 1000, 1))
+
+    reason = ""
+    if len(good) < min(ALIGN_MIN_GOOD, n):
+        reason = f"só {len(good)} de {n} janela(s) com correlação confiável"
+    elif windows[0][2] < ALIGN_MIN_QUALITY:
+        reason = "a primeira janela não tem correlação confiável"
+    elif windows[-1][2] < ALIGN_MIN_QUALITY:
+        reason = "a última janela não tem correlação confiável"
+    if reason:
+        offset = tau1 if diverge else float(np.median(offs))
+        return OffsetCheck("unknown", offset, reason=reason,
+                           **(base | {"tau2_ms": base["tau1_ms"]}))
+    if not diverge:
+        return OffsetCheck("constant", float(np.median(offs)), **base)
+    if len(good) >= ALIGN_LINE_MIN:
+        t = np.array([w[0] + win / 2 for w in good])
+        rate, icpt = np.polyfit(t, offs, 1)
+        resid = float(np.abs(offs - (icpt + rate * t)).max())
+        if resid <= ALIGN_LINE_RESID_TOL and abs(rate) <= ALIGN_MAX_DRIFT_RATE:
+            return OffsetCheck("drift", float(icpt), rate=float(rate), **base)
+    return OffsetCheck("cut", tau1, **base)
 
 
 def choose_alignment_pair(probes: list[dict], ref_input: int) -> tuple[int, int]:
@@ -525,14 +752,32 @@ def filtered_codec_and_bitrate(channels: int) -> tuple[str, str]:
     return ("ac3", AC3_BITRATE)
 
 
-def build_audio_fix_chain(input_spec: str, tau_s: float) -> str:
-    """PTS limpo + adelay (adiantado) ou atrim (atrasado)."""
+def build_audio_fix_chain(input_spec: str, tau_s: float, rate: float = 0.0) -> str:
+    """PTS limpo + adelay (adiantado) ou atrim (atrasado) + velocidade (drift).
+
+    Drift linear: o conteúdo do instante t da referência está em
+    tau_s + (1 + rate)·t no outro arquivo. Depois do adelay/atrim de tau_s
+    ele está em (1 + rate)·t: acelerar por (1 + rate) o devolve a t. A
+    aceleração é por TIMESTAMP — asetpts divide o PTS e o aresample
+    estica/espreme as amostras para casar (compensação suave = reamostragem
+    de razão variável; o pitch muda junto, 0,17 cent no teto — imperceptível).
+    Medido em 50 min com 1.00008: fica a 1-2 ms da reta ideal. As
+    alternativas óbvias erram mais: atempo (WSOLA) não acerta fatores tão
+    perto de 1 (12-18 ms fora entre 25 e 50 min — a velocidade efetiva sai
+    ~10% menor), e asetrate só aceita taxa inteira (arredondamento de até
+    1e-5 = 37 ms/h a 48 kHz)."""
     base = f"{input_spec}aresample=async=1:first_pts=0,asetpts=N/SR/TB"
     if abs(tau_s * 1000.0) < ZERO_THRESHOLD_MS:
-        return base
-    if tau_s < 0:
-        return f"{base},adelay={int(round(abs(tau_s) * 1000))}:all=1"
-    return f"{base},atrim=start={tau_s:.6f},asetpts=N/SR/TB"
+        chain = base
+    elif tau_s < 0:
+        chain = f"{base},adelay={int(round(abs(tau_s) * 1000))}:all=1"
+    else:
+        chain = f"{base},atrim=start={tau_s:.6f},asetpts=N/SR/TB"
+    if rate:
+        # async = teto da compensação em amostras/s: 50 cobre o maior drift
+        # aceito (ALIGN_MAX_DRIFT_RATE × 48 kHz = 4,8/s) com folga de 10×
+        chain += f",asetpts=PTS/{1.0 + rate:.9f},aresample=async=50"
+    return chain
 
 
 # -------------------- link quando o merge e desnecessario --------------------
@@ -830,9 +1075,11 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
     file2_is_target_dub: trata audios "und" do file2 como sendo do idioma alvo.
     on_progress: callback(dict) chamado ~2x/s durante o ffmpeg com
         {pct, out_s, duration_s, size, bitrate, speed, fps, eta}.
-    allow_drift: False = levanta VersionMismatch quando as duas janelas de
-        offset divergem (possível corte diferente), ANTES do ffmpeg pesado —
-        em vez de seguir com um merge provavelmente dessincronizado.
+    allow_drift: False = levanta VersionMismatch quando as janelas de offset
+        mostram degrau/padrão irregular ou não confirmam o offset (possível
+        corte diferente), ANTES do ffmpeg pesado — em vez de seguir com um
+        merge provavelmente dessincronizado. Offset constante e drift linear
+        (classify_offsets) seguem nos dois casos.
     convert: transcode.ConvertOptions das opções avançadas (None = pipeline
         clássico, tudo em stream copy). original_lang: idioma original do
         filme no TMDB (ISO 639-1), para o filtro "apenas original + dublagem".
@@ -914,49 +1161,69 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
     chapters_src = ref_input if probes[ref_input].get("chapters") else (
         other_input if probes[other_input].get("chapters") else None)
 
-    # ---- offset (medido em duas janelas para validar o alinhamento) ----
+    # ---- offset (uma janela a cada ~20 min para validar o alinhamento) ----
     ref_align_a, oth_align_a = choose_alignment_pair(probes, ref_input)
-    tau_1 = _measure_offset(ref_path, ref_align_a, oth_path, oth_align_a, ALIGN_START)
-    tau_s = tau_1
-    log(f"Offset na janela 1 ({ALIGN_START:.0f}s): {tau_1 * 1000:+.1f} ms")
-
     duration = min(d for d in (_duration_of(probes[0]), _duration_of(probes[1])) if d > 0) \
         if (_duration_of(probes[0]) and _duration_of(probes[1])) else 0.0
-    has_drift = False
-    if duration > ALIGN_START + 2 * ALIGN_DURATION + 60:
-        start2 = min(max(ALIGN_START + ALIGN_DURATION, duration * 0.6),
-                     duration - ALIGN_DURATION - 30)
-        tau_2 = _measure_offset(ref_path, ref_align_a, oth_path, oth_align_a, start2)
-        log(f"Offset na janela 2 ({start2:.0f}s): {tau_2 * 1000:+.1f} ms")
-        if abs(tau_1 - tau_2) <= 0.15:
-            tau_s = (tau_1 + tau_2) / 2
-            log("Offsets consistentes nas duas janelas — alinhamento validado ✓")
-        else:
-            has_drift = True
-            if not allow_drift:
-                # aborta antes do re-encode (a parte cara): o chamador decide se
-                # vale gastar a conversão num áudio que tende a dessincronizar
-                raise VersionMismatch(round(tau_1 * 1000, 1), round(tau_2 * 1000, 1))
-            warn = (f"⚠️ Offsets divergem entre o início ({tau_1 * 1000:+.0f} ms) e o meio "
-                    f"({tau_2 * 1000:+.0f} ms) do filme — possível corte diferente ou drift; "
-                    f"o áudio pode dessincronizar. Usando o offset do início.")
-            result.notes.append(warn)
-            log(warn)
+    check = classify_offsets(measure_offsets(
+        ref_path, ref_align_a, oth_path, oth_align_a, duration, log=log))
+    n_win, n_good = len(check.windows), len(check.good)
+    if check.verdict == "constant":
+        spread = max(w[1] for w in check.good) - min(w[1] for w in check.good)
+        log(f"Offsets consistentes em {n_good} de {n_win} janela(s) (variação "
+            f"{spread * 1000:.0f} ms) — alinhamento validado ✓")
+    elif check.verdict == "drift":
+        log(f"Offsets numa reta em {n_good} janela(s): drift linear de "
+            f"{check.rate * 3600 * 1000:+.0f} ms/h — corrigindo a velocidade do áudio")
+    elif check.verdict == "cut":
+        log(f"Offsets divergem entre as janelas ({check.tau1_ms:+.0f} → "
+            f"{check.tau2_ms:+.0f} ms) sem seguir uma reta — degrau: corte/cena "
+            f"diferente entre as versões")
     else:
-        log("Filme curto demais para validar o offset numa segunda janela — usando só a primeira.")
+        log(f"Offset não confirmado: {check.reason}")
+    if check.verdict in ("cut", "unknown") and not allow_drift:
+        # aborta antes do re-encode (a parte cara): o chamador decide se vale
+        # gastar a conversão num áudio que tende a dessincronizar — ou manda
+        # para o alinhador por conteúdo, que é quem sabe tratar corte
+        raise VersionMismatch(
+            check.tau1_ms, check.tau2_ms,
+            [(t, round(o * 1000, 1), round(q, 1)) for t, o, q in check.windows],
+            verdict=check.verdict, reason=check.reason)
+    tau_s, drift_rate = check.offset, check.rate
+    # filter_complex com re-encode: drift linear (velocidade) ou, no merge forçado,
+    # janelas que discordam (o caminho antigo "offset do início")
+    has_drift = check.verdict == "drift" or check.diverge
+    if n_win == 1:
+        log("Arquivo curto demais para validar o offset em mais janelas — usando só uma.")
+    if check.verdict in ("cut", "unknown"):
+        if check.diverge:
+            offs = [w[1] * 1000 for w in check.good]
+            what = f"Offsets divergem entre as janelas ({min(offs):+.0f} a {max(offs):+.0f} ms)"
+            used = "do início"
+        else:
+            what = f"Offset não confirmado ({check.reason})"
+            used = "mediano das janelas boas" if check.good else "da primeira janela"
+        warn = (f"⚠️ {what} — possível corte/versão diferente; o áudio pode "
+                f"dessincronizar. Usando o offset {used}.")
+        result.notes.append(warn)
+        log(warn)
 
     result.offset_ms = round(tau_s * 1000.0, 2)
 
-    # Offset constante (sem drift, o caso comum): aplica no CONTAINER via
-    # -itsoffset com stream copy puro — a trilha dublada (TrueHD/DTS/EAC3...)
-    # sobrevive intacta, sem re-encode. O filter_complex com re-encode fica
-    # reservado para quando as janelas divergem (drift/corte), onde filtrar
-    # é inevitável de qualquer jeito.
+    # Offset constante (o caso comum): aplica no CONTAINER via -itsoffset com
+    # stream copy puro — a trilha dublada (TrueHD/DTS/EAC3...) sobrevive
+    # intacta, sem re-encode. O filter_complex com re-encode fica reservado
+    # para o drift, onde filtrar é inevitável de qualquer jeito.
     container_sync = not has_drift
     apply_offset = abs(result.offset_ms) >= ZERO_THRESHOLD_MS
     if container_sync:
         mode = ("sync no container via -itsoffset, sem re-encode" if apply_offset
                 else "~0: remux puro, sem re-encode")
+    elif drift_rate:
+        mode = f"drift linear: re-encode com adelay/atrim + velocidade {1 + drift_rate:.6f}"
+        result.notes.append(
+            f"drift linear de {drift_rate * 3600 * 1000:+.0f} ms/h corrigido "
+            f"(áudio do outro arquivo com velocidade {1 + drift_rate:.6f})")
     else:
         mode = "drift: re-encode com adelay/atrim"
     log(f"Offset aplicado: {result.offset_ms:+.2f} ms ({mode})")
@@ -977,12 +1244,15 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
                     f"capítulos podem ficar deslocados {tau_s:.1f}s "
                     f"(offset aplicado no container)")
         result.input_shifts = (shifts[0], shifts[1])
-    elif apply_offset:
-        # drift: o áudio do outro input é re-encodado com adelay/atrim (−tau);
-        # a timeline de referência não muda
-        shifts = [0.0, 0.0]
-        shifts[other_input] = -tau_s
+    elif apply_offset or drift_rate:
+        # drift: o áudio do outro input é re-encodado com adelay/atrim (−tau)
+        # e, no drift linear, acelerado por (1 + rate) — saída = (t − tau) /
+        # (1 + rate); a timeline de referência não muda
+        shifts, rates = [0.0, 0.0], [1.0, 1.0]
+        rates[other_input] = 1.0 + drift_rate
+        shifts[other_input] = -tau_s / rates[other_input]
         result.input_shifts = (shifts[0], shifts[1])
+        result.input_rates = (rates[0], rates[1])
 
     # vídeo: copy por padrão; re-encode quando as opções avançadas pedirem.
     # Planejado antes do comando porque o plano pode trazer args de ENTRADA
@@ -1023,7 +1293,7 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
                 continue
             label = f"a_fix_{item['a_idx']}"
             filter_labels[item["a_idx"]] = label
-            chain = build_audio_fix_chain(f"[1:a:{item['a_idx']}]", tau_s)
+            chain = build_audio_fix_chain(f"[1:a:{item['a_idx']}]", tau_s, drift_rate)
             plan = item["plan"]
             if plan and plan.encode and plan.needs_layout_fix:
                 chain += "," + transcode.OPUS_LAYOUT_FIX

@@ -88,14 +88,16 @@ async def _deliver_single(job: dict, files: dict):
 
 
 async def _attach_external_subs(job: dict, output: str, files: dict,
-                                shifts, log, linked: bool = False):
+                                shifts, log, linked: bool = False,
+                                rates=(1.0, 1.0)):
     """Legendas externas dos torrents (.srt/.ass/.vtt) no arquivo entregue.
 
     files: {"video": Path, "audio": Path} (os que existirem); shifts: (s_video,
-    s_audio) em segundos — tempo_saída = tempo_no_arquivo + shift; None = lado
-    sem referência de tempo (não entra). Saída MKV recém-criada → mux; saída
-    hardlinkada (ou não-MKV) → sidecars ao lado (muxar obrigaria a copiar o
-    filme inteiro). Nunca derruba o job."""
+    s_audio) em segundos — tempo_saída = tempo_no_arquivo / rate + shift
+    (rates: velocidade de cada lado, != 1 só no drift linear corrigido do
+    merge); None = lado sem referência de tempo (não entra). Saída MKV
+    recém-criada → mux; saída hardlinkada (ou não-MKV) → sidecars ao lado
+    (muxar obrigaria a copiar o filme inteiro). Nunca derruba o job."""
     roots = job.get("src_roots") or {}
 
     def _find(kind: str) -> list[str]:
@@ -128,8 +130,8 @@ async def _attach_external_subs(job: dict, output: str, files: dict,
         mode = "sidecar" if (linked or Path(output).suffix.lower() != ".mkv") else "mux"
         n = await asyncio.to_thread(
             ext_subs.attach, output, v_subs, a_subs,
-            None if shifts[0] is None else ext_subs.shift_fn(shifts[0]),
-            None if shifts[1] is None else ext_subs.shift_fn(shifts[1]),
+            None if shifts[0] is None else ext_subs.shift_fn(shifts[0], rates[0]),
+            None if shifts[1] is None else ext_subs.shift_fn(shifts[1], rates[1]),
             str(files.get("video") or ""), str(files.get("audio") or ""),
             v_lang, a_lang, log, mode)
         if n:
@@ -184,7 +186,7 @@ async def _merge(job: dict, video_file: Path, audio_file: Path,
         shifts = result.input_shifts
     await _attach_external_subs(
         job, result.output, {"video": video_file, "audio": audio_file}, shifts, log,
-        linked=result.linked)
+        linked=result.linked, rates=result.input_rates)
     if result.linked:
         _set(job, "done", f"Áudio no idioma alvo já existia no melhor vídeo — hardlink criado: {result.output}")
     else:

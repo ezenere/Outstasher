@@ -510,7 +510,9 @@ export interface Job {
   search?: { audio: Candidate[]; video: Candidate[] } | null
   events?: JobEvent[]
   /** Presente quando a conversão pausou por offsets divergentes (possível
-   *  versão/corte diferente) e espera o usuário clicar em Continuar. */
+   *  versão/corte diferente) e espera o usuário clicar em Continuar.
+   *  tau1_ms = 1ª janela boa do merge; tau2_ms = a mais distante dela, ou
+   *  igual a tau1_ms quando o offset não foi confirmado (janelas fracas). */
   drift_confirm?: {
     video_file: string; audio_file: string; tau1_ms: number; tau2_ms: number
     /** offset medido a cada 5 min (mesmo scanner das séries) e a forma do
