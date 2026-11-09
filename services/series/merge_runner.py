@@ -231,6 +231,48 @@ def _audio_indexes(dub_path: str, orig_path: str,
             int(ds[1].get("channels") or 2))
 
 
+async def _episode_output(job: dict, key: str, ep: dict, filename: str) -> Path:
+    """Caminho final do episódio: <destino do job>/<pasta da série>/<temporada>/.
+
+    A pasta da série é a que JÁ existe no destino do job, se houver uma do
+    mesmo título (caso real: "Serie Exemplo/Season 1/", de outro programa —
+    o episódio novo nascia numa segunda pasta 'Serie Exemplo (2024)
+    [tmdbid-N]' ao lado), e a temporada, a que a pasta já usa ou uma nova no
+    padrão dela (naming.season_dir_in). Sem pasta existente, o layout de
+    sempre. Pasta só em OUTRO destino não conta: o destino é escolha do job.
+
+    O nome do ARQUIVO continua o do Outstasher mesmo em pasta alheia: o
+    "SxxEyy" é o que o Jellyfin (e o Sonarr, se a pasta for dele) parseia,
+    independente do resto do nome; o "(Ano)" e o "[pt+orig]" dizem de onde o
+    arquivo veio e qual faixa ele tem, e são o que impede colidir com o
+    arquivo do outro programa para o mesmo episódio — imitar o nome dele
+    ("Serie - S01E01 - Titulo WEBDL-1080p") inventaria uma qualidade e
+    poderia cair exatamente no nome do arquivo que já está lá."""
+    def _resolve():
+        series_dir, found = jobs.runtime._title_dir(job)
+        season = (naming.season_dir_in(series_dir, ep["season"]) if found
+                  else naming.season_dir_name(ep["season"]))
+        wanted = series_dir / season / filename
+        return (series_dir, found, wanted,
+                jobs.runtime._unclaimed(wanted, found, ep.get("output")))
+
+    series_dir, found, wanted, output = await asyncio.to_thread(_resolve)
+    if found and (not found["canonical"] or found["others"]):
+        # uma vez por pasta, não por episódio: a temporada inteira cai lá, e
+        # o ✅ de cada episódio já mostra o caminho completo. job["output"]
+        # conta o episódio em curso que caiu no alinhador (2ª passagem aqui)
+        entregues = [Path(o) for o in [job.get("output")] + [
+            v.get("output") for v in job["episodes"].values()] if o]
+        if not any(series_dir in p.parents for p in entregues):
+            jobs._event(job, "merge", jobs.runtime._folder_note(job, found))
+    if output != wanted:
+        jobs._event(job, "merge",
+                    f"⚠️ {key}: já existe '{wanted.name}' em "
+                    f"'{wanted.parent.name}' (não é deste job) — gravando "
+                    f"como '{output.name}'")
+    return output
+
+
 async def _render_from_edl(job: dict, key: str, ep: dict):
     """Renderiza a EDL do episódio no destino (timeline do original)."""
     from services.series.align import edl as edl_mod, render as render_mod
@@ -240,13 +282,10 @@ async def _render_from_edl(job: dict, key: str, ep: dict):
                     f"{key}: opções avançadas de conversão ainda não se "
                     f"aplicam ao caminho de EDL — saída em stream copy")
     m = job["movie"]
-    folder = naming.series_folder_name(m["original_title"], m["year"],
-                                       job.get("tmdb_id"))
     stem = naming.episode_file_name(m["original_title"], m["year"],
                                     ep["season"], ep["episode"],
                                     job["language"])
-    dest_dir = Path(job.get("destination_path") or config.OUTPUT_DIR)
-    output = dest_dir / folder / naming.season_dir_name(ep["season"]) / f"{stem}.mkv"
+    output = await _episode_output(job, key, ep, f"{stem}.mkv")
     job["output"] = str(output)
     segs = edl_mod.segments(ep["edl"])
     # política do merge avançado (Configurações): trecho sem dublagem sai do
@@ -329,14 +368,10 @@ async def _merge_episode(job: dict, key: str, ep: dict, convert_opts):
         jobs._event(job, "merge",
                     f"{key}: offset constante em {len(pts)} janela(s) "
                     f"({pts[0][1] * 1000:+.0f} ms) — caminho rápido")
-    folder = naming.series_folder_name(m["original_title"], m["year"],
-                                       job.get("tmdb_id"))
-    season_dir = naming.season_dir_name(ep["season"])
     stem = naming.episode_file_name(m["original_title"], m["year"],
                                     ep["season"], ep["episode"],
                                     job["language"])
-    dest_dir = Path(job.get("destination_path") or config.OUTPUT_DIR)
-    output = dest_dir / folder / season_dir / f"{stem}.mkv"
+    output = await _episode_output(job, key, ep, f"{stem}.mkv")
     # registra o destino JÁ: cancelar durante o ffmpeg precisa apagar o parcial
     job["output"] = str(output)
 
@@ -376,16 +411,12 @@ async def _deliver_episode(job: dict, key: str, ep: dict, convert_opts):
     src = Path(ep["src"][role])
     m = job["movie"]
     tag = "orig" if role == "original" else job["language"]
-    folder = naming.series_folder_name(m["original_title"], m["year"],
-                                       job.get("tmdb_id"))
     stem = naming.episode_file_name(m["original_title"], m["year"],
                                     ep["season"], ep["episode"],
                                     job["language"], tag=tag)
-    out_dir = (Path(job.get("destination_path") or config.OUTPUT_DIR)
-               / folder / naming.season_dir_name(ep["season"]))
     log, on_progress = jobs._ffmpeg_hooks(job)
     if convert_opts is not None:
-        output = out_dir / f"{stem}.mkv"
+        output = await _episode_output(job, key, ep, f"{stem}.mkv")
         job["output"] = str(output)   # cancel() apaga o parcial
         try:
             result = await asyncio.to_thread(
@@ -398,7 +429,7 @@ async def _deliver_episode(job: dict, key: str, ep: dict, convert_opts):
         ep["output"] = result.output
         linked = result.linked
     else:
-        output = out_dir / f"{stem}{src.suffix}"
+        output = await _episode_output(job, key, ep, f"{stem}{src.suffix}")
         notes: list[str] = []
         await asyncio.to_thread(merger._link_or_copy, src, output, notes)
         for n in notes:

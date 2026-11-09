@@ -324,8 +324,9 @@ export default function SeriesModal({
     return { seasons, episodes: eps }
   }
 
-  // pasta que casou por nome (ou com nome fora do padrão): renomear para o
-  // nome do Outstasher faz os episódios novos caírem NELA — ação explícita,
+  // pasta que casou por nome (ou com nome fora do padrão): os episódios novos
+  // já caem NELA quando está no destino do job; renomear para o nome do
+  // Outstasher só a deixa no padrão e marcada com o id — ação explícita,
   // nunca automática (outro programa pode depender do caminho)
   function canStandardize(f: OwnedFolder): boolean {
     const canonical = owned?.canonical_name
@@ -338,10 +339,10 @@ export default function SeriesModal({
     if (!canonical || !detail) return
     if (!(await dialog.confirm({
       title: 'Padronizar a pasta da série',
-      message: `Renomear "${f.folder}" para "${canonical}"? Os episódios novos que o `
-        + 'Outstasher baixar vão para esta mesma pasta (em vez de uma segunda pasta '
-        + 'da série) e o Jellyfin passa a identificá-la pelo ID do TMDB. Os arquivos '
-        + 'dentro dela não mudam. Se outro programa gerencia esta pasta, ele perde o caminho.',
+      message: `Renomear "${f.folder}" para "${canonical}"? O Jellyfin passa a `
+        + 'identificá-la pelo ID do TMDB, sem depender do título. Os episódios novos '
+        + 'vão para esta pasta com ou sem o nome novo, e os arquivos dentro dela não '
+        + 'mudam. Se outro programa gerencia esta pasta, ele perde o caminho.',
       confirmText: 'Renomear',
     }))) return
     try {

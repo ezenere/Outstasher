@@ -17,12 +17,35 @@ from services.jobs.runtime import (
     _register_proc, _set, _tag)
 
 
-def _movie_output(job: dict) -> Path:
+async def _movie_target(job: dict, filename: str) -> Path:
+    """Caminho final do filme: <destino do job>/<pasta do filme>/<filename>.
+
+    A pasta é a que JÁ existe no destino do job para este filme, se houver
+    (caso real: "Filme Exemplo (2001)/", de antes do [tmdbid-N] ou de outro
+    programa — a entrega criava 'Filme Exemplo (2001) [tmdbid-N]' ao lado e
+    o filme ficava em duas pastas); senão a canônica. Pasta existente exige
+    o mesmo ano (runtime._title_dir / catalog.existing_folder). Lá dentro um
+    arquivo de mesmo nome que não é deste job não é sobrescrito: a entrega
+    usa 'nome (2).mkv' (runtime._unclaimed)."""
+    def _resolve():
+        movie_dir, found = runtime._title_dir(job, require_year=True)
+        wanted = movie_dir / filename
+        return found, wanted, runtime._unclaimed(wanted, found, job.get("output"))
+
+    found, wanted, output = await asyncio.to_thread(_resolve)
+    if found and (not found["canonical"] or found["others"]):
+        _event(job, "merge", runtime._folder_note(job, found))
+    if output != wanted:
+        _event(job, "merge", f"⚠️ Já existe '{wanted.name}' na pasta (não é "
+                             f"deste job) — gravando como '{output.name}'")
+    return output
+
+
+async def _movie_output(job: dict) -> Path:
+    """Saída do merge (os dois lados): 'Filme (Ano) [pt+orig].mkv'."""
     movie = job["movie"]
     safe_title = catalog.safe_name(f"{movie['original_title']} ({movie['year']})")
-    folder = catalog.folder_name(movie["original_title"], movie["year"], job.get("tmdb_id"))
-    dest_dir = Path(job.get("destination_path") or config.OUTPUT_DIR)
-    return dest_dir / folder / f"{safe_title} [{job['language']}+orig].mkv"
+    return await _movie_target(job, f"{safe_title} [{job['language']}+orig].mkv")
 
 
 async def _deliver_single(job: dict, files: dict):
@@ -37,14 +60,12 @@ async def _deliver_single(job: dict, files: dict):
 
     movie = job["movie"]
     safe_title = catalog.safe_name(f"{movie['original_title']} ({movie['year']})")
-    folder = catalog.folder_name(movie["original_title"], movie["year"], job.get("tmdb_id"))
     tag = "orig" if job["kind"] == "original" else job["language"]
-    dest_dir = Path(job.get("destination_path") or config.OUTPUT_DIR)
     label = "original" if job["kind"] == "original" else f"dublado ({job['language']})"
 
     if job.get("convert"):
         opts = transcode.validate(job["convert"])
-        output = dest_dir / folder / f"{safe_title} [{tag}].mkv"
+        output = await _movie_target(job, f"{safe_title} [{tag}].mkv")
         # registra o destino antes do ffmpeg: cancel() apaga o parcial (ver _merge)
         job["output"] = str(output)
         job["merge_started_at"] = datetime.now().isoformat(timespec="seconds")
@@ -69,7 +90,7 @@ async def _deliver_single(job: dict, files: dict):
         await _cleanup_torrents(job)
         return
 
-    output = dest_dir / folder / f"{safe_title} [{tag}]{src_file.suffix}"
+    output = await _movie_target(job, f"{safe_title} [{tag}]{src_file.suffix}")
     job["merge_started_at"] = datetime.now().isoformat(timespec="seconds")
     _set(job, "merging", f"Entregando {label} no destino...")
 
@@ -148,12 +169,9 @@ async def _merge(job: dict, video_file: Path, audio_file: Path,
     _event(job, "merge", f"Arquivo de vídeo: {video_file}")
     _event(job, "merge", f"Arquivo de áudio: {audio_file}")
 
-    movie = job["movie"]
-    safe_title = catalog.safe_name(f"{movie['original_title']} ({movie['year']})")
-    # subpasta por filme dentro do destino escolhido (bom para Jellyfin/Plex)
-    folder = catalog.folder_name(movie["original_title"], movie["year"], job.get("tmdb_id"))
-    dest_dir = Path(job.get("destination_path") or config.OUTPUT_DIR)
-    output = dest_dir / folder / f"{safe_title} [{job['language']}+orig].mkv"
+    # subpasta por filme dentro do destino escolhido (bom para Jellyfin/Plex):
+    # a que já existe para o filme, ou a canônica
+    output = await _movie_output(job)
     # registra o destino JÁ: se o usuário cancelar durante o ffmpeg, o cancel()
     # precisa saber qual arquivo parcial apagar
     job["output"] = str(output)

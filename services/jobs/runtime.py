@@ -526,3 +526,53 @@ def _free_name(path: Path) -> Path:
         if not cand.exists():
             return cand
     raise ValueError(f"Não achei um nome livre para {path.name}")
+
+
+# -------------------- pasta do título no destino (entrega) --------------------
+
+def _title_dir(job: dict, require_year: bool = False) -> tuple[Path, dict | None]:
+    """(pasta do filme/série no destino do job, a pasta existente que casou
+    ou None). Sem nenhuma, a canônica 'Título (Ano) [tmdbid-N]' de sempre;
+    com uma — de outro programa, de versão antiga, padronizada — a entrega
+    vai DENTRO dela (catalog.existing_folder). Bloqueante (lê o destino):
+    chamar via asyncio.to_thread."""
+    m = job["movie"]
+    dest_dir = Path(job.get("destination_path") or config.OUTPUT_DIR)
+    found = catalog.existing_folder(
+        dest_dir, m["original_title"], m["year"], job.get("tmdb_id"),
+        (m.get("localized_title"), m.get("english_title")),
+        require_year=require_year)
+    if found is None:
+        return dest_dir / catalog.folder_name(
+            m["original_title"], m["year"], job.get("tmdb_id")), None
+    return dest_dir / found["folder"], found
+
+
+def _unclaimed(path: Path, found: dict | None, own: str | None) -> Path:
+    """O caminho final, ou um nome livre ('nome (2).mkv') quando ali já há
+    um arquivo que não é deste job DENTRO de uma pasta que não é a padrão.
+
+    Na pasta padrão (criada pelo Outstasher) nada muda: o arquivo de mesmo
+    nome é uma entrega anterior do mesmo título, e refazer o filme/episódio
+    o substitui de propósito. Na pasta de outro programa (ou de antes do
+    [tmdbid-N]) o Outstasher não é dono do que está lá: sobrescrever apagaria
+    um arquivo que o usuário pode querer manter. `own` é a saída que este job
+    já gravou ali (re-render do mesmo episódio): essa é dele."""
+    if found is None or found["canonical"] or str(path) == own:
+        return path
+    return _free_name(path)
+
+
+def _folder_note(job: dict, found: dict) -> str:
+    """Texto do evento que conta em que pasta existente a entrega cai."""
+    m = job["movie"]
+    canonical = catalog.folder_name(m["original_title"], m["year"], job.get("tmdb_id"))
+    if found["canonical"]:
+        msg = f"📁 Entrega na pasta '{found['folder']}' ({found['why']})"
+    else:
+        msg = (f"📁 Entrega na pasta existente '{found['folder']}' "
+               f"({found['why']}), em vez de criar '{canonical}'")
+    if found["others"]:
+        msg += " — também casa(m) neste destino: " + ", ".join(
+            f"'{o}'" for o in found["others"])
+    return msg
