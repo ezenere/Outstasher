@@ -265,8 +265,9 @@ async def series_owned(tv_id: int, title: str = "", original_title: str = "",
     se o TMDB não responder).
 
     `canonical_name` é o nome que o Outstasher daria à pasta: a UI oferece
-    renomear (ação explícita) a pasta que casou por título, para os
-    episódios novos caírem nela e não numa segunda pasta da série."""
+    renomear (ação explícita) a pasta que casou por título, para o Jellyfin
+    identificá-la pelo id. Os episódios novos já caem nela sem renomear,
+    quando ela está no destino do job (catalog.existing_folder)."""
     async def details():
         try:
             return await tmdb.tv_details(tv_id)

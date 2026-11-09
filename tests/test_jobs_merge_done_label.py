@@ -27,6 +27,11 @@ def _run(temp_db, monkeypatch, result):
 
     monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
 
+    # a pasta do filme (que lê o destino via to_thread) não é o que se testa
+    async def fixed_output(_job):
+        return Path("/out/filme.mkv")
+    monkeypatch.setattr(jobs.delivery, "_movie_output", fixed_output)
+
     async def noop(_job):
         return None
     monkeypatch.setattr(jobs.delivery, "_cleanup_torrents", noop)

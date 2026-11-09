@@ -6,6 +6,7 @@ de midia e devolve as tracks parseadas de forma detalhada e legivel.
 """
 from __future__ import annotations
 
+import difflib
 import os
 import re
 import shutil
@@ -626,9 +627,9 @@ def tag_folder_with_tmdb(destination_id: int | None, folder: str, tmdb_id: int,
 
     Sem `title`, mantém o título/ano da própria pasta. Com `title` (+ `year`),
     a pasta ganha o nome exato que o Outstasher daria ('Título (Ano)
-    [tmdbid-N]') — uma série baixada por outro programa ("Serie Exemplo/") só
-    recebe os episódios novos na MESMA pasta se o nome bater com o que o
-    merge gera; senão nasce uma segunda pasta da série no destino."""
+    [tmdbid-N]') — a série baixada por outro programa ("Serie Exemplo/")
+    passa a ser identificada pelo id no Jellyfin. Os episódios novos já caem
+    nela mesmo sem renomear (existing_folder, na entrega)."""
     if title is None:
         title, year = _title_and_year(folder)
     return rename_folder(destination_id, folder, folder_name(title, year or None, tmdb_id))
@@ -780,6 +781,16 @@ def _episodes_in_dir(entry: Path) -> dict[int, set[int]]:
     return seasons
 
 
+def _name_record(name: str) -> dict:
+    """O que o casamento com o TMDB lê do NOME da pasta (id marcado, título
+    exato e frouxo, ano) — um lugar só para o índice da coleção e para a
+    escolha da pasta na entrega (existing_folder)."""
+    title, year = _title_and_year(name)
+    return {"folder": name, "tmdb_id": tmdb_id_in(name),
+            "norm_title": _norm_title(title), "loose_title": _loose_title(title),
+            "year": year}
+
+
 def _scan_series() -> tuple[dict, ...]:
     """Um registro por pasta de série: {folder, destination_id,
     destination_label, tmdb_id, norm_title, loose_title, year,
@@ -809,15 +820,10 @@ def _scan_series() -> tuple[dict, ...]:
                     continue
             except OSError:
                 continue  # uma pasta ilegível não derruba o resto do destino
-            title, year = _title_and_year(entry.name)
             entries.append({
-                "folder": entry.name,
+                **_name_record(entry.name),
                 "destination_id": dest["id"],
                 "destination_label": dest["label"],
-                "tmdb_id": tmdb_id_in(entry.name),
-                "norm_title": _norm_title(title),
-                "loose_title": _loose_title(title),
-                "year": year,
                 "seasons": seasons,
             })
     return tuple(entries)
@@ -901,3 +907,98 @@ def owned_episodes(tmdb_id: int | None, titles,
     casamento em match_series. Alimenta o "na coleção" do modal de série
     ("adicionar episódios") e o selo da busca."""
     return series_in_library(tmdb_id, titles, year)["seasons"]
+
+
+# -------------------- pasta já existente do título (entrega) --------------------
+# A entrega montava o caminho só pelo TMDB ('Título (Ano) [tmdbid-N]'): com a
+# série baixada por outro programa em "Serie Exemplo/" — ou o filme de uma
+# versão antiga do Outstasher em "Filme Exemplo (2001)/", sem o id —, o
+# arquivo novo nascia numa SEGUNDA pasta ao lado e o título ficava partido em
+# duas no Jellyfin. A entrega agora procura no destino DO JOB uma pasta que já
+# seja do título, pela mesma regra do índice da coleção (match_series), e
+# entrega dentro dela. Outro destino não entra: quem escolheu o destino do job
+# foi o usuário (o modal já pré-seleciona o da pasta encontrada).
+
+# por que a pasta escolhida ganhou, do mais forte ao mais fraco (vai no evento)
+_FOLDER_TIERS = (
+    "nome padrão",
+    "marcada com o id do TMDB",
+    "nome padrão, sem o id do TMDB",
+    "casou pelo título",
+    "casou pelo título, com grafia aproximada",
+)
+
+
+def _closeness(folder: str, titles: list[str]) -> float:
+    """Quão perto o título no nome da pasta está do título mais parecido do
+    TMDB (0..1) — desempate entre pastas que casaram do mesmo jeito."""
+    name = _collate(_title_and_year(folder)[0])
+    return max((difflib.SequenceMatcher(None, name, _collate(t)).ratio()
+                for t in titles), default=0.0)
+
+
+def existing_folder(root, title: str, year: str | None, tmdb_id: int | None,
+                    other_titles=(), require_year: bool = False) -> dict | None:
+    """A pasta que JÁ existe em `root` para o título, ou None (aí a entrega
+    cria a canônica, folder_name). Bloqueante (lê o destino).
+
+    `title` é o que dá nome à pasta canônica (o original); `other_titles`
+    (localizado, inglês) só ajudam a casar. Regra de match_series: mesmo
+    [tmdbid-N] casa sempre, OUTRO id nunca casa pelo nome, sem marca casa
+    pelo título (exato ou frouxo) e pelo ano quando a pasta tem.
+    `require_year` (filmes): pasta sem ano não serve — "Filme Exemplo/" pode
+    ser o original de um remake homônimo, e juntar os dois numa pasta faria o
+    Jellyfin mostrar um filme só. Em série, a pasta sem ano é o normal dos
+    outros programas.
+
+    Mais de uma candidata: a canônica; senão a marcada com o mesmo id; senão
+    a de nome padrão sem o id ('Título (Ano)'); senão a que casou pelo título
+    (exato antes do frouxo). Empate no mesmo nível = a de nome mais próximo
+    do título (e a que tem ano), registrado em `why`.
+
+    Devolve {folder, match, canonical, why, others}: `others` são as outras
+    pastas que também casaram, para o evento do job contar que o título está
+    espalhado no destino."""
+    year = year or None
+    titles = [t for t in (title, *other_titles) if t]
+    names = []
+    try:
+        with os.scandir(root) as it:
+            for e in it:
+                try:
+                    # oculta (.Trash-1000, .stfolder...) nunca é pasta de título
+                    if not e.name.startswith(".") and e.is_dir():
+                        names.append(e.name)
+                except OSError:
+                    continue
+    except OSError:
+        return None  # destino ainda não criado / desmontado: nada a reaproveitar
+    cands = match_series(tmdb_id, titles, year,
+                         tuple(_name_record(n) for n in names))
+    if require_year and year:
+        cands = [(e, how) for e, how in cands
+                 if how == "tmdbid" or e["year"] == year]
+    if not cands:
+        return None
+    canonical = folder_name(title, year, tmdb_id)
+    plain = folder_name(title, year)
+
+    def tier(e: dict, how: str) -> int:
+        if e["folder"] == canonical:
+            return 0
+        if how == "tmdbid":
+            return 1
+        if e["folder"] == plain:
+            return 2
+        return 3 if how == "title" else 4
+
+    ranked = sorted(
+        (tier(e, how), -_closeness(e["folder"], titles), e["year"] is None,
+         e["folder"].casefold(), e["folder"], how) for e, how in cands)
+    best = ranked[0]
+    ties = sum(1 for r in ranked if r[0] == best[0])
+    why = _FOLDER_TIERS[best[0]]
+    if ties > 1:
+        why += f" — {ties} pastas casam do mesmo jeito, usada a de nome mais próximo"
+    return {"folder": best[4], "match": best[5], "canonical": best[0] == 0,
+            "why": why, "others": [r[4] for r in ranked[1:]]}

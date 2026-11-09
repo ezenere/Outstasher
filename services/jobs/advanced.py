@@ -183,7 +183,7 @@ async def _render_advanced(job: dict):
     """Renderiza a EDL do filme (job['advanced']) no destino."""
     from services.series.align import edl as edl_mod, render as render_mod
     adv = job["advanced"]
-    output = delivery._movie_output(job)
+    output = await delivery._movie_output(job)
     job["output"] = str(output)
     lock = _get_merge_lock()
     if lock.locked():
