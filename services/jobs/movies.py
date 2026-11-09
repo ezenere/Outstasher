@@ -130,7 +130,7 @@ async def create_manual(tmdb_id: int, language: str, video_path: str, audio_path
                         convert: dict | None = None) -> dict:
     """Conversão manual: merge de dois arquivos JÁ NO DISCO, sem busca/torrents.
 
-    Mesmo pipeline de conversão dos jobs normais (alinhamento em duas janelas,
+    Mesmo pipeline de conversão dos jobs normais (offset validado ao longo do filme,
     pausa de drift, fila de merge, saída em destino/Filme (Ano)/), só que os
     arquivos vêm de caminhos digitados pelo usuário em vez do qBittorrent.
     """

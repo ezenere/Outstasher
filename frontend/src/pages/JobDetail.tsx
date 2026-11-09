@@ -447,12 +447,22 @@ export default function JobDetail() {
           <h2 className="mb-2 flex items-center gap-1.5 font-semibold text-amber-300">
             <WarningTriangle width={16} height={16} /> Possível versão/corte diferente
           </h2>
-          <p className="text-sm text-zinc-300">
-            O offset varia entre o início (
-            <span className="tabular-nums">{job.drift_confirm.tau1_ms.toFixed(0)} ms</span>) e o meio (
-            <span className="tabular-nums">{job.drift_confirm.tau2_ms.toFixed(0)} ms</span>) do filme — o áudio
-            pode dessincronizar. Conversão pausada.
-          </p>
+          {/* tau1 == tau2: o merge não CONFIRMOU o offset (janelas sem
+              correlação confiável) — não há um segundo offset para mostrar */}
+          {job.drift_confirm.tau1_ms === job.drift_confirm.tau2_ms ? (
+            <p className="text-sm text-zinc-300">
+              Não deu para confirmar o offset ao longo do filme: janelas sem correlação confiável
+              (cena longa a mais, drift de velocidade ou áudio de outra versão) — o áudio pode
+              dessincronizar. Conversão pausada.
+            </p>
+          ) : (
+            <p className="text-sm text-zinc-300">
+              O offset varia entre o início (
+              <span className="tabular-nums">{job.drift_confirm.tau1_ms.toFixed(0)} ms</span>) e outro trecho (
+              <span className="tabular-nums">{job.drift_confirm.tau2_ms.toFixed(0)} ms</span>) do filme — o áudio
+              pode dessincronizar. Conversão pausada.
+            </p>
+          )}
           {job.drift_confirm.profile ? (
             <div className="mt-3 text-xs text-zinc-400">
               <div className="mb-1">

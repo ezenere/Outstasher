@@ -26,7 +26,7 @@ def fixed_offset(monkeypatch):
     """Fixa o offset em 0 para os testes cujo FOCO é o pipeline de conversão,
     não o alinhamento. Arquivos curtos (6 s) não têm janela de 30 s+ para o
     GCC-PHAT medir — o alinhamento real é exercitado em test_align_ffmpeg.py."""
-    monkeypatch.setattr(merger, "_measure_offset", lambda *a, **k: 0.0)
+    monkeypatch.setattr(merger, "_measure_window", lambda *a, **k: (0.0, 100.0))
 
 
 def test_sigkill_reports_oom(tmp_path, make_media):

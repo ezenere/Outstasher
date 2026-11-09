@@ -55,9 +55,10 @@ def _shape_verdict(offs: list[float]) -> str:
 
 
 async def _pause_for_drift(job: dict, files: dict, e: "merger.VersionMismatch"):
-    """Conversão abortada antes do ffmpeg pesado: as duas janelas de offset
-    divergem, então o áudio provavelmente é de outro corte/versão e o resultado
-    sairia dessincronizado. Em vez de gastar CPU à toa, o job para em
+    """Conversão abortada antes do ffmpeg pesado: as janelas de offset ao longo
+    do filme mostram degrau (ou não confirmam o offset), então o áudio
+    provavelmente é de outro corte/versão e o resultado sairia
+    dessincronizado. Em vez de gastar CPU à toa, o job para em
     'awaiting' (bolinha vermelha de resposta pendente) e o usuário decide:
     Continuar mesmo assim (proceed), rodar o alinhamento avançado (o mesmo
     das séries: EDL por conteúdo), escolher outro torrent ou cancelar.
@@ -71,8 +72,8 @@ async def _pause_for_drift(job: dict, files: dict, e: "merger.VersionMismatch"):
     }
     job["drift_confirm"] = gate
     _set(job, "awaiting",
-         f"⚠️ Possível versão/corte diferente (offset {e.tau1_ms:+.0f} → "
-         f"{e.tau2_ms:+.0f} ms). Medindo o perfil do offset...")
+         f"⚠️ Possível versão/corte diferente — {e.summary}. "
+         f"Medindo o perfil do offset...")
     try:
         profile, verdict = await asyncio.to_thread(
             _offset_profile, str(files["video"]), str(files["audio"]))
@@ -93,8 +94,8 @@ async def _pause_for_drift(job: dict, files: dict, e: "merger.VersionMismatch"):
     # "awaiting" com o fingerprint rodando, e um segundo proceed aceito)
     if job.get("drift_confirm") is gate:
         _set(job, "awaiting",
-             f"⚠️ Possível versão/corte diferente (offset {e.tau1_ms:+.0f} → "
-             f"{e.tau2_ms:+.0f} ms). Conversão pausada.")
+             f"⚠️ Possível versão/corte diferente — {e.summary}. "
+             f"Conversão pausada.")
 
 
 async def proceed(job_id: str, mode: str = "offset",

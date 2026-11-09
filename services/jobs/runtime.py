@@ -28,8 +28,8 @@ VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m2ts", ".mov", ".wmv", ".mpg", ".m
 MAX_SELECTABLE = 60  # candidatos guardados por papel para selecao manual/fallback
 
 # estados: searching -> (awaiting ->) downloading -> merging -> done | error | cancelled
-# merging pode voltar a awaiting: se a validação do offset em duas janelas
-# divergir (possível versão/corte diferente), o job para com `drift_confirm` e
+# merging pode voltar a awaiting: se a validação do offset ao longo do filme
+# achar degrau (possível versão/corte diferente), o job para com `drift_confirm` e
 # espera o usuário mandar Continuar (proceed) em vez de gastar o re-encode.
 # TERMINAL: já são só histórico (não precisam de acesso rápido). Ficam SÓ no
 # banco; não ocupam memória. ACTIVE: em andamento — precisam de polling de

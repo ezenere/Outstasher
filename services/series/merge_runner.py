@@ -1,7 +1,7 @@
 """Merge por episódio dos jobs de série (caminho rápido).
 
 Cada episódio baixado passa pelo MESMO fluxo dos filmes (services/merger:
-GCC-PHAT em duas janelas, stream copy quando o offset é constante, hardlink
+GCC-PHAT numa janela a cada ~20 min, stream copy quando o offset é constante, hardlink
 quando o melhor vídeo já tem o áudio alvo). As regras de série:
 
 - o lock global de conversão é adquirido/liberado POR EPISÓDIO — uma
@@ -72,8 +72,8 @@ async def merge_all(job: dict):
                 # não cai no `except Exception` irmão — sem o try próprio, uma
                 # falha do alinhador (ffmpeg, render...) derrubaria o job
                 # inteiro em vez de falhar só este episódio
-                why = (f"offsets divergentes ({e.tau1_ms:+.0f} → {e.tau2_ms:+.0f} ms)"
-                       if isinstance(e, merger.VersionMismatch) else str(e))
+                why = (e.summary if isinstance(e, merger.VersionMismatch)
+                       else str(e))
                 jobs._event(job, "merge",
                             f"{key}: {why} — rodando o alinhador por conteúdo...")
                 try:
@@ -301,7 +301,7 @@ async def _merge_episode(job: dict, key: str, ep: dict, convert_opts):
     """Um episódio: mesmo fluxo do merge de filmes, com o nome de série."""
     m = job["movie"]
     # arquivo FUNDIDO (razão de duração ~2): o offset escalar do caminho
-    # rápido não tem como estar certo — e a validação em duas janelas pode
+    # rápido não tem como estar certo — e a validação em janelas pode
     # até "concordar" por acaso e entregar lixo. Vai direto para o alinhador.
     from services.series.align import classify as _cls, engine as _eng
     d_a, d_b = await asyncio.gather(
@@ -310,10 +310,11 @@ async def _merge_episode(job: dict, key: str, ep: dict, convert_opts):
     if _cls.check_duration_ratio(d_a, d_b):
         raise NeedsContentAlign(
             f"durações {d_a:.0f}s vs {d_b:.0f}s — caminho rápido não se aplica")
-    # o merge de filmes valida o offset em DUAS janelas (0:30 e ~60%); em série
-    # isso deixa passar junções de intervalo comercial (2 frames = 68 ms) e
-    # cenas cortadas no meio — caso real de campo (S01E01). Aqui: uma janela a
-    # cada 5 min, tolerância de lip sync (50 ms); qualquer desvio -> alinhador
+    # o merge de filmes valida o offset numa janela a cada ~20 min com
+    # tolerância de 150 ms; em série isso deixa passar junções de intervalo
+    # comercial (2 frames = 68 ms) e cenas cortadas entre janelas — caso real
+    # de campo (S01E01; com duas janelas, na época). Aqui: uma janela a cada
+    # 5 min, tolerância de lip sync (50 ms); qualquer desvio -> alinhador
     # por conteúdo, que corta no silêncio certo em vez de aplicar um offset só
     from services.series.align import refine as _ref
     dub_a, orig_a = await asyncio.to_thread(
@@ -358,8 +359,8 @@ async def _merge_episode(job: dict, key: str, ep: dict, convert_opts):
         orig_fn = subs.shift_fn(0.0) if ref == 0 else None
         dub_fn = subs.shift_fn(0.0) if ref == 1 else None
     else:
-        orig_fn = subs.shift_fn(result.input_shifts[0])
-        dub_fn = subs.shift_fn(result.input_shifts[1])
+        orig_fn = subs.shift_fn(result.input_shifts[0], result.input_rates[0])
+        dub_fn = subs.shift_fn(result.input_shifts[1], result.input_rates[1])
     await _attach_subs(job, key, ep, result.output, orig_fn, dub_fn, log=log)
 
 

@@ -297,8 +297,10 @@ def remap(cues, fn) -> list[tuple[float, float, str]]:
     return out
 
 
-def shift_fn(delta: float):
-    return lambda t: t + delta
+def shift_fn(delta: float, rate: float = 1.0):
+    """tempo_saída = tempo_no_arquivo / rate + delta (merger.MergeResult:
+    input_shifts/input_rates — rate != 1 só no drift linear corrigido)."""
+    return lambda t: t / rate + delta
 
 
 def cuts_fn(cuts: list[tuple[float, float]], delta: float = 0.0):
