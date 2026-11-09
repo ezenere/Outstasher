@@ -19,6 +19,7 @@ from pydantic import BaseModel
 import config
 from services import advanced_merge, auth, catalog, jackett, jobs, store, tmdb, transcode
 from services import browse
+from services import stall_switch
 from services.series import activity as series_activity
 from services.series import manual as series_manual
 from services.series import pipeline as series_pipeline
@@ -554,6 +555,24 @@ class AdvancedMergeRequest(BaseModel):
 async def put_advanced_merge(req: AdvancedMergeRequest):
     try:
         return {"ok": True, "config": advanced_merge.set(req.config)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/stall-switch")
+async def get_stall_switch():
+    """Troca automática de torrent travado (global) + o padrão do .env."""
+    return {"config": stall_switch.get(), "defaults": stall_switch.defaults()}
+
+
+class StallSwitchRequest(BaseModel):
+    config: dict
+
+
+@app.put("/api/stall-switch")
+async def put_stall_switch(req: StallSwitchRequest):
+    try:
+        return {"ok": True, "config": stall_switch.set(req.config)}
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -1100,6 +1119,24 @@ async def switch_job(job_id: str, req: SwitchRequest):
     if not job:
         raise HTTPException(404, "Job não encontrado")
     return job
+
+
+class StallOverrideRequest(BaseModel):
+    mode: str | None = None     # None/"inherit" = herda a global; "on" | "off"
+    minutes: int | None = None  # próprios deste torrent (qualquer estado)
+    kind: str | None = None     # filme: video | audio
+    n: int | None = None        # série: torrent t<n> do plano
+
+
+@app.put("/api/jobs/{job_id}/stall-switch")
+async def put_job_stall_switch(job_id: str, req: StallOverrideRequest):
+    """Troca automática de torrent travado num torrent do job (vale no
+    próximo tick do watchdog)."""
+    try:
+        return jobs.set_stall_switch(job_id, req.mode, req.minutes,
+                                     kind=req.kind, n=req.n)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/jobs/{job_id}/cancel")

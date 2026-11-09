@@ -231,6 +231,9 @@ class QbitClient:
         r.raise_for_status()
 
     async def delete_by_tag(self, tag: str, delete_files: bool):
+        """Apaga TODO torrent com a tag, sem olhar as outras tags dele. Os
+        jobs não usam: torrent de job sai por jobs.downloads._release_tagged,
+        que poupa o que ainda serve a outro papel ou a outro job."""
         torrents = await self.info_by_tag(tag)
         if torrents:
             await self.delete("|".join(t["hash"] for t in torrents), delete_files)

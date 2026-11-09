@@ -12,6 +12,7 @@ import {
 } from '../api'
 import AlignmentReview from './AlignmentReview'
 import { useDialog } from './Dialog'
+import StallSwitchControl from './StallSwitch'
 import { CandidatesTable, Collapsible, ProgressBar } from './ui'
 
 /** Candidato de série na CandidatesTable: a coluna "Corte" (sem sentido em
@@ -209,7 +210,16 @@ export function SeriesTorrents({ job, onChanged }: { job: Job; onChanged: () => 
               {/* troca manual: como nos filmes, por torrent do plano */}
               {job.status === 'downloading' && t.state === 'downloading' && (
                 <div className="mt-1.5">
-                  <div className="flex flex-wrap items-center gap-2">
+                  <StallSwitchControl
+                    jobId={job.id}
+                    target={{ n: t.n }}
+                    mode={t.stall_mode}
+                    minutes={t.stall_minutes}
+                    clock={job.stall?.torrents[String(t.n)]}
+                    global={job.stall?.global}
+                    onChanged={onChanged}
+                  />
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
                     <button
                       onClick={() => trySwitch(t.n, null)}
                       disabled={switching}

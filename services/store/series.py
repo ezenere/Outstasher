@@ -106,10 +106,18 @@ def _create_series_tables():
             progress_size INTEGER,
             progress_downloaded INTEGER,
             extra TEXT,
+            stall_mode TEXT,
+            stall_minutes INTEGER,
             PRIMARY KEY (job_id, n),
             FOREIGN KEY (job_id, cid) REFERENCES search_candidates(job_id, cid)
                 DEFERRABLE INITIALLY DEFERRED
         )""")
+    # override da troca automática de torrent travado (services/stall_switch)
+    # veio depois: bancos antigos ganham as colunas aqui
+    tcols = {r[1] for r in store._conn.execute("PRAGMA table_info(job_torrents)")}
+    for col, decl in _TOR_STALL:
+        if col not in tcols:
+            store._conn.execute(f"ALTER TABLE job_torrents ADD COLUMN {col} {decl}")
     store._conn.execute("CREATE INDEX IF NOT EXISTS idx_job_torrents_cand "
                   "ON job_torrents(job_id, cid)")
     # pos NULL = o episódio saiu da cobertura (só está ali pela flag shrunk:
@@ -156,12 +164,16 @@ _TOR_DISPLAY = (("title", "title"), ("tracker", "tracker"),
                 ("infohash", "infohash"), ("files_count", "files"))
 _PROGRESS_KEYS = ("pct", "speed", "eta", "state", "seeds", "name", "size",
                   "downloaded")
+# troca automática de torrent travado, override deste torrent (chave = coluna;
+# ausente no dict = herda a global, coluna NULL)
+_TOR_STALL = (("stall_mode", "TEXT"), ("stall_minutes", "INTEGER"))
 _TOR_KNOWN = ({"n", "role", "tag", "coverage", "coverage_shrunk", "state",
                "hash", "progress", "selected_files", "content_path"}
-              | {k for k, _ in _TOR_DISPLAY})
+              | {k for k, _ in _TOR_DISPLAY} | {k for k, _ in _TOR_STALL})
 _TOR_COLS = ("role", "tag", "cid", *(k for k, _ in _TOR_DISPLAY), "state",
              "hash", "content_path", "files_selected",
-             *(f"progress_{k}" for k in _PROGRESS_KEYS), "extra")
+             *(f"progress_{k}" for k in _PROGRESS_KEYS), "extra",
+             *(k for k, _ in _TOR_STALL))
 
 
 def _episode_row(pos: int, ep: dict, alt) -> tuple[tuple, tuple]:
@@ -248,7 +260,7 @@ def _torrent_row(t: dict, cand_idx: dict | None) -> tuple[tuple, tuple]:
     extra = {k: v for k, v in t.items() if k not in _TOR_KNOWN}
     row = (t.get("role"), t.get("tag"), cid, *display, t.get("state"),
            t.get("hash"), t.get("content_path"), 0 if sel is None else 1,
-           *pvals, _json(extra or None))
+           *pvals, _json(extra or None), *(t.get(k) for k, _ in _TOR_STALL))
     shrunk = set(t.get("coverage_shrunk") or [])
     cov, seen = [], set()
     for i, k in enumerate(t.get("coverage") or []):
@@ -280,6 +292,9 @@ def _torrent_from_row(n: int, row: tuple, kids: tuple,
                      else dict(zip(_PROGRESS_KEYS, pvals)))
     t["selected_files"] = [p for _, p in files] if v["files_selected"] else None
     t["content_path"] = v["content_path"]
+    for k, _ in _TOR_STALL:
+        if v[k] is not None:
+            t[k] = v[k]
     if v["extra"]:
         t.update(json.loads(v["extra"]))
     return t

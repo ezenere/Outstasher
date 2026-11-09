@@ -10,35 +10,86 @@ import time
 from pathlib import Path
 
 import config
-from services import candidates
+from services import candidates, stall_switch
 from services.jobs import runtime
 from services.jobs.runtime import (
     VIDEO_EXTENSIONS, _CONN_ERRORS, _event, _map_qbit_path, _needed_torrents,
     _set, _tag, poll_interval)
 
 
-async def _drop_tagged(job: dict, kind: str):
-    """Tira a tag deste papel de todo torrent que ainda a carrega e apaga os
-    que não servem a OUTRO papel (release dual áudio serve aos dois: perde só
-    a tag). Usado quando o torrent do papel é substituído — pela troca durante
-    o download ou por uma nova escolha depois da pausa."""
-    tag = _tag(job, kind)
-    torrents = await runtime._qbit.info_by_tag(tag)
-    if not torrents:
-        return
-    shared: set[str] = set()
-    for other in _needed_torrents(job):
-        if other != kind:
-            shared |= {t.get("hash") for t in
-                       await runtime._qbit.info_by_tag(_tag(job, other))}
-    for t in torrents:
-        h = t.get("hash")
+def _split_tags(tags: str | None) -> set[str]:
+    """Campo `tags` do qBittorrent ("a, b") como conjunto."""
+    return {x.strip() for x in (tags or "").split(",") if x.strip()}
+
+
+async def _release_tagged(qbit, job: dict, tag: str, live=(),
+                          delete_files: bool = True) -> list[dict]:
+    """Solta deste job cada torrent do qBittorrent que carrega `tag` — a regra
+    ÚNICA de remoção, de filme e de série: troca de torrent (manual ou do
+    watchdog), edição da seleção, limpeza do fim do job e do cancel.
+
+    O torrent só sai do qBittorrent (com os dados, se delete_files) quando não
+    serve a mais ninguém. Serve ainda a ESTE job se carrega uma tag de `live`:
+    o release DUAL escolhido para os dois papéis é UM torrent com as duas
+    tags. Serve a OUTRO job se carrega qualquer tag que não é deste: dois jobs
+    pedindo o mesmo release dividem o torrent (409 no add = a tag do outro no
+    mesmo hash) — e tag posta à mão no qBittorrent também segura, na dúvida
+    não se apaga dado de ninguém. Nesses casos saem só as tags deste job que
+    não valem mais; a compartilhada dl-<job> fica enquanto um torrent vivo do
+    job a usa (é por ela que o watchdog de série consulta). Caso real: trocar
+    o pack dublado apagava do disco o pack DUAL que o original usava.
+
+    `qbit` vem de quem chama: séries usam a referência da fachada
+    (jobs._qbit), filmes a do runtime — cada lado é trocado assim nos testes.
+
+    Devolve um resumo por torrent: {hash, name, deleted, serves, foreign} —
+    serves é None quando apagado, "job" (outro papel/torrent deste job) ou
+    "other" (tag de fora: foreign)."""
+    base = f"dl-{job['id']}"
+    live = set(live)
+    out: list[dict] = []
+    for info in await qbit.info_by_tag(tag):
+        h = info.get("hash")
         if not h:
             continue
-        await runtime._qbit.remove_tag(h, tag)
-        if h not in shared:
-            await runtime._qbit.delete(h, delete_files=True)
-            _event(job, "qbit", f"Torrent anterior de {kind} descartado: {t.get('name')}")
+        tags = _split_tags(info.get("tags")) | {tag}
+        ours = {x for x in tags if x == base or x.startswith(base + "-")}
+        vivos = ours & live
+        foreign = tags - ours
+        r = {"hash": h, "name": info.get("name"), "deleted": False,
+             "serves": "job" if vivos else ("other" if foreign else None),
+             "foreign": sorted(foreign)}
+        if r["serves"]:
+            drop = ours - vivos - ({base} if vivos else set())
+            if drop:
+                await qbit.remove_tag(h, ",".join(sorted(drop)))
+        else:
+            await qbit.delete(h, delete_files=delete_files)
+            r["deleted"] = True
+        out.append(r)
+    return out
+
+
+def _why_kept(r: dict, same_job: str) -> str:
+    """Por que _release_tagged deixou o torrent no qBittorrent (para o log)."""
+    if r["serves"] == "job":
+        return same_job
+    return f"outro job ({', '.join(r['foreign'])})"
+
+
+async def _drop_tagged(job: dict, kind: str):
+    """Solta deste papel todo torrent que ainda carrega a tag dele — apaga o
+    que não serve a OUTRO papel nem a outro job (_release_tagged). Usado
+    quando o torrent do papel é substituído — pela troca durante o download
+    ou por uma nova escolha depois da pausa."""
+    live = {_tag(job, o) for o in _needed_torrents(job) if o != kind}
+    for r in await _release_tagged(runtime._qbit, job, _tag(job, kind), live):
+        if r["deleted"]:
+            _event(job, "qbit", f"Torrent anterior de {kind} descartado: {r['name']}")
+        else:
+            _event(job, "qbit",
+                   f"Torrent anterior de {kind} fica no qBittorrent — também "
+                   f"serve a {_why_kept(r, 'o outro papel deste job')}: {r['name']}")
 
 
 async def _start_download(job: dict, a: dict | None, v: dict | None):
@@ -113,21 +164,6 @@ async def _resolve_video_file(job: dict, content_path: str, kind: str) -> Path:
     return await asyncio.to_thread(_find_video_file, job, content_path)
 
 
-def _stall_limit_minutes(state: str) -> int:
-    """Timeout de stall conforme o estado do torrent.
-
-    metaDL (ainda buscando metadados do magnet) merece mais paciência: 30 min.
-    stalledDL (sem seed disponível AGORA) pode voltar sozinho: 2 h.
-    Os valores nunca ficam abaixo do STALL_TIMEOUT_MINUTES configurado.
-    """
-    s = state.lower()
-    if "metadl" in s:       # metaDL / forcedMetaDL
-        return max(config.STALL_TIMEOUT_MINUTES, 30)
-    if "stalleddl" in s:    # stalledDL
-        return max(config.STALL_TIMEOUT_MINUTES, 120)
-    return config.STALL_TIMEOUT_MINUTES
-
-
 async def _wait_downloads(job: dict) -> dict:
     """Espera os torrents necessários terminarem; watchdog troca torrent travado.
 
@@ -135,7 +171,18 @@ async def _wait_downloads(job: dict) -> dict:
     mantém o estado "baixando" e fica tentando reconectar. Torrent que sumiu
     do qBittorrent é reinserido automaticamente — só para de reinserir se o
     job for cancelado/excluído.
-    """
+
+    A troca automática segue a política global com o override de cada papel
+    (services/stall_switch), relidos a cada tick: ligar/desligar na tela vale
+    no próximo. O relógio de cada papel vai para a tela do job
+    (runtime.stall_publish)."""
+    try:
+        return await _watch_downloads(job)
+    finally:
+        runtime.stall_forget(job)
+
+
+async def _watch_downloads(job: dict) -> dict:
     needed = _needed_torrents(job)
     paths = {}
     stall = {k: {"pct": -1.0, "since": time.monotonic(), "warned": False, "hash": None}
@@ -152,6 +199,7 @@ async def _wait_downloads(job: dict) -> dict:
     # via _event, então nunca dependem deste relógio.
     last_persist = 0.0
     while len(paths) < len(needed):
+        policy = stall_switch.get()
         try:
             for kind in needed:
                 if kind in paths:
@@ -169,6 +217,7 @@ async def _wait_downloads(job: dict) -> dict:
                     for m_ in missing.values():
                         m_["since"] = None
                 if not torrents:
+                    runtime.stall_forget(job, kind)
                     miss = missing[kind]
                     if miss["since"] is None:
                         miss["since"] = time.monotonic()
@@ -201,6 +250,7 @@ async def _wait_downloads(job: dict) -> dict:
                     "downloaded": t.get("completed", 0),
                 }
                 if pct >= 1:
+                    runtime.stall_forget(job, kind)
                     paths[kind] = t["content_path"]
                     _event(job, "qbit", f"Download de {kind} concluído: {t['content_path']}")
                     continue
@@ -211,14 +261,16 @@ async def _wait_downloads(job: dict) -> dict:
                     # torrent trocado (watchdog ou troca manual): zera o relógio
                     st.update(hash=t.get("hash"), pct=-1.0,
                               since=time.monotonic(), warned=False)
-                limit_min = _stall_limit_minutes(state)
+                limit_min = stall_switch.limit_minutes(
+                    policy, state, job.get(f"stall_mode_{kind}"),
+                    job.get(f"stall_minutes_{kind}"))
                 if state in ("stoppedDL", "pausedDL"):
                     # usuário parou o torrent manualmente: não conta o tempo de
                     # stall (o relógio recomeça do zero quando ele retomar)
                     st.update(since=time.monotonic(), warned=False)
                 elif pct > st["pct"] + 1e-4:
                     st.update(pct=pct, since=time.monotonic(), warned=False)
-                elif (config.STALL_TIMEOUT_MINUTES > 0
+                elif (limit_min is not None
                       and time.monotonic() - st["since"] > limit_min * 60):
                     if await _switch_torrent(job, kind, t, limit_min):
                         st.update(pct=-1.0, since=time.monotonic(), warned=False)
@@ -228,6 +280,9 @@ async def _wait_downloads(job: dict) -> dict:
                                f"{limit_min} min e sem candidato reserva — "
                                f"continuando a esperar (cancele o job se quiser desistir)")
                         st["warned"] = True
+                runtime.stall_publish(job, kind, st["since"], limit_min,
+                                      paused=state in ("stoppedDL", "pausedDL"),
+                                      no_backup=st["warned"])
             # persiste o progresso no banco só de tempos em tempos (eventos
             # reais persistem via _event, com a janela de EVENT_PERSIST_SECONDS)
             if time.monotonic() - last_persist >= config.PROGRESS_PERSIST_SECONDS:
@@ -288,8 +343,9 @@ async def _replace_torrent(job: dict, kind: str, current: dict | None, nxt: dict
     tag = _tag(job, kind)
     # limpa a tag inteira (não só o `current` que o chamador viu): torrent
     # antigo que sobra com a tag mantém a UI presa no download velho. Só o que
-    # CARREGA a tag é apagado — um torrent que já a perdeu não é mais deste
-    # papel, e apagá-lo poderia derrubar o download do outro
+    # CARREGA a tag sai — um torrent que já a perdeu não é mais deste papel —
+    # e, dos que a carregam, o que serve ao outro papel ou a outro job perde
+    # só a tag
     await _drop_tagged(job, kind)
     save_path = job.get("torrent_save_path") or config.QBIT_SAVE_PATH or None
     await runtime._qbit.add(nxt.get("magnet") or nxt["link"], tag, save_path)

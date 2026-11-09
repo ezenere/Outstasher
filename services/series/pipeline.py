@@ -24,7 +24,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 import config
-from services import candidates, jackett, jobs, store, tmdb, transcode
+from services import candidates, jackett, jobs, stall_switch, store, tmdb, transcode
 from services import selector
 from services.series import parse, selector_tv, subs
 
@@ -1392,47 +1392,37 @@ async def _drop_sent(job: dict, removed: list[dict], plan: list[dict]):
     confirma antes, avisando que os arquivos vão junto. O mesmo torrent
     servindo a OUTRO torrent do plano (pack DUAL nos dois papéis) ou a outro
     job (409 no add = tag do outro no mesmo torrent) perde só as tags que
-    não valem mais."""
+    não valem mais (jobs.downloads._release_tagged)."""
     if not removed:
         return
-    shared = shared_tag(job)
     live = {t["tag"] for t in plan}
     for t in removed:
         try:
-            infos = await asyncio.wait_for(
-                jobs._qbit.info_by_tag(t["tag"]), timeout=15)
-            for info in infos:
-                h = info.get("hash")
-                if not h:
-                    continue
-                tags = {x.strip() for x in (info.get("tags") or "").split(",")
-                        if x.strip()}
-                ours = {x for x in tags
-                        if x == shared or x.startswith(shared + "-t")}
-                vivos = ours & live
-                if vivos or tags - ours:
-                    drop = ours - vivos - ({shared} if vivos else set())
-                    if drop:
-                        await asyncio.wait_for(jobs._qbit.remove_tag(
-                            h, ",".join(sorted(drop))), timeout=15)
-                    quem = "outro torrent deste job" if vivos else "outro job"
-                    jobs._event(job, "qbit",
-                                f"t{t['n']} saiu do plano — o torrent fica no "
-                                f"qBittorrent porque também serve a {quem}: "
-                                f"{t['title']}")
-                else:
-                    await asyncio.wait_for(
-                        jobs._qbit.delete(h, delete_files=True), timeout=15)
-                    jobs._event(job, "qbit",
-                                f"🗑️ t{t['n']} saiu do plano — removido do "
-                                f"qBittorrent com os dados baixados: "
-                                f"{t['title']}")
+            await asyncio.wait_for(
+                _release_entry(job, t, live, "saiu do plano"), timeout=30)
         except (asyncio.TimeoutError, *jobs._CONN_ERRORS) as e:
             reason = (f"{type(e).__name__}: {e}" if str(e)
                       else type(e).__name__)
             raise ValueError(
                 f"O qBittorrent não respondeu ao remover t{t['n']} "
                 f"({reason}) — a seleção não foi aplicada; tente de novo") from e
+
+
+async def _release_entry(job: dict, t: dict, live: set[str], why: str):
+    """Solta do qBittorrent o torrent da entrada `t` (achado pela tag dela),
+    pela regra única de remoção: apagado com os dados só se nenhuma tag de
+    `live` (outro torrent do plano) nem de outro job o usa. Erro de conexão
+    sobe para quem chama."""
+    for r in await jobs.downloads._release_tagged(jobs._qbit, job, t["tag"], live):
+        if r["deleted"]:
+            jobs._event(job, "qbit",
+                        f"🗑️ t{t['n']} {why} — removido do qBittorrent com os "
+                        f"dados baixados: {t['title']}")
+        else:
+            quem = jobs.downloads._why_kept(r, "outro torrent deste job")
+            jobs._event(job, "qbit",
+                        f"t{t['n']} {why} — o torrent fica no qBittorrent "
+                        f"porque também serve a {quem}: {t['title']}")
 
 
 # -------------------- download --------------------
@@ -1480,8 +1470,13 @@ async def _wait_downloads(job: dict):
     """Watchdog: UMA consulta por tick (tag compartilhada), demultiplexada por
     torrent. Mesmas regras do pipeline de filmes: conexão perdida nunca falha o
     job, stall estado-dependente, torrent sumido é reinserido; e as novidades
-    de série: seleção de arquivos em packs e force_continue."""
+    de série: seleção de arquivos em packs e force_continue.
+
+    A troca automática segue a política global com o override de cada
+    torrent (services/stall_switch), relidos a cada tick; o relógio de cada
+    um vai para a tela do job (runtime.stall_publish)."""
     pending = lambda: [t for t in job["torrents"] if t["state"] == "downloading"]  # noqa: E731
+    jobs.runtime.stall_forget(job)   # de um watchdog anterior (gate, restart)
     stall = {t["n"]: {"pct": -1.0, "since": time.monotonic(), "warned": False,
                       "hash": None} for t in job["torrents"]}
     missing = {t["n"]: None for t in job["torrents"]}
@@ -1493,6 +1488,7 @@ async def _wait_downloads(job: dict):
         if job.get("force_continue"):
             _apply_force_continue(job)
             break
+        policy = stall_switch.get()
         try:
             infos = await jobs._qbit.info_by_tag(shared_tag(job))
             if conn_lost:
@@ -1510,6 +1506,7 @@ async def _wait_downloads(job: dict):
             for t in pending():
                 info = by_tag.get(t["tag"])
                 if info is None:
+                    jobs.runtime.stall_forget(job, t["n"])
                     if missing[t["n"]] is None:
                         missing[t["n"]] = time.monotonic()
                         jobs._event(job, "qbit",
@@ -1532,6 +1529,7 @@ async def _wait_downloads(job: dict):
                     "downloaded": info.get("completed", 0),
                 }
                 if pct >= 1:
+                    jobs.runtime.stall_forget(job, t["n"])
                     t["state"] = "done"
                     t["content_path"] = info.get("content_path")
                     jobs._event(job, "qbit",
@@ -1542,12 +1540,13 @@ async def _wait_downloads(job: dict):
                 if info.get("hash") != st["hash"]:
                     st.update(hash=info.get("hash"), pct=-1.0,
                               since=time.monotonic(), warned=False)
-                limit_min = jobs._stall_limit_minutes(state)
+                limit_min = stall_switch.limit_minutes(
+                    policy, state, t.get("stall_mode"), t.get("stall_minutes"))
                 if state in ("stoppedDL", "pausedDL"):
                     st.update(since=time.monotonic(), warned=False)
                 elif pct > st["pct"] + 1e-4:
                     st.update(pct=pct, since=time.monotonic(), warned=False)
-                elif (config.STALL_TIMEOUT_MINUTES > 0
+                elif (limit_min is not None
                       and time.monotonic() - st["since"] > limit_min * 60):
                     if await _switch_stalled(job, t, limit_min):
                         st.update(pct=-1.0, since=time.monotonic(), warned=False)
@@ -1556,12 +1555,17 @@ async def _wait_downloads(job: dict):
                                     f"⚠️ t{t['n']} sem progresso há {limit_min} "
                                     f"min e sem reserva — seguindo esperando")
                         st["warned"] = True
+                jobs.runtime.stall_publish(
+                    job, t["n"], st["since"], limit_min,
+                    paused=state in ("stoppedDL", "pausedDL"),
+                    no_backup=st["warned"])
             job["detail"] = _download_detail(job)
             # cobertura encolheu pelos arquivos reais e sobrou episódio sem
             # ninguém? pausa no gate de lacunas (os torrents seguem baixando
             # no qBittorrent — só o watchdog para até a decisão)
             if not job.get("_gaps_accepted") and _collect_gaps(job):
                 gaps = _collect_gaps(job)
+                jobs.runtime.stall_forget(job)
                 _gate(job, "gaps_confirm", None,
                       f"⚠️ {len(gaps)} episódio(s) ficaram sem torrent (o pack "
                       f"não os contém) — decidir antes de continuar")
@@ -1579,6 +1583,7 @@ async def _wait_downloads(job: dict):
         if pending():
             await asyncio.sleep(jobs.poll_interval())
 
+    jobs.runtime.stall_forget(job)
     await _resolve_episode_files(job)
     await _after_download(job)
 
@@ -1713,24 +1718,39 @@ def _find_replacement(job: dict, t: dict) -> dict | None:
 
 
 async def _replace_entry(job: dict, t: dict, nxt: dict, reason: str):
-    """Substitui o torrent do plano por `nxt`: remove o antigo do qBittorrent
-    (com os dados), atualiza a entrada in place (mesma tag — o watchdog zera o
-    relógio quando o hash muda) e adiciona o novo."""
-    if t.get("hash"):
-        try:
-            await jobs._qbit.delete(t["hash"], delete_files=True)
-        except jobs._CONN_ERRORS:
-            pass
+    """Substitui o torrent do plano por `nxt`: solta o antigo do qBittorrent,
+    atualiza a entrada in place (mesma tag — o watchdog zera o relógio quando
+    o hash muda) e adiciona o novo.
+
+    O antigo sai pela regra única de remoção (_release_entry), não por hash:
+    apagado com os dados só se não serve a mais ninguém. Pack DUAL escolhido
+    para original e dublado é UM torrent com as tags dos dois — trocar o
+    dublado apagava do disco o pack que o original usava; agora ele perde só
+    a tag do dublado (idem torrent que outro job também usa). Sai ANTES do
+    novo entrar — com a mesma tag, o novo seria achado junto. Sem resposta do
+    qBittorrent ao soltar o antigo, o erro sobe antes de a entrada mudar: o
+    watchdog tenta de novo no próximo tick, a troca manual avisa que não
+    aplicou."""
+    live = {x["tag"] for x in job["torrents"] if x is not t}
+    await _release_entry(job, t, live, "trocado")
     t.update(title=nxt["title"], tracker=nxt.get("tracker"),
              seeders=nxt.get("seeders"), size=nxt.get("size"),
              quality=nxt.get("quality"), magnet=nxt.get("magnet"),
              link=nxt.get("link"), infohash=nxt.get("infohash"),
              coverage_label=nxt.get("coverage"),
              hash=None, selected_files=None, progress=None)
-    save_path = job.get("torrent_save_path") or config.QBIT_SAVE_PATH or None
-    await jobs._qbit.add(nxt.get("magnet") or nxt["link"],
-                         f"{shared_tag(job)},{t['tag']}", save_path)
     jobs._event(job, "qbit", f"{reason}: {nxt['title']}")
+    save_path = job.get("torrent_save_path") or config.QBIT_SAVE_PATH or None
+    try:
+        await jobs._qbit.add(nxt.get("magnet") or nxt["link"],
+                             f"{shared_tag(job)},{t['tag']}", save_path)
+    except jobs._CONN_ERRORS as e:
+        # o antigo já saiu: a troca vale. O watchdog não acha a tag e
+        # reinsere o novo depois da janela de metadados (_readd)
+        jobs._event(job, "qbit",
+                    f"⚠️ t{t['n']}: o qBittorrent não aceitou o novo agora "
+                    f"({type(e).__name__}) — o watchdog o reinsere se não "
+                    f"aparecer")
     jobs._persist(job)
 
 
@@ -1784,7 +1804,12 @@ async def switch_torrent(job_id: str, torrent_n: int,
             raise ValueError(
                 "O título do candidato não cobre: " + ", ".join(missing)
                 + " — use a edição manual para atribuir episódios diferentes")
-    await _replace_entry(job, t, nxt, f"🔁 Troca manual em t{t['n']}")
+    try:
+        await _replace_entry(job, t, nxt, f"🔁 Troca manual em t{t['n']}")
+    except jobs._CONN_ERRORS as e:
+        reason = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+        raise ValueError(f"O qBittorrent não respondeu ({reason}) — a troca "
+                         f"de t{t['n']} não foi aplicada; tente de novo") from e
     return jobs._public(job)
 
 

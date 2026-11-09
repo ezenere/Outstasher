@@ -497,14 +497,25 @@ def _finish(job: dict):
 
 async def _cleanup_torrents(job: dict):
     """Limpeza pós-merge conforme QBIT_CLEANUP (keep/remove/remove_data) —
-    mesma política dos filmes, pela tag compartilhada do job."""
+    mesma política dos filmes, pela tag compartilhada do job. Pack que outro
+    job também usa (duas temporadas/jobs da mesma série no mesmo pack) perde
+    só as tags deste: apagá-lo derrubaria o download do outro."""
     if config.QBIT_CLEANUP == "keep":
         return
     delete_files = config.QBIT_CLEANUP == "remove_data"
     from services.series.pipeline import shared_tag
     try:
-        await jobs._qbit.delete_by_tag(shared_tag(job), delete_files)
-        jobs._event(job, "qbit", "Torrents do job removidos do qBittorrent"
-                    + (" (com os dados)" if delete_files else ""))
+        res = await jobs.downloads._release_tagged(
+            jobs._qbit, job, shared_tag(job), (), delete_files)
+        gone = sum(1 for r in res if r["deleted"])
+        if gone:
+            jobs._event(job, "qbit", f"{gone} torrent(s) do job removido(s) do "
+                        f"qBittorrent" + (" (com os dados)" if delete_files else ""))
+        for r in res:
+            if not r["deleted"]:
+                jobs._event(job, "qbit",
+                            f"Torrent fica no qBittorrent — também serve a "
+                            f"{jobs.downloads._why_kept(r, 'este job')}: "
+                            f"{r['name']}")
     except Exception as e:  # noqa: BLE001
         jobs._event(job, "qbit", f"Falha ao remover torrents: {e}")

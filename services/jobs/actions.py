@@ -7,7 +7,7 @@ locais, recompressão) e por mídia (filme x série).
 import asyncio
 from pathlib import Path
 
-from services import candidates, catalog
+from services import candidates, catalog, stall_switch
 from services.jobs import downloads, movies, recompress, runtime, search
 from services.jobs.runtime import (
     _TERMINAL_STATUSES, _cancelling, _delete_output, _event, _has_torrents,
@@ -177,6 +177,40 @@ async def switch(job_id: str, kind: str, candidate_id: str | None = None,
     return _public(job)
 
 
+def set_stall_switch(job_id: str, mode: str | None, minutes: int | None = None,
+                     kind: str | None = None, n: int | None = None) -> dict:
+    """Override da troca automática de torrent travado num torrent do job:
+    filme por papel (`kind`), série por torrent do plano (`n`). mode None/
+    "inherit" herda a global; "on"/"off" vence ela; `minutes` próprio vale
+    para qualquer estado do torrent. O watchdog relê a cada tick — vale no
+    próximo, sem reiniciar nada. Herdar TIRA as chaves (ausente = herda: o
+    torrent/job volta a ser o que era antes de qualquer override)."""
+    job = _jobs.get(job_id)
+    if not job:
+        raise ValueError("Job não encontrado entre os ativos")
+    mode, minutes = stall_switch.validate_override(mode, minutes)
+    if job.get("media_type") == "tv":
+        target = next((t for t in job.get("torrents") or [] if t["n"] == n), None)
+        if target is None:
+            raise ValueError(f"Torrent t{n} não existe neste job")
+        keys, label = ("stall_mode", "stall_minutes"), f"t{n}"
+    else:
+        if kind not in _needed_torrents(job):
+            raise ValueError(f"Este job não baixa {kind}")
+        target = job
+        keys = (f"stall_mode_{kind}", f"stall_minutes_{kind}")
+        label = "vídeo" if kind == "video" else "áudio"
+    for k, v in zip(keys, (mode, minutes)):
+        if v is None:
+            target.pop(k, None)
+        else:
+            target[k] = v
+    how = {None: "herda a global", "on": "ligada", "off": "desligada"}[mode]
+    _event(job, "chosen", f"Troca automática de torrent travado em {label}: {how}"
+           + (f", {minutes} min sem progresso" if minutes and mode != "off" else ""))
+    return _public(job)
+
+
 async def cancel(job_id: str, delete_torrents: bool = False) -> dict | None:
     # ativo: memória; terminal (histórico): banco. Cancelar/limpar só faz sentido
     # no ativo — no terminal só devolvemos o job (para o remove seguir).
@@ -208,13 +242,19 @@ async def cancel(job_id: str, delete_torrents: bool = False) -> dict | None:
         # limpeza no qBittorrent com teto de tempo: se ele estiver fora do ar,
         # a remoção do job NÃO pode ficar travada esperando o timeout de rede.
         # Série: todos os torrents do job carregam a tag compartilhada dl-{id};
-        # filme: uma tag por papel (video/audio).
+        # filme: uma tag por papel (video/audio). Torrent que outro job também
+        # usa perde só as tags deste (downloads._release_tagged).
         tags = ([f"dl-{job['id']}"] if job.get("media_type") == "tv"
                 else [_tag(job, k) for k in ("video", "audio")])
         for tag in tags:
             try:
-                await asyncio.wait_for(
-                    runtime._qbit.delete_by_tag(tag, delete_files=True), timeout=10)
+                for r in await asyncio.wait_for(
+                        downloads._release_tagged(runtime._qbit, job, tag),
+                        timeout=10):
+                    if not r["deleted"]:
+                        _event(job, "qbit",
+                               f"Torrent fica no qBittorrent — também serve a "
+                               f"{downloads._why_kept(r, 'este job')}: {r['name']}")
             except (Exception, asyncio.TimeoutError) as e:  # noqa: BLE001
                 reason = "sem resposta (qBittorrent fora do ar?)" if isinstance(
                     e, asyncio.TimeoutError) else str(e)
@@ -224,6 +264,7 @@ async def cancel(job_id: str, delete_torrents: bool = False) -> dict | None:
     if job.get("media_type") == "tv":
         from services.series import pipeline as series_pipeline
         series_pipeline.forget(job_id)
+    runtime.stall_forget(job)
     if job["status"] not in _TERMINAL_STATUSES:
         _set(job, "cancelled",
              "Cancelado pelo usuário" + (" (torrents removidos)" if delete_torrents else ""))

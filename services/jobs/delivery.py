@@ -11,7 +11,7 @@ from pathlib import Path
 import config
 from services import catalog, merger, transcode
 from services.series import subs as ext_subs
-from services.jobs import runtime
+from services.jobs import downloads, runtime
 from services.jobs.runtime import (
     _event, _ffmpeg_hooks, _ffmpeg_procs, _has_torrents, _map_qbit_path,
     _register_proc, _set, _tag)
@@ -211,9 +211,18 @@ async def _cleanup_torrents(job: dict):
     # então remove_data pode apagar os dados com segurança mesmo quando só linkou.
     delete_files = config.QBIT_CLEANUP == "remove_data"
     for kind in ("video", "audio"):
+        # torrent que outro job também usa (mesmo release pedido duas vezes)
+        # perde só as tags deste: apagá-lo derrubaria o download do outro.
+        # O DUAL dos dois papéis sai inteiro já na volta do vídeo
         try:
-            await runtime._qbit.delete_by_tag(_tag(job, kind), delete_files)
-            _event(job, "qbit", f"Torrent de {kind} removido do qBittorrent"
-                                + (" (com os dados)" if delete_files else ""))
+            for r in await downloads._release_tagged(
+                    runtime._qbit, job, _tag(job, kind), (), delete_files):
+                if r["deleted"]:
+                    _event(job, "qbit", f"Torrent de {kind} removido do qBittorrent"
+                                        + (" (com os dados)" if delete_files else ""))
+                else:
+                    _event(job, "qbit",
+                           f"Torrent de {kind} fica no qBittorrent — também serve "
+                           f"a {downloads._why_kept(r, 'este job')}: {r['name']}")
         except Exception as e:  # noqa: BLE001
             _event(job, "qbit", f"Falha ao remover torrent de {kind}: {e}")

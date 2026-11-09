@@ -45,7 +45,6 @@ from services.jobs.views import (
 )
 # ---- pipeline e ações ----
 from services.jobs.search import _dedup_results, _search
-from services.jobs.downloads import _stall_limit_minutes
 from services.jobs.delivery import _deliver_single, _merge
 from services.jobs.advanced import _shape_verdict, proceed, resolve_review
 from services.jobs.recompress import create_recompress
@@ -53,7 +52,8 @@ from services.jobs.movies import (
     _probe_manual_file, _run_from_download, create, create_manual,
 )
 from services.jobs.actions import (
-    cancel, remove, research, resume_pending, retry, select, switch,
+    cancel, remove, research, resume_pending, retry, select, set_stall_switch,
+    switch,
 )
 
 __all__ = [
@@ -65,7 +65,7 @@ __all__ = [
     "create_recompress", "flush_dirty", "get_job", "list_group", "list_jobs",
     "load", "persist_loop", "poll_interval", "proceed", "progress", "remove", "research",
     "resolve_review",
-    "resume_pending", "retry", "select", "summary", "switch",
+    "resume_pending", "retry", "select", "set_stall_switch", "summary", "switch",
     "touch_progress_demand",
     # infraestrutura compartilhada com services/series/*
     "MAX_SELECTABLE", "_CONN_ERRORS", "_cancelling", "_dedup_results",
@@ -73,6 +73,6 @@ __all__ = [
     "_ffmpeg_hooks", "_ffmpeg_procs", "_get_merge_lock", "_jobs", "_lookup",
     "_map_qbit_path", "_merge", "_needed_torrents", "_persist",
     "_probe_manual_file", "_public", "_qbit", "_register_proc", "_run_from_download", "_search",
-    "_set", "_shape_verdict", "_slim_job", "_spawn", "_stall_limit_minutes",
+    "_set", "_shape_verdict", "_slim_job", "_spawn",
     "_tasks", "progress_demanded",
 ]

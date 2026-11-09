@@ -11,6 +11,7 @@ import { useDialog } from '../components/Dialog'
 import AdvancedMergePolicy from '../components/AdvancedMergePolicy'
 import { SeriesEpisodes, SeriesGate, SeriesReport, SeriesTorrents } from '../components/SeriesJobSections'
 import AlignmentReview from '../components/AlignmentReview'
+import StallSwitchControl from '../components/StallSwitch'
 import { jobTitle, removeJob } from './Jobs'
 
 export default function JobDetail() {
@@ -67,7 +68,8 @@ export default function JobDetail() {
         if (stop) return
         setJob((cur) =>
           cur ? { ...cur, status: p.status, detail: p.detail, progress: p.progress,
-                  output: p.output, merge_started_at: p.merge_started_at } : cur,
+                  output: p.output, merge_started_at: p.merge_started_at,
+                  stall: p.stall } : cur,
         )
       } catch {
         /* 404 quando o job some / servidor reiniciando: o reload de 5s trata */
@@ -271,7 +273,16 @@ export default function JobDetail() {
     const current = kind === 'video' ? job.video_torrent : job.audio_torrent
     return (
       <div className="mt-1.5">
-        <div className="flex flex-wrap items-center gap-2">
+        <StallSwitchControl
+          jobId={job.id}
+          target={{ kind }}
+          mode={kind === 'video' ? job.stall_mode_video : job.stall_mode_audio}
+          minutes={kind === 'video' ? job.stall_minutes_video : job.stall_minutes_audio}
+          clock={job.stall?.torrents[kind]}
+          global={job.stall?.global}
+          onChanged={reload}
+        />
+        <div className="mt-1.5 flex flex-wrap items-center gap-2">
           <button
             onClick={() => trySwitch(kind)}
             disabled={switching}

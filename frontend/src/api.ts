@@ -143,6 +143,10 @@ export interface SeriesTorrent {
   progress: Progress | null
   selected_files: string[] | null
   content_path: string | null
+  /** troca automática de torrent travado neste torrent; ausente = herda a global */
+  stall_mode?: StallMode
+  /** minutos sem progresso próprios deste torrent (qualquer estado) */
+  stall_minutes?: number
 }
 
 /** Candidato de série (mesmo shape do Candidate + cobertura). */
@@ -217,6 +221,49 @@ export function switchSeriesTorrent(jobId: string, torrentN: number,
                                     candidateId: string | null = null) {
   return post<Job>(`/api/jobs/${jobId}/switch-torrent`,
     { torrent_n: torrentN, candidate_id: candidateId })
+}
+
+// ---------- troca automática de torrent travado ----------
+
+/** Política global (Configurações → Torrents). Sem nada salvo, vale o .env. */
+export interface StallSwitchConfig {
+  enabled: boolean
+  /** sem progresso baixando */
+  minutes: number
+  /** magnet ainda buscando metadados (metaDL) — nunca menos que `minutes` */
+  metadata_minutes: number
+  /** sem fonte agora (stalledDL) — nunca menos que `minutes` */
+  stalled_minutes: number
+}
+
+/** Override de um torrent: 'on'/'off' vence a global; ausente = herda. */
+export type StallMode = 'on' | 'off'
+
+/** Relógio do watchdog para um torrent baixando. */
+export interface StallClock {
+  /** há quanto tempo está sem progresso (relógio do servidor) */
+  idle_s: number
+  /** limite efetivo no estado atual; null = não troca sozinho */
+  limit_s: number | null
+  /** parado à mão no qBittorrent: o relógio não conta */
+  paused: boolean
+  /** passou do limite e não havia reserva para trocar */
+  no_backup: boolean
+}
+
+/** Só de job baixando: a global + o relógio por torrent (papel do filme ou
+ *  n da série, como texto). */
+export interface StallView {
+  global: StallSwitchConfig
+  torrents: Record<string, StallClock>
+}
+
+/** Override da troca automática num torrent do job (filme: kind; série: n). */
+export function setStallSwitch(jobId: string, body: {
+  mode: StallMode | 'inherit'; minutes?: number | null
+  kind?: 'video' | 'audio'; n?: number
+}) {
+  return put<Job>(`/api/jobs/${jobId}/stall-switch`, body)
 }
 
 /** Refaz a busca de torrents no MESMO job enquanto ele aguarda a escolha
@@ -588,6 +635,13 @@ export interface Job {
   torrents?: SeriesTorrent[]
   awaiting?: JobGate | null
   report?: { attempted: number; succeeded: number; failed: string[]; skipped?: string[] } | null
+  /** troca automática de torrent travado: só do job baixando (detalhe/tick) */
+  stall?: StallView | null
+  // override da troca automática por papel do filme (ausente = herda a global)
+  stall_mode_video?: StallMode
+  stall_mode_audio?: StallMode
+  stall_minutes_video?: number
+  stall_minutes_audio?: number
 }
 
 // ---- shapes enxutos das rotas de polling granular ----
@@ -740,6 +794,7 @@ export interface JobProgress {
   progress: Job['progress']
   output: string | null
   merge_started_at?: string | null
+  stall?: StallView | null
 }
 
 // ---------- catálogo ----------
