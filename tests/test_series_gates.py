@@ -451,6 +451,93 @@ def test_manual_magnet_proprio_auto_pelo_dn(temp_db):
     assert dubbed[0]["tracker"] == "manual"
 
 
+# -------------------- episódio por extenso no nome --------------------
+
+def _job_s09(tmp_path: Path | None = None) -> dict:
+    """Job pedindo S09E08-E10 (o recorte do caso real)."""
+    job = _job(tmp_path)
+    job["known_seasons"] = [9]
+    job["episodes"] = {
+        pipeline.ep_key(9, e): {"season": 9, "episode": e, "name": f"Ep {e}",
+                                "air_date": "2026-01-01", "runtime": 22,
+                                "state": "pending", "src": {}, "output": None,
+                                "error": None}
+        for e in (8, 9, 10)}
+    return job
+
+
+def _avulso_extenso(e):
+    return f"Desenhos Serie Exemplo 9ª Temporada {e:02d}º EPISÓDIO Dubbed Dual 5.1 WEB-DL 1080P"
+
+
+def test_avulsos_por_extenso_na_escolha_manual(temp_db):
+    """Caso real (título fictício): três avulsos "9ª Temporada 0Nº EPISÓDIO"
+    eram lidos como "S09 completa" e, na escolha manual, cada um assumia os
+    três episódios pedidos. Do ranking à visão invertida e ao "auto", cada um
+    agora atende só o episódio do nome."""
+    from services.series import selector_tv
+    job = _job_s09()
+    pool = [{"title": _avulso_extenso(e), "tracker": "t", "seeders": 20,
+             "size": 900_000_000, "magnet": f"magnet:?xt=urn:btih:{e:040x}",
+             "link": None} for e in (8, 9, 10)]
+    pipeline._pools[job["id"]] = {"original": pool, "dubbed": list(pool)}
+    try:
+        ranked = pipeline._rank_all(job)
+    finally:
+        pipeline._pools.pop(job["id"], None)
+    keys = {e: pipeline.ep_key(9, e) for e in (8, 9, 10)}
+    for role in ("original", "dubbed"):
+        for e in (8, 9, 10):
+            assert [c["title"] for c in ranked[role][(9, e)]] == [_avulso_extenso(e)]
+    refs = [(9, e) for e in (8, 9, 10)]
+    plans = {role: selector_tv.build_plan(refs, ranked[role], known_seasons={9})
+             for role in ("original", "dubbed")}
+    pipeline._store_plan(job, plans)
+    assert sorted(t["coverage"] for t in job["torrents"] if t["role"] == "dubbed") == [
+        [keys[8]], [keys[9]], [keys[10]]]
+
+    # visão invertida: cada candidato com SÓ o seu episódio pelo título
+    pipeline._gate(job, "manual_pick", None, "manual")
+    view = pipeline.awaiting_view(job)["payload"]
+    for role in ("original", "dubbed"):
+        by = {c["title"]: c["matches"] for c in view["by_torrent"][role]}
+        assert by == {_avulso_extenso(e): [keys[e]] for e in (8, 9, 10)}
+
+    # "auto" na escolha manual atribui pelo mesmo título
+    pipeline._apply_manual(job, {"torrents": [
+        {"candidate_id": c["id"], "role": "dubbed", "episodes": "auto"}
+        for c in view["by_torrent"]["dubbed"]]})
+    cov = {t["title"]: t["coverage"] for t in job["torrents"] if t["role"] == "dubbed"}
+    assert cov == {_avulso_extenso(e): [keys[e]] for e in (8, 9, 10)}
+
+
+def test_magnet_proprio_por_extenso_auto_pelo_dn(temp_db):
+    job = _job_s09()
+    magnet = ("magnet:?xt=urn:btih:" + "e" * 40 + "&dn="
+              + _avulso_extenso(9).replace(" ", "+"))
+    pipeline._apply_manual(job, {"torrents": [
+        {"magnet": magnet, "role": "dubbed", "episodes": "auto"}]})
+    dubbed = [t for t in job["torrents"] if t["role"] == "dubbed"]
+    assert [t["coverage"] for t in dubbed] == [["S09E09"]]
+
+
+def test_match_pack_files_por_extenso(temp_db):
+    # pack com arquivos nomeados por extenso: o match fino pelo arquivo acha
+    # cada episódio (antes nenhum arquivo casava e o pack baixava inteiro)
+    job = _job_s09()
+    t = _torrent(0, "dubbed", ["S09E08", "S09E09"],
+                 "Serie Exemplo 9ª Temporada Completa Dublada")
+    files = [
+        {"index": 0, "name": "Pack/Serie Exemplo 9ª Temporada 08º Episódio.mkv"},
+        {"index": 1, "name": "Pack/Serie Exemplo 9ª Temporada 09º Episódio.mkv"},
+        {"index": 2, "name": "Pack/Serie Exemplo 9ª Temporada 10º Episódio.mkv"},
+    ]
+    keep, drop, found = pipeline._match_pack_files(job, t, files)
+    assert found == {"S09E08", "S09E09"}
+    assert [f["index"] for f in keep] == [0, 1]
+    assert [f["index"] for f in drop] == [2]
+
+
 def test_manual_magnet_sem_titulo_exige_episodios(temp_db):
     job = _job()
     magnet = "magnet:?xt=urn:btih:" + "d" * 40
