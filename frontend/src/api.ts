@@ -521,12 +521,16 @@ export interface MergeProgress {
 /** Etapas de uma conversão. O backend rotula cada uma em progress.merge.phase
  *  e as expõe em summary().phase / lista.progress.merge_phase — o dropdown, a
  *  lista e o detalhe do job leem TODOS daqui, para dizerem a mesma coisa. */
-export type MergePhase = 'align' | 'edl' | 'convert'
+export type MergePhase = 'align' | 'reencode' | 'edl' | 'mux' | 'convert'
 
 export const MERGE_PHASE: Record<MergePhase, { label: string; amber: boolean }> = {
   // etapas intermediárias (âmbar): ainda não é o arquivo final saindo
   align: { label: 'Buscando alinhamento', amber: true },
+  // render da EDL: cada passada com o seu nome — com um nome só, a barra
+  // enchia duas/três vezes seguidas e parecia o mesmo serviço repetido
+  reencode: { label: 'Re-encodando o vídeo (cortes)', amber: true },
   edl: { label: 'Gerando áudio da EDL', amber: true },
+  mux: { label: 'Gravando o arquivo final', amber: false },
   // conversão de verdade: juntando/convertendo o arquivo final
   convert: { label: 'Convertendo', amber: false },
 }

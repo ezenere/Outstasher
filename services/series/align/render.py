@@ -41,6 +41,21 @@ DUP_MAX_S = 0.35
 HOLE_MAX_S = 2.0
 
 
+# etapa de cada passada no progresso (mesmos nomes de jobs.runtime.PHASE_*).
+# Com a mesma etapa nas três, a barra "Gerando áudio da EDL" enchia duas ou
+# três vezes seguidas — parecia o mesmo serviço feito de novo (caso real)
+PHASE_REENCODE = "reencode"   # vídeo re-encodado com keyframe nos cortes
+PHASE_EDL = "edl"             # passo 1: faixa dublada remontada (.mka)
+PHASE_MUX = "mux"             # passo 2: arquivo final (cópia de tudo)
+
+
+def _na_etapa(on_progress, phase: str):
+    """on_progress que carimba a etapa desta passada em cada atualização."""
+    if on_progress is None:
+        return None
+    return lambda info: on_progress({**info, "phase": phase})
+
+
 @lru_cache(maxsize=1)
 def has_rubberband() -> bool:
     """O build do ffmpeg tem o filtro rubberband? (probe único, cacheado)"""
@@ -409,7 +424,8 @@ def _apply_video_cuts(segs, orig_path: str, tmp_dir: Path, log,
         pontos = [max(0.0, t - folga) for seg in alvos for t in (seg.b_start, seg.b_end)
                   if 0.5 < t < dur - 0.5]
         orig_path = _reencode_for_cuts(orig_path, tmp_dir, pontos, reencode,
-                                       dur, log, on_progress, on_start)
+                                       dur, log, _na_etapa(on_progress, PHASE_REENCODE),
+                                       on_start)
 
     cortes: list[tuple[float, float]] = []
     for seg in alvos:
@@ -695,7 +711,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
     filter_complex = ";".join(chains)
 
     Path(output).parent.mkdir(parents=True, exist_ok=True)
-    log(f"Renderizando EDL: {len(slices)} fatia(s), {len(fills)} preenchimento(s)"
+    log(f"Montando o áudio dublado: {len(slices)} fatia(s), {len(fills)} preenchimento(s)"
         + ("" if has_rubberband() else " (sem rubberband: fallback asetrate)"))
 
     # DOIS PASSOS de propósito. Num único ffmpeg, o áudio original entrava no
@@ -748,7 +764,10 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         for k, (o, cdc, br) in enumerate(outs):
             cmd1 += ["-map", f"[{o}]", f"-c:a:{k}", cdc, f"-b:a:{k}", br]
         cmd1 += ["-vn", "-sn", "-map_chapters", "-1", *out_opts, str(dub_mka)]
-        merger._run_ffmpeg_progress(cmd1, duration_b, on_progress, on_start)
+        merger._run_ffmpeg_progress(cmd1, duration_b,
+                                    _na_etapa(on_progress, PHASE_EDL), on_start)
+        log("Gravando o arquivo final...")
+        mux_progress = _na_etapa(on_progress, PHASE_MUX)
 
         # passo 2: mux com stream copy de tudo (rápido). Com mkvmerge no
         # PATH e sem janela de corte, é ele que muxa: intercala por blocos
@@ -758,7 +777,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         if has_mkvmerge() and not in_opts:
             cmd2 = _mkvmerge_cmd(str(output), orig_path, str(dub_mka),
                                  iso, probe_orig, subs_prontas, extras)
-            p2 = _run_mkvmerge(cmd2, on_progress)
+            p2 = _run_mkvmerge(cmd2, mux_progress)
             if p2.returncode >= 2:   # 1 = só avisos; 2 = erro de verdade
                 raise merger.MergeError(
                     "mux final (mkvmerge) falhou: "
@@ -827,7 +846,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         cmd2 += ["-avoid_negative_ts", "make_zero", "-max_interleave_delta",
                  str(merger.sized_interleave_delta(merger.byte_rate_of(probe_orig))),
                  *out_opts, output]
-        p2 = _run_mux(cmd2, duration_b, on_progress)
+        p2 = _run_mux(cmd2, duration_b, mux_progress)
         if p2.returncode != 0:
             raise merger.MergeError(
                 "mux final falhou: "

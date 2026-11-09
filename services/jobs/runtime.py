@@ -155,6 +155,9 @@ def _register_proc(job_id: str):
 # `convert` é "conversão" de verdade — juntar/converter o arquivo final.
 PHASE_ALIGN = "align"      # fingerprint dos dois arquivos: buscando alinhamento
 PHASE_EDL = "edl"          # remontando a faixa dublada (arquivo intermediário)
+# passadas do render da EDL além da faixa dublada (align.render as carimba)
+PHASE_REENCODE = "reencode"  # vídeo re-encodado com keyframe nos pontos de corte
+PHASE_MUX = "mux"          # gravando o arquivo final (cópia de tudo)
 PHASE_CONVERT = "convert"  # merge/render/recompressão de fato
 
 

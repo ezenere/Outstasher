@@ -117,6 +117,42 @@ def test_render_gap_dub_descarta_material_extra(tmp_path):
 
 
 @pytest.mark.ffmpeg
+def test_render_carimba_a_etapa_de_cada_passada(tmp_path):
+    """As duas passadas do render (faixa dublada, depois o arquivo final)
+    mandam progresso com etapas DIFERENTES. Com a mesma nas duas, a barra
+    "Gerando áudio da EDL" enchia duas vezes seguidas e parecia o mesmo
+    serviço repetido (caso real)."""
+    orig = _media(tmp_path / "orig.mkv", 20, seed=1)
+    dub = _media(tmp_path / "dub.mkv", 20, seed=2)
+    segs = [Segment("match", 0.0, 20.0, 0.0, 20.0, offset=0.0)]
+    fases, logs = [], []
+
+    def on_progress(info):
+        if not fases or fases[-1] != info["phase"]:
+            fases.append(info["phase"])
+
+    render_mod.render(segs, str(dub), str(orig), str(tmp_path / "out.mkv"), "pt",
+                      log=logs.append, on_progress=on_progress)
+    assert fases == [render_mod.PHASE_EDL, render_mod.PHASE_MUX]
+    # o detalhe do job (último log) também muda entre as passadas
+    i_audio = next(i for i, m in enumerate(logs) if m.startswith("Montando o áudio dublado"))
+    i_final = next(i for i, m in enumerate(logs) if m.startswith("Gravando o arquivo final"))
+    assert i_audio < i_final
+
+
+def test_etapas_do_render_sao_as_do_runtime():
+    """Os nomes que o render carimba são os que a UI conhece (runtime)."""
+    from services.jobs import runtime
+    assert render_mod.PHASE_EDL == runtime.PHASE_EDL
+    assert render_mod.PHASE_MUX == runtime.PHASE_MUX
+    assert render_mod.PHASE_REENCODE == runtime.PHASE_REENCODE
+    assert render_mod._na_etapa(None, "mux") is None
+    vistos = []
+    render_mod._na_etapa(vistos.append, "mux")({"pct": 5.0, "phase": "edl"})
+    assert vistos == [{"pct": 5.0, "phase": "mux"}]
+
+
+@pytest.mark.ffmpeg
 def test_render_replaced_com_acao(tmp_path):
     """Cena substituída com ação use_dub: o áudio dublado entra mesmo o
     conteúdo divergindo (decisão do usuário)."""
