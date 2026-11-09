@@ -112,32 +112,73 @@ def _movie_title(job: dict) -> str:
     return f"TMDB #{job.get('tmdb_id')}"
 
 
+# estados do qBittorrent em que o torrent ainda não tem metadados: o tamanho
+# que ele reporta aí (0) não vale, e o que a troca de torrent grava no lugar
+# vem da busca — tamanho do Jackett, que não é confiável
+_META_STATES = ("metaDL", "forcedMetaDL")
+
+
+def _real_size(p) -> int | None:
+    """Tamanho REAL de um torrent (bytes dos arquivos selecionados, lido do
+    qBittorrent) a partir do seu progresso; None enquanto não há metadados."""
+    if not isinstance(p, dict):
+        return None
+    size = p.get("size") or 0
+    if size <= 0 or p.get("state") in _META_STATES:
+        return None
+    return int(size)
+
+
+def _weighted_pct(items: list[tuple[float | None, int | None, int]]) -> float:
+    """Progresso agregado de vários torrents, ponderado pelo TAMANHO real.
+
+    items: (pct 0-100 ou None, tamanho real ou None, unidades). Unidade é o
+    que cada torrent entrega: 1 no filme, os episódios cobertos na série.
+    Torrent sem metadados (tamanho desconhecido) vale a MÉDIA por unidade dos
+    conhecidos — o que equivale a reservar para ele a fração das unidades
+    (no filme, 50% enquanto o outro já tem tamanho). Sem nenhum tamanho
+    conhecido, o peso é só a unidade (cada torrent 1/N do total)."""
+    conhecidos = [(s, u) for _, s, u in items if s]
+    if not conhecidos:
+        total_u = sum(u for _, _, u in items)
+        return sum((p or 0.0) * u for p, _, u in items) / total_u
+    por_unidade = sum(s for s, _ in conhecidos) / sum(u for _, u in conhecidos)
+    total = feito = 0.0
+    for p, s, u in items:
+        peso = s if s else u * por_unidade
+        total += peso
+        feito += (p or 0.0) / 100.0 * peso
+    return 100.0 * feito / total
+
+
 def _download_pct(job: dict) -> float | None:
-    """Progresso do DOWNLOAD do job, 0-100, como média dos torrents que ele baixa.
+    """Progresso do DOWNLOAD do job, 0-100, ponderado pelo tamanho real dos
+    torrents (ver _weighted_pct).
 
     Um job dublado baixa dois torrents (vídeo original + áudio dublado) e só
-    termina quando os DOIS chegam a 100%, então cada um vale 50%. Torrent ainda
-    sem leitura do qBittorrent conta como 0% — o denominador é o que o job
-    PRECISA baixar, não o que já reportou (senão o vídeo sozinho em 40% viraria
-    "40% do job", e a barra andaria para trás quando o áudio aparecesse).
+    termina quando os DOIS chegam a 100%. Com 25 GB + 75 GB, o de 25 GB pronto
+    é 25% do job — não 50%. Torrent ainda sem leitura do qBittorrent conta
+    como 0% — o denominador é o que o job PRECISA baixar, não o que já
+    reportou (senão o vídeo sozinho em 40% viraria "40% do job").
 
-    Série: média dos torrents do plano PONDERADA pela cobertura (um pack de 10
-    episódios pesa 10x um avulso — a barra reflete episódios, não torrents).
+    Série: os torrents do plano, com a unidade = episódios cobertos (um pack
+    de 10 episódios sem metadados pesa 10x um avulso).
     """
     if job.get("media_type") == "tv":
         torrents = job.get("torrents") or []
-        weights = [max(1, len(t.get("coverage") or [])) for t in torrents]
         pcts = [100.0 if t.get("state") == "done"
                 else _pct(t.get("progress")) for t in torrents]
         if not torrents or not any(p is not None for p in pcts):
             return None
-        total = sum(weights)
-        return sum((p or 0.0) * w for p, w in zip(pcts, weights)) / total
+        return _weighted_pct([
+            (p, _real_size(t.get("progress")), max(1, len(t.get("coverage") or [])))
+            for p, t in zip(pcts, torrents)])
     needed = _needed_torrents(job)
-    read = [_pct(job["progress"].get(k)) for k in needed]
+    progs = [job["progress"].get(k) for k in needed]
+    read = [_pct(p) for p in progs]
     if not any(p is not None for p in read):
         return None  # nenhum torrent reportou ainda (searching/awaiting): sem barra
-    return sum(p or 0.0 for p in read) / len(read)
+    return _weighted_pct([(p, _real_size(pr), 1) for p, pr in zip(read, progs)])
 
 
 def summary() -> list[dict]:
