@@ -32,6 +32,10 @@ def parse_episode_refs(title: str) -> list[tuple[int, int]]:
 
     Ranges expandem (S01E01-E03 -> E01..E03). Duplicatas removidas preservando
     a ordem. Lista vazia = título sem referência explícita de episódio.
+
+    Ordem de confiança: SxxEyy, depois "1x02", e só então o episódio POR
+    EXTENSO ao lado da temporada ("9ª Temporada 08º Episódio") — um nome que
+    já traz a forma compacta não precisa da por extenso.
     """
     out: list[tuple[int, int]] = []
     for m in _SXXEYY_RE.finditer(title):
@@ -45,6 +49,8 @@ def parse_episode_refs(title: str) -> list[tuple[int, int]]:
     if not out:
         for m in _NXMM_RE.finditer(title):
             out.append((int(m.group(1)), int(m.group(2))))
+    if not out:
+        out = _word_episode_refs(title)[0]
     seen: set[tuple[int, int]] = set()
     uniq = []
     for ref in out:
@@ -78,6 +84,173 @@ _COMPLETE_RE = re.compile(
     r"|\bbatch\b|\bcole[cç][aã]o\b|\btodas[ ._-]as[ ._-]temporadas\b", re.I)
 
 
+# -------------------- episódio por extenso --------------------
+
+# Indexadores brasileiros (e alguns gringos) não escrevem SxxEyy: o episódio
+# vem por extenso ao lado da temporada — "9ª Temporada 08º Episódio",
+# "Temporada 2 Ep. 05", "Season 3 Episode 7", "Temporada 1 E04". Sem ler isso
+# o nome só mostrava a temporada e virava pack: caso real, três avulsos
+# "9ª Temporada 08º/09º/10º EPISÓDIO" apareceram como "S09 completa" na
+# escolha manual e cada um assumiu os três episódios pedidos.
+#
+# A palavra: episódio(s) com a vogal acentuada livre (o Jackett corrompe o "Ó"
+# em U+FFFD ou "Ã“", como faz com o "ª" da temporada), episode(s),
+# capítulo(s) e ep/eps — este último sem letra colada, para "Epílogo" não ser
+# episódio. O "ep" de "Deep" não casa porque toda forma exige que nada
+# alfanumérico venha antes da palavra.
+_EP_WORD = (r"(?:epis[^\s\d]{1,4}dios?|episodes?|cap[^\s\d]{1,3}tulos?"
+            r"|eps?(?![^\W\d_]))")
+# número de episódio DEPOIS da palavra: até 3 dígitos e nada alfanumérico
+# colado (fora o "º") — "Ep 720p", "Ep 1080", "Ep 10bit" e o "5.1" do áudio
+# (decimal de UM dígito) não viram episódio; "Episode.8.720p" (nome com
+# pontos) vira o 8. O "ª" fica de fora de propósito: é ordinal FEMININO, de
+# temporada ("Ep 9ª Temporada" não é o episódio 9).
+_EP_NUM = r"\d{1,3}(?![^\W_º])(?![.,]\d(?!\d))"
+# separador entre números: range ("01-05", "01 a 05", "1 ao 5", "1 to 5") ou
+# lista ("01 e 02", "1, 2", "1 & 2"); o 2º número pode repetir o prefixo
+# ("Ep01-Ep05", "E01-E05")
+_EP_SEP = (r"[ ._]*(?:[-~–+&,]|\b(?:a|ao|à|ate|até|e|and|to|thru)\b)[ ._]*"
+           r"(?:ep\.?[ ._]*|e(?=\d))?")
+_EP_RANGE_SEP_RE = re.compile(r"[-~–]|\b(?:a|ao|à|ate|até|to|thru)\b", re.I)
+# palavra ANTES do número: "Episódio 08", "Ep. 8", "EP08", "Episode 8",
+# "Episódio Nº 8", "Episódios 01 a 05", "Ep 01-05" — e o "E08" solto, que só
+# vale porque toda forma por extenso exige uma temporada no nome
+_EP_AFTER_RE = re.compile(
+    rf"(?<![^\W_])(?:{_EP_WORD}\.?[ ._-]*(?:n[º°]\.?[ ._]*|#[ ]*)?|e(?=\d))"
+    rf"{_EP_NUM}(?:{_EP_SEP}{_EP_NUM})*", re.I)
+# ordinal: º/ª/° (com o ponto europeu "8.º"), "o"/"a" colados ("8o"), e o lixo
+# do Jackett no lugar do "º" (U+FFFD repetido, "Âº")
+_EP_ORD = r"(?:\.?[ºª°]|[oa](?![^\W_])|\uFFFD{1,4}|Â[º°ª])"
+# número ANTES da palavra: "08º Episódio", "8º EP", "8o ep", "01º ao 05º
+# Episódios". Nada alfanumérico nem decimal antes do número — senão o "264"
+# de "x264" e o "1" de "5.1" virariam episódio. Sem ordinal, um número
+# solto só vale com a palavra inteira no singular ("08 Episódio"):
+# "10 Episódios" é CONTAGEM (pack de 10), não o episódio 10.
+_EP_BEFORE_RE = re.compile(
+    rf"(?<![^\W_])(?<!\d[.,])\d{{1,3}}(?!\d)(?P<ord>{_EP_ORD})?"
+    rf"(?:{_EP_SEP}\d{{1,3}}(?!\d){_EP_ORD}?)*"
+    rf"[ ._-]*(?P<word>{_EP_WORD})(?![^\W\d_])", re.I)
+_EP_ORD_LEAD_RE = re.compile(_EP_ORD, re.I)
+# UM episódio sem número: "Episódio Final", "Último Episódio", "Episódio
+# Piloto", "Season Finale". Com temporada no nome isso não é pack — tratar
+# como "S09 completa" faria o plano baixar um arquivo esperando a temporada.
+_UNNUMBERED_EP_RE = re.compile(
+    r"(?<![^\W_])(?:epis[^\s\d]{1,4}dio|episode|cap[^\s\d]{1,3}tulo)[ ._-]+"
+    r"(?:final|piloto|pilot|especial|special)(?![^\W_])"
+    r"|(?<![^\W_])(?:[uú]ltimo|final|pilot|piloto)[ ._-]+"
+    r"(?:epis[^\s\d]{1,4}dio|episode)(?![^\W_])"
+    r"|\b(?:season|series|mid[ ._-]?season)[ ._-]?(?:finale|premiere)\b", re.I)
+
+
+def _blank(text: str, spans: list[tuple[int, int]]) -> str:
+    """Troca os trechos por espaços do MESMO tamanho (as posições continuam
+    valendo para as buscas seguintes)."""
+    chars = list(text)
+    for a, b in spans:
+        chars[a:b] = " " * (b - a)
+    return "".join(chars)
+
+
+def _expand_numbers(text: str) -> list[int]:
+    """Números de um token de episódio já casado, com ranges expandidos.
+
+    Os números têm de crescer: "01 a 05" expande, "08 e 09" lista; um número
+    menor que o anterior ("Ep 08, 2 Áudios") não é episódio e fica de fora."""
+    nums = list(re.finditer(r"\d{1,3}", text))
+    if not nums:
+        return []
+    out = [int(nums[0].group())]
+    for prev, cur in zip(nums, nums[1:]):
+        n = int(cur.group())
+        last = out[-1]
+        if n <= last:
+            continue
+        # o que separa os dois números, sem o ordinal colado no anterior
+        # ("1º ao 5º", "1a e 2a") — o "a" do ordinal não é o "a" do range
+        between = text[prev.end():cur.start()]
+        lead = _EP_ORD_LEAD_RE.match(between)
+        if lead:
+            between = between[lead.end():]
+        if _EP_RANGE_SEP_RE.search(between):
+            # teto defensivo como no SxxEyy: range absurdo é erro de parse
+            out.extend(range(last + 1, min(n, last + 99) + 1))
+        else:
+            out.append(n)
+    return out
+
+
+def _word_episode_refs(title: str) -> tuple[list[tuple[int, int]],
+                                             list[tuple[int, int]]]:
+    """(referências, trechos usados) do episódio por extenso + temporada.
+
+    Três passadas, cada uma apagando o que achou para a seguinte não reler:
+    1. palavra + número ("Episódio 08", "E08") — apagada antes de procurar a
+       temporada, senão "Episódio 08 Temporada 9" leria "08 Temporada" como
+       a 8ª temporada;
+    2. temporada ("9ª Temporada", "Temporada 9", "Season 9", "S09");
+    3. número + palavra ("08º Episódio") — DEPOIS de apagar a temporada, senão
+       "Temporada 1 - 10 Episódios" leria "1 - 10" como range de episódios.
+
+    Episódio sem temporada no nome ("Ep. 8", "Episódio 08") não vira
+    referência: a numeração pode ser absoluta (anime, novela) e chutar a
+    temporada 1 atribuiria o torrent ao episódio errado — fica como hoje, sem
+    referência (cobertura "unknown", só atribuível à mão). Temporadas em
+    range ("Temporadas 1 a 3 Episódio 5") também não: não dá para saber de
+    qual temporada é o episódio.
+    """
+    episodes: list[tuple[int, list[int]]] = []  # (posição, números)
+    spans: list[tuple[int, int]] = []
+    for m in _EP_AFTER_RE.finditer(title):
+        nums = _expand_numbers(m.group(0))
+        if nums:
+            episodes.append((m.start(), nums))
+            spans.append(m.span())
+    masked = _blank(title, spans)
+
+    if _SEASON_RANGE_RE.search(masked):
+        return [], []
+    seasons: list[tuple[int, int]] = []  # (posição, temporada)
+    season_spans: list[tuple[int, int]] = []
+    for m in _SEASON_WORD_RE.finditer(masked):
+        seasons.append((m.start(), int(next(g for g in m.groups() if g))))
+        season_spans.append(m.span())
+    for m in _SEASON_SOLO_RE.finditer(masked):
+        seasons.append((m.start(), int(m.group(1))))
+        season_spans.append(m.span())
+    if not seasons:
+        return [], []
+    masked = _blank(masked, season_spans)
+
+    for m in _EP_BEFORE_RE.finditer(masked):
+        nums = _expand_numbers(m.group(0)[:m.start("word") - m.start()])
+        word = m.group("word").lower()
+        # número solto sem ordinal: só "08 Episódio" (palavra inteira no
+        # singular); "10 Episódios"/"10 EPs" é contagem de episódios do pack
+        if len(nums) == 1 and not m.group("ord") \
+                and (word.endswith("s") or len(word) <= 3):
+            continue
+        if nums:
+            episodes.append((m.start(), nums))
+            spans.append(m.span())
+    if not episodes:
+        return [], []
+
+    distinct = {s for _, s in seasons}
+    refs: list[tuple[int, int]] = []
+    for pos, nums in sorted(episodes):
+        if len(distinct) == 1:
+            season = next(iter(distinct))
+        else:
+            # mais de uma temporada no nome ("Temporada 1 Episódios 1-10 e
+            # Temporada 2 Episódios 1-5"): a mais próxima ANTES do episódio,
+            # senão a primeira depois (episódio escrito antes da temporada)
+            before = [(p, s) for p, s in seasons if p < pos]
+            season = (max(before)[1] if before
+                      else min((p, s) for p, s in seasons if p > pos)[1])
+        refs.extend((season, e) for e in nums)
+    return refs, spans
+
+
 @dataclass
 class Coverage:
     """O que um torrent cobre, deduzido do nome.
@@ -87,7 +260,8 @@ class Coverage:
     - "multi_episode": mais de um episódio explícito (range/arquivo duplo)
     - "season_pack": temporada(s) inteira(s) — episódios dependem do TMDB
     - "complete": série completa (temporadas não enumeradas no nome)
-    - "unknown": nome não diz nada — só serve com inspeção manual
+    - "unknown": nome não diz nada (ou diz UM episódio sem número, como
+      "Episódio Final") — só serve com inspeção manual
     """
     kind: str
     seasons: set[int] = field(default_factory=set)
@@ -148,6 +322,12 @@ def parse_coverage(title: str) -> Coverage:
         for m in _SEASON_SOLO_RE.finditer(title):
             seasons.add(int(m.group(1)))
     if seasons:
+        # "9ª Temporada Episódio Final": UM episódio cujo número o nome não
+        # diz. Pack ele não é; "unknown" o deixa fora do plano automático
+        # (atribuível só à mão). "Completa" no nome manda: é o pack que
+        # menciona um episódio ("Temporada 1 Completa + Episódio Especial").
+        if _UNNUMBERED_EP_RE.search(title) and not _COMPLETE_RE.search(title):
+            return Coverage("unknown")
         return Coverage("season_pack", seasons)
     if _COMPLETE_RE.search(title):
         return Coverage("complete")
@@ -158,7 +338,12 @@ def strip_episode_tokens(title: str) -> str:
     """Remove tokens de episódio/temporada do nome, sobrando o título da série
     (+ tags de qualidade) — para casar contra o título do TMDB com o matching
     de filmes (todas as palavras)."""
-    t = _SXXEYY_RE.sub(" ", title)
+    # episódio por extenso: só os trechos que de fato viraram referência —
+    # o número do episódio não pode contar como palavra do título ("Serie 8"
+    # casaria "Outra Serie 2ª Temporada Episódio 8")
+    refs, spans = _word_episode_refs(title)
+    t = _blank(title, spans) if refs else title
+    t = _SXXEYY_RE.sub(" ", t)
     t = _NXMM_RE.sub(" ", t)
     t = _SEASON_RANGE_RE.sub(" ", t)
     t = _SEASON_WORD_RE.sub(" ", t)

@@ -154,3 +154,48 @@ def test_plan_marca_lacunas():
     plan = selector_tv.build_plan(requested, _ranked_map(requested, results))
     assert plan["gaps"] == [(1, 99)]
     assert (1, 1) in plan["assignments"]
+
+
+# -------------------- episódio por extenso --------------------
+
+def _avulso_extenso(e):
+    # formato de indexador brasileiro (caso real, com título fictício)
+    return f"Serie Exemplo 9ª Temporada {e:02d}º EPISÓDIO Dubbed Dual 5.1 WEB-DL 1080P"
+
+
+def test_avulso_por_extenso_cobre_so_o_seu_episodio():
+    # caso real: lidos como "S09 completa", os três avulsos cobriam S09E08-E10
+    # cada um e o plano baixava UM deles para os três episódios
+    requested = [(9, 8), (9, 9), (9, 10)]
+    pack = "Serie Exemplo 9ª Temporada Completa 720p WEB-DL"
+    results = [cand(_avulso_extenso(e)) for e in (8, 9, 10)]
+    results.append(cand(pack, size=9_000_000_000))
+    ranked, trace = _rank(results, 9, 8, requested=requested)
+    # o avulso 1080p do próprio episódio, depois o pack 720p
+    assert [r["title"] for r in ranked] == [_avulso_extenso(8), pack]
+    assert ranked[0]["coverage"] == "S09E08"
+    rejected = {c["title"]: c["rejected"] for c in trace}
+    assert rejected[_avulso_extenso(9)] == "não cobre S09E08"
+    assert rejected[_avulso_extenso(10)] == "não cobre S09E08"
+
+
+def test_plano_com_avulsos_por_extenso_um_torrent_por_episodio():
+    requested = [(9, 8), (9, 9), (9, 10)]
+    results = [cand(_avulso_extenso(e)) for e in (8, 9, 10)]
+    plan = selector_tv.build_plan(requested, _ranked_map(requested, results))
+    assert plan["gaps"] == []
+    assert {ep: a["title"] for ep, a in plan["assignments"].items()} == {
+        (9, e): _avulso_extenso(e) for e in (8, 9, 10)}
+    assert sorted(t["coverage_assigned"] for t in plan["torrents"]) == [
+        [(9, 8)], [(9, 9)], [(9, 10)]]
+
+
+def test_episodio_final_sem_numero_nao_entra_como_pack():
+    # UM episódio de número desconhecido: se valesse como "S09 completa" (e
+    # 1080p > 720p), o plano o baixaria esperando a temporada inteira
+    requested = [(9, 1), (9, 2)]
+    pack = "Serie Exemplo 9ª Temporada Completa 720p WEB-DL"
+    results = [cand("Serie Exemplo 9ª Temporada Episódio Final 1080p WEB-DL"),
+               cand(pack, size=9_000_000_000)]
+    plan = selector_tv.build_plan(requested, _ranked_map(requested, results))
+    assert [t["title"] for t in plan["torrents"]] == [pack]
