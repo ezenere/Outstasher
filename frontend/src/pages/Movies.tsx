@@ -11,6 +11,7 @@ import AdvancedOptions from '../components/AdvancedOptions'
 import AdvancedMergePolicy from '../components/AdvancedMergePolicy'
 import { useDialog } from '../components/Dialog'
 import SeriesModal from '../components/SeriesModal'
+import { InfiniteScrollFooter, useInfiniteScroll } from '../components/InfiniteScroll'
 import { DiskFree, Empty, MovieStateBadge, MovieStateIcon, useScrollLock } from '../components/ui'
 
 // estados "em progresso": se um filme estava num destes e sumiu do summary,
@@ -23,8 +24,6 @@ type MediaKind = 'movie' | 'tv'
 export default function Movies() {
   const dialog = useDialog()
   const [mediaKind, setMediaKind] = useState<MediaKind>('movie')
-  const [movies, setMovies] = useState<Movie[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [languages, setLanguages] = useState<Language[]>([])
   const [language, setLanguage] = useState('pt')
@@ -43,11 +42,10 @@ export default function Movies() {
   const [selectedSeries, setSelectedSeries] = useState<Movie | null>(null)
   const [starting, setStarting] = useState(false)
   const [justStarted, setJustStarted] = useState<number | null>(null)
-  // paginação: guarda o termo buscado, a página atual e o total de páginas
+  // termo buscado (o input só vale no Buscar/Enter) e um contador para
+  // "Buscar" de novo o mesmo termo recarregar a lista
   const [searched, setSearched] = useState('')
-  const [page, setPage] = useState(1)
-  const [totalPages, setTotalPages] = useState(1)
-  const [loadingMore, setLoadingMore] = useState(false)
+  const [searchNonce, setSearchNonce] = useState(0)
   useScrollLock(selected !== null)  // modal aberto trava o scroll do body
 
   // estado de cada item (chave media:tmdb_id -> convertendo/baixando/...).
@@ -101,53 +99,33 @@ export default function Movies() {
         setTargetId(ts.find((t) => t.is_default)?.id ?? ts[0]?.id ?? null)
       })
       .catch(() => {})
-    void search('')
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-
-  // trocar o toggle refaz a busca atual no outro endpoint
-  useEffect(() => {
-    void search(searched)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mediaKind])
 
   // endpoint da busca conforme o toggle (mesmo shape de página nos dois)
   const searchBase = mediaKind === 'tv' ? '/api/series' : '/api/movies'
 
-  // nova busca: reseta a lista e carrega a página 1
-  async function search(q: string) {
-    setMovies(null)
-    setError(null)
-    setSearched(q)
-    try {
-      const p = await api<MoviePage>(`${searchBase}?q=${encodeURIComponent(q)}&page=1`)
-      setMovies(p.results)
-      setPage(p.page)
-      setTotalPages(p.total_pages)
-    } catch (e) {
-      setError((e as Error).message)
-    }
-  }
+  // scroll infinito sobre a busca atual no endpoint do toggle: trocar o
+  // termo ou o toggle recomeça da página 1 e descarta a resposta atrasada da
+  // listagem anterior (antes um toggle no meio de uma carga anexava filmes
+  // na lista de séries)
+  const scroll = useInfiniteScroll<Movie>({
+    key: `${mediaKind}|${searchNonce}|${searched}`,
+    fetchPage: async (page, signal) => {
+      const p = await api<MoviePage>(
+        `${searchBase}?q=${encodeURIComponent(searched)}&page=${page}`, { signal })
+      // os populares dizem ter milhares de páginas, mas o TMDB (e o backend)
+      // param na 500: o fim real é ela
+      return { items: p.results, page: p.page, pages: Math.min(p.total_pages, 500) }
+    },
+    itemKey: (m) => m.id,  // dedup: o TMDB às vezes repete títulos entre páginas
+  })
+  const movies = scroll.items
+  const error = scroll.error
 
-  // carrega a próxima página e anexa aos resultados atuais
-  async function loadMore() {
-    if (loadingMore || page >= totalPages) return
-    setLoadingMore(true)
-    try {
-      const next = page + 1
-      const p = await api<MoviePage>(`${searchBase}?q=${encodeURIComponent(searched)}&page=${next}`)
-      // dedup por id (o TMDB às vezes repete títulos entre páginas)
-      setMovies((cur) => {
-        const seen = new Set((cur ?? []).map((m) => m.id))
-        return [...(cur ?? []), ...p.results.filter((m) => !seen.has(m.id))]
-      })
-      setPage(p.page)
-      setTotalPages(p.total_pages)
-    } catch (e) {
-      setError((e as Error).message)
-    } finally {
-      setLoadingMore(false)
-    }
+  // nova busca: a lista recomeça na página 1
+  function search(q: string) {
+    setSearched(q)
+    setSearchNonce((n) => n + 1)
   }
 
   async function start(kind: 'both' | 'original' | 'dubbed') {
@@ -230,7 +208,6 @@ export default function Movies() {
 
       <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
         {movies === null && !error && <Empty>Carregando...</Empty>}
-        {error && <Empty>Erro: {error}</Empty>}
         {movies?.length === 0 && <Empty>Nada encontrado.</Empty>}
         {movies?.map((m) => {
           const state = states.get(skey(m.id))
@@ -289,17 +266,8 @@ export default function Movies() {
         })}
       </div>
 
-      {movies && movies.length > 0 && page < totalPages && (
-        <div className="mt-6 flex justify-center pb-4">
-          <button
-            onClick={loadMore}
-            disabled={loadingMore}
-            className="rounded-lg border border-zinc-700 px-5 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
-          >
-            {loadingMore ? 'Carregando…' : `Carregar mais (${page}/${totalPages})`}
-          </button>
-        </div>
-      )}
+      {/* sentinela do scroll infinito + carregando / fim / tentar de novo */}
+      <InfiniteScrollFooter scroll={scroll} />
 
       {selectedSeries && (
         <SeriesModal series={selectedSeries} onClose={() => setSelectedSeries(null)} />

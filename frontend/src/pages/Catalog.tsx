@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Folder, MediaVideoList, NavArrowRight, Plus, Search, Tv, WarningTriangle, Xmark } from 'iconoir-react'
 import { api, type CatalogItem, type CatalogList, type Destination } from '../api'
 import AddMovieModal from '../components/AddMovieModal'
 import AddSeriesModal from '../components/AddSeriesModal'
+import { InfiniteScrollFooter, useInfiniteScroll } from '../components/InfiniteScroll'
 import { DiskBar, Empty } from '../components/ui'
 
 // critérios de ordenação disponíveis no catálogo
@@ -16,15 +17,18 @@ const SORTS: { key: SortKey; label: string }[] = [
   { key: 'size', label: 'Tamanho' },
 ]
 
+// linhas por página do scroll infinito (a varredura de cada pasta é o caro)
+const PER_PAGE = 50
+
 export default function Catalog() {
   const [destinations, setDestinations] = useState<Destination[]>([])
   // catálogo de FILMES e de SÉRIES são separados (destinos por mídia)
   const [media, setMedia] = useState<'movie' | 'tv'>('movie')
   const [destId, setDestId] = useState<number | null>(null)
-  const [data, setData] = useState<CatalogList | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
   const [query, setQuery] = useState('')
+  // a busca roda no backend (acha itens de páginas ainda não carregadas):
+  // espera a digitação parar para não pedir uma listagem por tecla
+  const [q, setQ] = useState('')
   const [sortKey, setSortKey] = useState<SortKey>('title')
   const [sortDir, setSortDir] = useState<SortDir>('asc')
   const [adding, setAdding] = useState<'movie' | 'tv' | null>(null)
@@ -45,41 +49,35 @@ export default function Catalog() {
   function switchMedia(m: 'movie' | 'tv') {
     setMedia(m)
     setQuery('')
+    setQ('')  // já, sem esperar o debounce: senão pediria duas listagens
     const mine = destinations.filter((d) => (d.media ?? 'movie') === m)
+    // sem destino da mídia: destId null desliga a listagem (e a esvazia)
     setDestId(mine.find((d) => d.is_default)?.id ?? mine[0]?.id ?? null)
-    if (!mine.length) setData(null)
   }
 
   useEffect(() => {
-    if (destId == null) return
-    setLoading(true)
-    setError(null)
-    api<CatalogList>(`/api/catalog?destination_id=${destId}`)
-      .then(setData)
-      .catch((e) => setError((e as Error).message))
-      .finally(() => setLoading(false))
-  }, [destId])
+    const t = setTimeout(() => setQ(query.trim()), 250)
+    return () => clearTimeout(t)
+  }, [query])
 
-  // filtra pelo texto (título ou pasta) e ordena pelo critério escolhido
-  const items = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    const filtered = (data?.items ?? []).filter(
-      (it) => !q || it.title.toLowerCase().includes(q) || it.folder.toLowerCase().includes(q),
-    )
-    const dir = sortDir === 'asc' ? 1 : -1
-    const cmp = (a: CatalogItem, b: CatalogItem) => {
-      if (sortKey === 'title') return a.title.localeCompare(b.title, 'pt-BR') * dir
-      if (sortKey === 'size') return (a.size - b.size) * dir
-      // ano: itens sem ano vão sempre para o fim, independente da direção
-      const ay = a.year ? Number(a.year) : null
-      const by = b.year ? Number(b.year) : null
-      if (ay == null && by == null) return a.title.localeCompare(b.title, 'pt-BR')
-      if (ay == null) return 1
-      if (by == null) return -1
-      return (ay - by) * dir || a.title.localeCompare(b.title, 'pt-BR')
-    }
-    return [...filtered].sort(cmp)
-  }, [data, query, sortKey, sortDir])
+  // scroll infinito: filtro, ordenação e página vão para o backend. Mantém
+  // as linhas da listagem anterior até a nova chegar (busca enquanto digita
+  // sem piscar "Carregando...")
+  const scroll = useInfiniteScroll<CatalogItem, CatalogList>({
+    key: `${destId}|${q}|${sortKey}|${sortDir}`,
+    enabled: destId != null,
+    keepPrevious: true,
+    fetchPage: (page, signal) => api<CatalogList>(
+      `/api/catalog?destination_id=${destId}&q=${encodeURIComponent(q)}`
+      + `&sort=${sortKey}&order=${sortDir}&page=${page}&per_page=${PER_PAGE}`, { signal }),
+    itemKey: (it) => it.folder,
+  })
+  // `data` e `items` vêm sempre da mesma resposta (até nas linhas antigas
+  // mantidas durante a troca), então o link usa o destino DELA
+  const data = scroll.last
+  const items = scroll.items ?? []
+  // a lista na tela é a da busca/ordem atual (não a anterior aguardando troca)
+  const ready = scroll.items !== null && !scroll.refreshing && !scroll.error
 
   return (
     <div>
@@ -133,7 +131,7 @@ export default function Catalog() {
         </div>
       )}
 
-      {data?.exists && data.items.length > 0 && (
+      {data?.exists && data.total_all > 0 && (
         <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
           <div className="relative flex-1">
             <Search width={15} height={15} className="absolute top-1/2 left-3 -translate-y-1/2 text-zinc-500" />
@@ -153,6 +151,11 @@ export default function Catalog() {
               </button>
             )}
           </div>
+          <span className="text-sm whitespace-nowrap text-zinc-500" title="Pastas neste destino">
+            {data.total === data.total_all
+              ? `${data.total_all} ${data.total_all === 1 ? 'item' : 'itens'}`
+              : `${data.total} de ${data.total_all} itens`}
+          </span>
           <div className="flex items-center gap-1.5">
             <span className="text-sm text-zinc-500">Ordenar:</span>
             {SORTS.map((s) => {
@@ -181,8 +184,7 @@ export default function Catalog() {
         </div>
       )}
 
-      {loading && <Empty>Carregando...</Empty>}
-      {error && <Empty>Erro: {error}</Empty>}
+      {scroll.items === null && scroll.loading && <Empty>Carregando...</Empty>}
       {data && !data.exists && (
         <div className="mt-4 flex items-center gap-2 rounded-xl border border-amber-900/60 bg-amber-950/20 p-4 text-sm text-amber-300">
           <WarningTriangle width={18} height={18} />
@@ -195,18 +197,18 @@ export default function Catalog() {
           crie um em Configurações → Destinos.
         </Empty>
       )}
-      {data?.exists && data.items.length === 0 && (
+      {ready && data?.exists && data.total_all === 0 && (
         <Empty>{media === 'tv' ? 'Nenhuma série' : 'Nenhum filme'} neste destino.</Empty>
       )}
-      {data?.exists && data.items.length > 0 && items.length === 0 && (
-        <Empty>Nenhum filme corresponde à busca.</Empty>
+      {ready && data?.exists && data.total_all > 0 && data.total === 0 && (
+        <Empty>{media === 'tv' ? 'Nenhuma série' : 'Nenhum filme'} corresponde à busca.</Empty>
       )}
 
-      <div className="mt-5 flex flex-col gap-2">
+      <div className={`mt-5 flex flex-col gap-2 transition-opacity ${scroll.refreshing ? 'opacity-60' : ''}`}>
         {items.map((it) => (
           <Link
             key={it.folder}
-            to={`/catalog/item?destination_id=${destId}&folder=${encodeURIComponent(it.folder)}`}
+            to={`/catalog/item?destination_id=${data?.destination.id ?? destId}&folder=${encodeURIComponent(it.folder)}`}
             className="flex items-center gap-3 rounded-xl bg-zinc-900 px-4 py-3 hover:bg-zinc-800/70"
           >
             {it.type === 'series' ? (
@@ -231,6 +233,8 @@ export default function Catalog() {
           </Link>
         ))}
       </div>
+      {/* sentinela do scroll infinito + carregando / fim / tentar de novo */}
+      <InfiniteScrollFooter scroll={scroll} />
 
       {adding === 'tv' && (
         <AddSeriesModal

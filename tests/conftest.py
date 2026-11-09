@@ -118,6 +118,7 @@ def temp_db(tmp_path, monkeypatch):
     jobs.runtime._last_persist.clear()
     jobs.runtime._removed.clear()
     catalog._library_cache.update(at=None, keys=frozenset())
+    catalog._stats_cache.clear()
 
     return store
 

@@ -698,10 +698,19 @@ export interface CatalogItem {
   has_video: boolean
 }
 
+/** Uma página da listagem do catálogo (/api/catalog): busca, ordenação e
+ *  paginação rodam no backend, sobre a coleção inteira do destino. */
 export interface CatalogList {
   destination: Destination
   exists: boolean
   items: CatalogItem[]
+  page: number
+  per_page: number
+  pages: number
+  /** Itens que casam com a busca. */
+  total: number
+  /** Itens do destino inteiro (sem a busca). */
+  total_all: number
 }
 
 export interface Stream {

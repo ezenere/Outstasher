@@ -521,9 +521,18 @@ async def put_advanced_merge(req: AdvancedMergeRequest):
 # -------------------- catalogo --------------------
 
 @app.get("/api/catalog")
-async def catalog_list(destination_id: int | None = None):
+async def catalog_list(destination_id: int | None = None, q: str = "",
+                       sort: str = "title", order: str = "asc",
+                       page: int = 1, per_page: int | None = None):
+    """Itens do destino, paginados no backend (a tela rola em scroll
+    infinito): busca e ordenação valem sobre a coleção inteira, não só sobre
+    o que já foi carregado. Sem `per_page` devolve tudo numa página."""
+    if per_page is not None and per_page < 1:
+        raise HTTPException(400, "per_page deve ser >= 1")
     try:
-        result = catalog.list_items(destination_id)
+        # varre pastas no disco: fora do event loop (travava as outras rotas)
+        result = await asyncio.to_thread(catalog.list_items, destination_id,
+                                         q, sort, order, page, per_page)
     except catalog.CatalogError as e:
         raise HTTPException(400, str(e))
     result["destination"] = _with_disk(result["destination"])
