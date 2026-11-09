@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import {
   Check, ControlSlider, EditPencil, Folder, HardDrive, Language, Lock, NavArrowDown,
-  NavArrowRight, Plus, Refresh, Search, Star, StarSolid, Trash, Xmark,
+  NavArrowRight, Plus, Refresh, Search, Star, StarSolid, Trash, WarningTriangle, Xmark,
 } from 'iconoir-react'
 import {
   type AdvancedMergeConfig, type AdvancedMergeInfo,
@@ -62,7 +62,6 @@ export function ExtraSearchSection() {
   const [loadingIdx, setLoadingIdx] = useState(false)
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
-  const [filter, setFilter] = useState('')
   // idioma aberto no accordion (só um por vez); null = todos fechados
   const [openLang, setOpenLang] = useState<string | null>(null)
 
@@ -93,21 +92,26 @@ export function ExtraSearchSection() {
     void loadIndexers()
   }, [])
 
-  // liga/desliga um indexer para um (idioma, variante)
-  function toggle(lang: string, variant: string, id: string) {
+  // troca a lista de indexers de um (idioma, variante). Lista vazia sai do
+  // objeto (o backend também a descarta) para o resumo contar só regra ativa.
+  function setRule(lang: string, variant: string, ids: string[]) {
     setRules((prev) => {
       const next: ExtraSearchRules = structuredClone(prev)
       const langRules = next[lang] ?? (next[lang] = {})
-      const list = langRules[variant] ?? []
-      langRules[variant] = list.includes(id) ? list.filter((x) => x !== id) : [...list, id]
-      if (langRules[variant].length === 0) delete langRules[variant]
+      if (ids.length) langRules[variant] = ids
+      else delete langRules[variant]
       if (Object.keys(langRules).length === 0) delete next[lang]
       return next
     })
   }
 
-  const isOn = (lang: string, variant: string, id: string) =>
-    (rules[lang]?.[variant] ?? []).includes(id)
+  // Sem lista de indexers (Jackett fora do ar, ou nenhum configurado) as
+  // regras SALVAS ainda aparecem: é o único jeito de ver e tirar um indexer
+  // que sumiu do Jackett. Olha cfg.rules (o que veio do banco), não o estado
+  // editado — senão remover o último esconderia o botão de salvar.
+  const hasSaved = Object.keys(cfg?.rules ?? {}).length > 0
+  const showRules = !!cfg && ((indexers?.length ?? 0) > 0
+    || ((indexers !== null || idxError !== null) && hasSaved))
 
   // nº de variantes com pelo menos um indexer marcado, para o resumo do idioma fechado
   const langSummary = (lang: string) => {
@@ -160,34 +164,19 @@ export function ExtraSearchSection() {
         <Empty>Nenhum indexer configurado no Jackett.</Empty>
       )}
 
-      {cfg && indexers && indexers.length > 0 && (
+      {cfg && showRules && (
         <div className="mt-4 flex flex-col gap-4">
-          <div className="relative max-w-xs">
-            <Search width={14} height={14} className="absolute top-1/2 left-3 -translate-y-1/2 text-zinc-500" />
-            <input
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              placeholder="Filtrar indexers (nome ou idioma, ex.: pt)..."
-              className="w-full rounded-lg border border-zinc-700 bg-zinc-900 py-1.5 pr-8 pl-9 text-sm outline-none focus:border-blue-500"
-            />
-            {filter && (
-              <button
-                onClick={() => setFilter('')}
-                className="absolute top-1/2 right-2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
-                title="Limpar"
-              >
-                <Xmark width={14} height={14} />
-              </button>
-            )}
-          </div>
           {cfg.languages.map((lang) => {
             const open = openLang === lang.code
             const count = langSummary(lang.code)
             return (
-              <div key={lang.code} className="overflow-hidden rounded-xl border border-zinc-700 bg-zinc-900">
+              // sem overflow-hidden: a lista do "+ adicionar" sai para fora do card
+              <div key={lang.code} className="rounded-xl border border-zinc-700 bg-zinc-900">
                 <button
                   onClick={() => setOpenLang(open ? null : lang.code)}
-                  className="flex w-full items-center gap-2 px-4 py-3 text-left hover:bg-zinc-800/50"
+                  className={`flex w-full items-center gap-2 px-4 py-3 text-left hover:bg-zinc-800/50 ${
+                    open ? 'rounded-t-xl' : 'rounded-xl'
+                  }`}
                 >
                   {open ? <NavArrowDown width={16} height={16} /> : <NavArrowRight width={16} height={16} />}
                   <span className="flex-1 font-semibold">{lang.label}</span>
@@ -199,53 +188,18 @@ export function ExtraSearchSection() {
                 </button>
                 {open && (
                   <div className="flex flex-col gap-4 border-t border-zinc-800 p-4">
-                    {cfg.variants.map((variant) => {
-                      // mostra os que batem no filtro + os já selecionados (para não sumirem)
-                      const q = filter.trim().toLowerCase()
-                      const visible = indexers.filter(
-                        (idx) =>
-                          isOn(lang.code, variant, idx.id) ||
-                          !q ||
-                          idx.name.toLowerCase().includes(q) ||
-                          (idx.language ?? '').toLowerCase().includes(q) ||
-                          idx.id.toLowerCase().includes(q),
-                      )
-                      return (
-                        <div key={variant}>
-                          <div className="mb-1.5 text-sm text-zinc-300">
-                            {VARIANT_LABEL[variant] ?? variant}
-                          </div>
-                          <div className="flex flex-wrap gap-1.5">
-                            {visible.length === 0 && (
-                              <span className="text-xs text-zinc-600">nenhum indexer com esse filtro</span>
-                            )}
-                            {visible.map((idx) => {
-                              const on = isOn(lang.code, variant, idx.id)
-                              return (
-                                <button
-                                  key={idx.id}
-                                  onClick={() => toggle(lang.code, variant, idx.id)}
-                                  className={`rounded-lg border px-2.5 py-1 text-xs transition-colors ${
-                                    on
-                                      ? 'border-blue-500 bg-blue-600 font-semibold text-white'
-                                      : 'border-zinc-700 bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
-                                  }`}
-                                  title={`${idx.id}${idx.language ? ` · ${idx.language}` : ''}`}
-                                >
-                                  {on && <Check width={11} height={11} className="mr-1 inline" />}
-                                  {idx.name}
-                                  {idx.language && (
-                                    <span className={`ml-1 ${on ? 'text-blue-200' : 'text-zinc-500'}`}>
-                                      {idx.language}
-                                    </span>
-                                  )}
-                                </button>
-                              )
-                            })}
-                          </div>
+                    {cfg.variants.map((variant) => (
+                      <div key={variant}>
+                        <div className="mb-1.5 text-sm text-zinc-300">
+                          {VARIANT_LABEL[variant] ?? variant}
                         </div>
-                      )
-                    })}
+                        <IndexerChips
+                          selected={rules[lang.code]?.[variant] ?? []}
+                          indexers={indexers}
+                          onChange={(ids) => setRule(lang.code, variant, ids)}
+                        />
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
@@ -267,6 +221,214 @@ export function ExtraSearchSection() {
         </div>
       )}
     </section>
+  )
+}
+
+// Indexers de uma regra de busca extra, no molde do MarkerChips: só os
+// escolhidos aparecem, cada um com "×", e "+ adicionar" abre a lista dos que
+// faltam, com filtro. Antes eram todos os indexers do Jackett (~30) como
+// chips, os ligados em azul, vezes três regras por idioma: poluição demais
+// para ver o que estava ligado.
+// A ordem da lista é a ordem em que as buscas são montadas
+// (services/jobs/search.py), por isso o novo entra sempre no fim.
+function IndexerChips({ selected, indexers, onChange }: {
+  selected: string[]
+  /** null = lista do Jackett indisponível (fora do ar): os chips ficam só com o
+   *  id, sem marcar como removido, e não dá para adicionar */
+  indexers: JackettIndexer[] | null
+  onChange: (ids: string[]) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const [active, setActive] = useState(0)
+  const wrap = useRef<HTMLDivElement>(null)
+  const addBtn = useRef<HTMLButtonElement>(null)
+  const input = useRef<HTMLInputElement>(null)
+  const list = useRef<HTMLUListElement>(null)
+  // fechar pelo teclado (Esc) devolve o foco ao "+ adicionar"; clicar fora, não
+  const refocus = useRef(false)
+  const listId = useId()
+
+  const byId = new Map((indexers ?? []).map((i) => [i.id, i]))
+  const q = query.trim().toLowerCase()
+  const options = (indexers ?? []).filter(
+    (idx) =>
+      !selected.includes(idx.id) &&
+      (!q ||
+        idx.name.toLowerCase().includes(q) ||
+        (idx.language ?? '').toLowerCase().includes(q) ||
+        idx.id.toLowerCase().includes(q)),
+  )
+  const cur = Math.min(active, options.length - 1)
+
+  // fecha ao clicar fora (mesmo padrão do ProcessMenu)
+  useEffect(() => {
+    if (!open) return
+    function onDown(e: MouseEvent) {
+      if (wrap.current && !wrap.current.contains(e.target as Node)) close(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
+
+  useEffect(() => {
+    if (!open && refocus.current) {
+      refocus.current = false
+      addBtn.current?.focus()
+    }
+  }, [open])
+
+  // o destacado (setas) sempre à vista na lista com rolagem
+  useEffect(() => {
+    if (open && cur >= 0) list.current?.children[cur]?.scrollIntoView({ block: 'nearest' })
+  }, [open, cur])
+
+  function close(withFocus: boolean) {
+    refocus.current = withFocus
+    setOpen(false)
+    setQuery('')
+    setActive(0)
+  }
+
+  function add(id: string) {
+    onChange([...selected, id])
+    setQuery('')
+    setActive(0)
+    // continua aberto: dá para adicionar vários seguidos
+    input.current?.focus()
+  }
+
+  const emptyText = !indexers?.length
+    ? 'Nenhum indexer configurado no Jackett.'
+    : q
+      ? 'Nenhum indexer com esse filtro.'
+      : 'Todos os indexers já estão nesta busca.'
+
+  return (
+    <div className="relative flex flex-wrap items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-800 p-2">
+      {selected.length === 0 && (
+        <span className="px-0.5 text-xs text-zinc-600">nenhum indexer, essa busca não roda</span>
+      )}
+      {selected.map((id) => {
+        const idx = byId.get(id)
+        // na regra salva, mas o Jackett não lista mais: a busca nele vai falhar
+        const missing = indexers !== null && !idx
+        return (
+          <span
+            key={id}
+            title={missing
+              ? `${id}: não está mais configurado no Jackett, a busca extra nele vai falhar. Remova, ou configure de novo no Jackett.`
+              : `${id}${idx?.language ? ` · ${idx.language}` : ''}`}
+            className={`flex items-center gap-1 rounded-md px-2 py-0.5 text-xs ${
+              missing ? 'bg-amber-950/60 text-amber-300 ring-1 ring-amber-800/70' : 'bg-zinc-700'
+            }`}
+          >
+            {missing && <WarningTriangle width={11} height={11} className="shrink-0" />}
+            {idx?.name ?? id}
+            {idx?.language && <span className="text-zinc-400">{idx.language}</span>}
+            {missing && <span className="text-amber-500/80">fora do Jackett</span>}
+            <button
+              onClick={() => onChange(selected.filter((x) => x !== id))}
+              className="text-zinc-400 hover:text-red-400"
+              title="Remover"
+              aria-label={`Remover ${idx?.name ?? id}`}
+            >
+              <Xmark width={11} height={11} />
+            </button>
+          </span>
+        )
+      })}
+
+      {/* sem position: a lista se ancora na caixa inteira (largura certa no celular) */}
+      <div ref={wrap}>
+        <button
+          ref={addBtn}
+          // sem roubar o foco do filtro: o clique só abre/fecha
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => (open ? close(true) : setOpen(true))}
+          disabled={indexers === null}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          title={indexers === null
+            ? 'Lista de indexers do Jackett indisponível: tente o botão Indexers'
+            : 'Adicionar indexer a esta busca'}
+          className={`flex items-center gap-0.5 rounded-md px-1.5 py-0.5 text-xs transition-colors disabled:opacity-40 ${
+            open ? 'bg-zinc-700 text-zinc-200' : 'text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200'
+          }`}
+        >
+          <Plus width={12} height={12} /> adicionar
+        </button>
+        {open && (
+          <div className="absolute top-full left-0 z-30 mt-1 w-full max-w-sm overflow-hidden rounded-xl border border-zinc-700 bg-zinc-900 shadow-xl">
+            <div className="relative border-b border-zinc-800">
+              <Search width={14} height={14} className="absolute top-1/2 left-3 -translate-y-1/2 text-zinc-500" />
+              <input
+                ref={input}
+                autoFocus
+                value={query}
+                onChange={(e) => {
+                  setQuery(e.target.value)
+                  setActive(0)
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault()
+                    setActive(Math.min(cur + 1, options.length - 1))
+                  } else if (e.key === 'ArrowUp') {
+                    e.preventDefault()
+                    setActive(Math.max(cur - 1, 0))
+                  } else if (e.key === 'Enter') {
+                    e.preventDefault()
+                    if (cur >= 0) add(options[cur].id)
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault()
+                    close(true)
+                  } else if (e.key === 'Tab') {
+                    close(false)
+                  }
+                }}
+                role="combobox"
+                aria-expanded
+                aria-controls={listId}
+                aria-activedescendant={cur >= 0 ? `${listId}-${cur}` : undefined}
+                placeholder="Filtrar (nome ou idioma, ex.: pt)..."
+                className="w-full bg-transparent py-2 pr-3 pl-9 text-sm outline-none"
+              />
+            </div>
+            {options.length === 0 ? (
+              <div className="px-3 py-2.5 text-xs text-zinc-500">{emptyText}</div>
+            ) : (
+              <ul
+                ref={list}
+                id={listId}
+                role="listbox"
+                // clicar na lista não tira o foco do filtro (Enter/setas seguem valendo)
+                onMouseDown={(e) => e.preventDefault()}
+                className="max-h-64 overflow-auto py-1"
+              >
+                {options.map((idx, i) => (
+                  <li
+                    key={idx.id}
+                    id={`${listId}-${i}`}
+                    role="option"
+                    aria-selected={i === cur}
+                    onMouseEnter={() => setActive(i)}
+                    onClick={() => add(idx.id)}
+                    title={idx.id}
+                    className={`flex cursor-pointer items-baseline gap-1.5 px-3 py-1.5 text-sm ${
+                      i === cur ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-300'
+                    }`}
+                  >
+                    <span className="truncate">{idx.name}</span>
+                    {idx.language && <span className="shrink-0 text-xs text-zinc-500">{idx.language}</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
 
