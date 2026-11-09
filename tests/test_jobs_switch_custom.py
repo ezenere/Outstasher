@@ -54,10 +54,10 @@ class FakeQbit:
         self.added, self.deleted, self.untagged = [], [], []
 
     async def info_by_tag(self, tag):
-        # só a tag de VÍDEO tem torrent: responder o mesmo hash para as duas
-        # faria o código tratar como torrent compartilhado (dual áudio) e só
-        # tirar a tag, em vez de apagar
-        return [{"hash": "h0"}] if tag.endswith("video") else []
+        # só a tag de VÍDEO tem torrent; as tags do torrent vêm no campo
+        # `tags`, como no qBittorrent real — é por elas que a remoção sabe se
+        # ele serve a outro papel/job
+        return [{"hash": "h0", "tags": "dl-sw1-video"}] if tag.endswith("video") else []
 
     async def remove_tag(self, h, tag):
         self.untagged.append((h, tag))
@@ -120,7 +120,8 @@ def test_troca_limpa_torrent_antigo_que_ficou_com_a_tag(temp_db, monkeypatch):
     class DoisNaTag(FakeQbit):
         def __init__(self):
             super().__init__()
-            self.tagged = [{"hash": "velho1"}, {"hash": "velho2"}]
+            self.tagged = [{"hash": "velho1", "tags": "dl-sw1-audio"},
+                           {"hash": "velho2", "tags": "dl-sw1-audio"}]
 
         async def info_by_tag(self, tag):
             return self.tagged if tag.endswith("audio") else []
@@ -131,7 +132,7 @@ def test_troca_limpa_torrent_antigo_que_ficou_com_a_tag(temp_db, monkeypatch):
     async def go():
         await jobs.switch("sw1", "audio", custom={
             "url": "magnet:?xt=urn:btih:novo", "title": "Filme Exemplo Dublado"})
-        assert sorted(h for h, _ in qbit.untagged) == ["velho1", "velho2"]
+        # exclusivos do papel: saem inteiros (a tag vai junto)
         assert sorted(qbit.deleted) == ["velho1", "velho2"]
         # a UI já mostra o novo (0%, obtendo metadados), não o antigo em 88%
         p = job["progress"]["audio"]
@@ -148,7 +149,8 @@ def test_troca_preserva_torrent_compartilhado_com_o_outro_papel(temp_db, monkeyp
 
     class Compartilhado(FakeQbit):
         async def info_by_tag(self, tag):
-            return [{"hash": "dual"}]           # o mesmo nos dois papéis
+            # o mesmo nos dois papéis
+            return [{"hash": "dual", "tags": "dl-sw1-audio, dl-sw1-video"}]
 
     qbit = Compartilhado()
     monkeypatch.setattr(jobs.runtime, "_qbit", qbit)
@@ -169,7 +171,8 @@ def test_watchdog_nao_apaga_torrent_dual_audio(temp_db, monkeypatch):
 
     class Dual(FakeQbit):
         async def info_by_tag(self, tag):
-            return [{"hash": "dual", "name": "release dual áudio"}]
+            return [{"hash": "dual", "name": "release dual áudio",
+                     "tags": "dl-sw1-audio, dl-sw1-video"}]
 
     qbit = Dual()
     monkeypatch.setattr(jobs.runtime, "_qbit", qbit)
@@ -204,15 +207,17 @@ def test_escolher_outro_na_pausa_descarta_o_torrent_anterior(temp_db, monkeypatc
     class PorPapel(FakeQbit):
         async def info_by_tag(self, tag):
             if tag.endswith("audio"):
-                return [{"hash": "audio_velho", "name": "áudio velho"}]
-            return [{"hash": "video_ok", "name": "vídeo escolhido"}]
+                return [{"hash": "audio_velho", "name": "áudio velho",
+                         "tags": "dl-sw1-audio"}]
+            return [{"hash": "video_ok", "name": "vídeo escolhido",
+                     "tags": "dl-sw1-video"}]
 
     qbit = PorPapel()
     monkeypatch.setattr(jobs.runtime, "_qbit", qbit)
 
     asyncio.run(downloads._start_download(job, audio_novo, video))
-    # o áudio anterior saiu (tag + torrent); o vídeo, que não mudou, ficou
-    assert qbit.untagged == [("audio_velho", "dl-sw1-audio")]
+    # o áudio anterior saiu (inteiro: era só dele); o vídeo, que não mudou, ficou
+    assert qbit.untagged == []
     assert qbit.deleted == ["audio_velho"]
     assert sorted(u for u, _ in qbit.added) == ["magnet:?xt=urn:btih:a1",
                                                 "magnet:?xt=urn:btih:v0"]

@@ -17,28 +17,79 @@ from services.jobs.runtime import (
     _set, _tag, poll_interval)
 
 
-async def _drop_tagged(job: dict, kind: str):
-    """Tira a tag deste papel de todo torrent que ainda a carrega e apaga os
-    que não servem a OUTRO papel (release dual áudio serve aos dois: perde só
-    a tag). Usado quando o torrent do papel é substituído — pela troca durante
-    o download ou por uma nova escolha depois da pausa."""
-    tag = _tag(job, kind)
-    torrents = await runtime._qbit.info_by_tag(tag)
-    if not torrents:
-        return
-    shared: set[str] = set()
-    for other in _needed_torrents(job):
-        if other != kind:
-            shared |= {t.get("hash") for t in
-                       await runtime._qbit.info_by_tag(_tag(job, other))}
-    for t in torrents:
-        h = t.get("hash")
+def _split_tags(tags: str | None) -> set[str]:
+    """Campo `tags` do qBittorrent ("a, b") como conjunto."""
+    return {x.strip() for x in (tags or "").split(",") if x.strip()}
+
+
+async def _release_tagged(qbit, job: dict, tag: str, live=(),
+                          delete_files: bool = True) -> list[dict]:
+    """Solta deste job cada torrent do qBittorrent que carrega `tag` — a regra
+    ÚNICA de remoção, de filme e de série: troca de torrent (manual ou do
+    watchdog), edição da seleção, limpeza do fim do job e do cancel.
+
+    O torrent só sai do qBittorrent (com os dados, se delete_files) quando não
+    serve a mais ninguém. Serve ainda a ESTE job se carrega uma tag de `live`:
+    o release DUAL escolhido para os dois papéis é UM torrent com as duas
+    tags. Serve a OUTRO job se carrega qualquer tag que não é deste: dois jobs
+    pedindo o mesmo release dividem o torrent (409 no add = a tag do outro no
+    mesmo hash) — e tag posta à mão no qBittorrent também segura, na dúvida
+    não se apaga dado de ninguém. Nesses casos saem só as tags deste job que
+    não valem mais; a compartilhada dl-<job> fica enquanto um torrent vivo do
+    job a usa (é por ela que o watchdog de série consulta). Caso real: trocar
+    o pack dublado apagava do disco o pack DUAL que o original usava.
+
+    `qbit` vem de quem chama: séries usam a referência da fachada
+    (jobs._qbit), filmes a do runtime — cada lado é trocado assim nos testes.
+
+    Devolve um resumo por torrent: {hash, name, deleted, serves, foreign} —
+    serves é None quando apagado, "job" (outro papel/torrent deste job) ou
+    "other" (tag de fora: foreign)."""
+    base = f"dl-{job['id']}"
+    live = set(live)
+    out: list[dict] = []
+    for info in await qbit.info_by_tag(tag):
+        h = info.get("hash")
         if not h:
             continue
-        await runtime._qbit.remove_tag(h, tag)
-        if h not in shared:
-            await runtime._qbit.delete(h, delete_files=True)
-            _event(job, "qbit", f"Torrent anterior de {kind} descartado: {t.get('name')}")
+        tags = _split_tags(info.get("tags")) | {tag}
+        ours = {x for x in tags if x == base or x.startswith(base + "-")}
+        vivos = ours & live
+        foreign = tags - ours
+        r = {"hash": h, "name": info.get("name"), "deleted": False,
+             "serves": "job" if vivos else ("other" if foreign else None),
+             "foreign": sorted(foreign)}
+        if r["serves"]:
+            drop = ours - vivos - ({base} if vivos else set())
+            if drop:
+                await qbit.remove_tag(h, ",".join(sorted(drop)))
+        else:
+            await qbit.delete(h, delete_files=delete_files)
+            r["deleted"] = True
+        out.append(r)
+    return out
+
+
+def _why_kept(r: dict, same_job: str) -> str:
+    """Por que _release_tagged deixou o torrent no qBittorrent (para o log)."""
+    if r["serves"] == "job":
+        return same_job
+    return f"outro job ({', '.join(r['foreign'])})"
+
+
+async def _drop_tagged(job: dict, kind: str):
+    """Solta deste papel todo torrent que ainda carrega a tag dele — apaga o
+    que não serve a OUTRO papel nem a outro job (_release_tagged). Usado
+    quando o torrent do papel é substituído — pela troca durante o download
+    ou por uma nova escolha depois da pausa."""
+    live = {_tag(job, o) for o in _needed_torrents(job) if o != kind}
+    for r in await _release_tagged(runtime._qbit, job, _tag(job, kind), live):
+        if r["deleted"]:
+            _event(job, "qbit", f"Torrent anterior de {kind} descartado: {r['name']}")
+        else:
+            _event(job, "qbit",
+                   f"Torrent anterior de {kind} fica no qBittorrent — também "
+                   f"serve a {_why_kept(r, 'o outro papel deste job')}: {r['name']}")
 
 
 async def _start_download(job: dict, a: dict | None, v: dict | None):
@@ -288,8 +339,9 @@ async def _replace_torrent(job: dict, kind: str, current: dict | None, nxt: dict
     tag = _tag(job, kind)
     # limpa a tag inteira (não só o `current` que o chamador viu): torrent
     # antigo que sobra com a tag mantém a UI presa no download velho. Só o que
-    # CARREGA a tag é apagado — um torrent que já a perdeu não é mais deste
-    # papel, e apagá-lo poderia derrubar o download do outro
+    # CARREGA a tag sai — um torrent que já a perdeu não é mais deste papel —
+    # e, dos que a carregam, o que serve ao outro papel ou a outro job perde
+    # só a tag
     await _drop_tagged(job, kind)
     save_path = job.get("torrent_save_path") or config.QBIT_SAVE_PATH or None
     await runtime._qbit.add(nxt.get("magnet") or nxt["link"], tag, save_path)

@@ -208,13 +208,19 @@ async def cancel(job_id: str, delete_torrents: bool = False) -> dict | None:
         # limpeza no qBittorrent com teto de tempo: se ele estiver fora do ar,
         # a remoção do job NÃO pode ficar travada esperando o timeout de rede.
         # Série: todos os torrents do job carregam a tag compartilhada dl-{id};
-        # filme: uma tag por papel (video/audio).
+        # filme: uma tag por papel (video/audio). Torrent que outro job também
+        # usa perde só as tags deste (downloads._release_tagged).
         tags = ([f"dl-{job['id']}"] if job.get("media_type") == "tv"
                 else [_tag(job, k) for k in ("video", "audio")])
         for tag in tags:
             try:
-                await asyncio.wait_for(
-                    runtime._qbit.delete_by_tag(tag, delete_files=True), timeout=10)
+                for r in await asyncio.wait_for(
+                        downloads._release_tagged(runtime._qbit, job, tag),
+                        timeout=10):
+                    if not r["deleted"]:
+                        _event(job, "qbit",
+                               f"Torrent fica no qBittorrent — também serve a "
+                               f"{downloads._why_kept(r, 'este job')}: {r['name']}")
             except (Exception, asyncio.TimeoutError) as e:  # noqa: BLE001
                 reason = "sem resposta (qBittorrent fora do ar?)" if isinstance(
                     e, asyncio.TimeoutError) else str(e)

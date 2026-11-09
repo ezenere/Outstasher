@@ -1392,47 +1392,37 @@ async def _drop_sent(job: dict, removed: list[dict], plan: list[dict]):
     confirma antes, avisando que os arquivos vão junto. O mesmo torrent
     servindo a OUTRO torrent do plano (pack DUAL nos dois papéis) ou a outro
     job (409 no add = tag do outro no mesmo torrent) perde só as tags que
-    não valem mais."""
+    não valem mais (jobs.downloads._release_tagged)."""
     if not removed:
         return
-    shared = shared_tag(job)
     live = {t["tag"] for t in plan}
     for t in removed:
         try:
-            infos = await asyncio.wait_for(
-                jobs._qbit.info_by_tag(t["tag"]), timeout=15)
-            for info in infos:
-                h = info.get("hash")
-                if not h:
-                    continue
-                tags = {x.strip() for x in (info.get("tags") or "").split(",")
-                        if x.strip()}
-                ours = {x for x in tags
-                        if x == shared or x.startswith(shared + "-t")}
-                vivos = ours & live
-                if vivos or tags - ours:
-                    drop = ours - vivos - ({shared} if vivos else set())
-                    if drop:
-                        await asyncio.wait_for(jobs._qbit.remove_tag(
-                            h, ",".join(sorted(drop))), timeout=15)
-                    quem = "outro torrent deste job" if vivos else "outro job"
-                    jobs._event(job, "qbit",
-                                f"t{t['n']} saiu do plano — o torrent fica no "
-                                f"qBittorrent porque também serve a {quem}: "
-                                f"{t['title']}")
-                else:
-                    await asyncio.wait_for(
-                        jobs._qbit.delete(h, delete_files=True), timeout=15)
-                    jobs._event(job, "qbit",
-                                f"🗑️ t{t['n']} saiu do plano — removido do "
-                                f"qBittorrent com os dados baixados: "
-                                f"{t['title']}")
+            await asyncio.wait_for(
+                _release_entry(job, t, live, "saiu do plano"), timeout=30)
         except (asyncio.TimeoutError, *jobs._CONN_ERRORS) as e:
             reason = (f"{type(e).__name__}: {e}" if str(e)
                       else type(e).__name__)
             raise ValueError(
                 f"O qBittorrent não respondeu ao remover t{t['n']} "
                 f"({reason}) — a seleção não foi aplicada; tente de novo") from e
+
+
+async def _release_entry(job: dict, t: dict, live: set[str], why: str):
+    """Solta do qBittorrent o torrent da entrada `t` (achado pela tag dela),
+    pela regra única de remoção: apagado com os dados só se nenhuma tag de
+    `live` (outro torrent do plano) nem de outro job o usa. Erro de conexão
+    sobe para quem chama."""
+    for r in await jobs.downloads._release_tagged(jobs._qbit, job, t["tag"], live):
+        if r["deleted"]:
+            jobs._event(job, "qbit",
+                        f"🗑️ t{t['n']} {why} — removido do qBittorrent com os "
+                        f"dados baixados: {t['title']}")
+        else:
+            quem = jobs.downloads._why_kept(r, "outro torrent deste job")
+            jobs._event(job, "qbit",
+                        f"t{t['n']} {why} — o torrent fica no qBittorrent "
+                        f"porque também serve a {quem}: {t['title']}")
 
 
 # -------------------- download --------------------
@@ -1713,24 +1703,39 @@ def _find_replacement(job: dict, t: dict) -> dict | None:
 
 
 async def _replace_entry(job: dict, t: dict, nxt: dict, reason: str):
-    """Substitui o torrent do plano por `nxt`: remove o antigo do qBittorrent
-    (com os dados), atualiza a entrada in place (mesma tag — o watchdog zera o
-    relógio quando o hash muda) e adiciona o novo."""
-    if t.get("hash"):
-        try:
-            await jobs._qbit.delete(t["hash"], delete_files=True)
-        except jobs._CONN_ERRORS:
-            pass
+    """Substitui o torrent do plano por `nxt`: solta o antigo do qBittorrent,
+    atualiza a entrada in place (mesma tag — o watchdog zera o relógio quando
+    o hash muda) e adiciona o novo.
+
+    O antigo sai pela regra única de remoção (_release_entry), não por hash:
+    apagado com os dados só se não serve a mais ninguém. Pack DUAL escolhido
+    para original e dublado é UM torrent com as tags dos dois — trocar o
+    dublado apagava do disco o pack que o original usava; agora ele perde só
+    a tag do dublado (idem torrent que outro job também usa). Sai ANTES do
+    novo entrar — com a mesma tag, o novo seria achado junto. Sem resposta do
+    qBittorrent ao soltar o antigo, o erro sobe antes de a entrada mudar: o
+    watchdog tenta de novo no próximo tick, a troca manual avisa que não
+    aplicou."""
+    live = {x["tag"] for x in job["torrents"] if x is not t}
+    await _release_entry(job, t, live, "trocado")
     t.update(title=nxt["title"], tracker=nxt.get("tracker"),
              seeders=nxt.get("seeders"), size=nxt.get("size"),
              quality=nxt.get("quality"), magnet=nxt.get("magnet"),
              link=nxt.get("link"), infohash=nxt.get("infohash"),
              coverage_label=nxt.get("coverage"),
              hash=None, selected_files=None, progress=None)
-    save_path = job.get("torrent_save_path") or config.QBIT_SAVE_PATH or None
-    await jobs._qbit.add(nxt.get("magnet") or nxt["link"],
-                         f"{shared_tag(job)},{t['tag']}", save_path)
     jobs._event(job, "qbit", f"{reason}: {nxt['title']}")
+    save_path = job.get("torrent_save_path") or config.QBIT_SAVE_PATH or None
+    try:
+        await jobs._qbit.add(nxt.get("magnet") or nxt["link"],
+                             f"{shared_tag(job)},{t['tag']}", save_path)
+    except jobs._CONN_ERRORS as e:
+        # o antigo já saiu: a troca vale. O watchdog não acha a tag e
+        # reinsere o novo depois da janela de metadados (_readd)
+        jobs._event(job, "qbit",
+                    f"⚠️ t{t['n']}: o qBittorrent não aceitou o novo agora "
+                    f"({type(e).__name__}) — o watchdog o reinsere se não "
+                    f"aparecer")
     jobs._persist(job)
 
 
@@ -1784,7 +1789,12 @@ async def switch_torrent(job_id: str, torrent_n: int,
             raise ValueError(
                 "O título do candidato não cobre: " + ", ".join(missing)
                 + " — use a edição manual para atribuir episódios diferentes")
-    await _replace_entry(job, t, nxt, f"🔁 Troca manual em t{t['n']}")
+    try:
+        await _replace_entry(job, t, nxt, f"🔁 Troca manual em t{t['n']}")
+    except jobs._CONN_ERRORS as e:
+        reason = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+        raise ValueError(f"O qBittorrent não respondeu ({reason}) — a troca "
+                         f"de t{t['n']} não foi aplicada; tente de novo") from e
     return jobs._public(job)
 
 
