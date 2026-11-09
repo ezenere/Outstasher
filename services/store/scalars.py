@@ -80,6 +80,10 @@ _JOB_COLUMNS = (
     # em que etapa o merge PAROU (ver _enc_progress): fase + qual arquivo o
     # fingerprint lia — não a barra
     ("merge_phase", "TEXT"), ("merge_step", "INTEGER"), ("merge_label", "TEXT"),
+    # troca automática de torrent travado: override de cada papel do filme
+    # (services/stall_switch; NULL = herda a global)
+    ("stall_mode_video", "TEXT"), ("stall_mode_audio", "TEXT"),
+    ("stall_minutes_video", "INTEGER"), ("stall_minutes_audio", "INTEGER"),
 )
 _JCOLS = tuple(c for c, _ in _JOB_COLUMNS)
 
@@ -473,6 +477,11 @@ _PLAIN_SPECS = (
     ("_rematch_done", "rematch_done", "b"),
     ("force_continue", "force_continue", "b"),
     ("rematch_attempts", "rematch_attempts", "i"))
+# override da troca automática por papel do filme (chave = coluna). Ausente no
+# job = herda a global — o bit em `keys` diferencia de um None gravado
+_STALL_SPECS = tuple((f"stall_{w}_{role}", f"stall_{w}_{role}", t)
+                     for w, t in (("mode", "s"), ("minutes", "i"))
+                     for role in ("video", "audio"))
 
 # chave do job -> (codec de ida, de volta). A ORDEM define o bit da chave em
 # `keys`: só se acrescenta no fim, nunca se reordena.
@@ -495,6 +504,7 @@ _CODECS: dict = {
     "known_seasons": (_enc_known_seasons, _dec_known_seasons),
     "episode_groups": (_enc_episode_groups, _dec_episode_groups),
     "drift_confirm": (_enc_drift, _dec_drift),
+    **{k: _plain(k, col, t) for k, col, t in _STALL_SPECS},
 }
 _MASK_KEYS = tuple(_CODECS)
 _MASK_BIT = {k: 1 << i for i, k in enumerate(_MASK_KEYS)}
@@ -552,7 +562,7 @@ def _shared_view(shared: dict) -> tuple[dict, dict]:
 
 # chave simples -> (coluna, é bool?): decodificadas sem chamar função, porque
 # a listagem decodifica centenas de linhas por consulta
-_PLAIN_COLS = {k: (col, t == "b") for k, col, t in _PLAIN_SPECS}
+_PLAIN_COLS = {k: (col, t == "b") for k, col, t in _PLAIN_SPECS + _STALL_SPECS}
 _PLAIN_COLS["media_type"] = ("media_type", False)
 _plans: dict[int, tuple] = {}
 

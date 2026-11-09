@@ -9,7 +9,7 @@ import {
   api, changePassword, convertSummary, del, post, put, VARIANT_LABEL,
   type ConvertOptions, type ConvertPreset, type Destination, type ExtraSearchConfig,
   type ExtraSearchRules, type JackettIndexer, type LanguageConfig, type LanguageEntry,
-  type TorrentTarget,
+  type StallSwitchConfig, type TorrentTarget,
 } from '../api'
 import { DiskBar, Empty } from '../components/ui'
 import { useDialog } from '../components/Dialog'
@@ -1116,7 +1116,97 @@ export function TorrentTargetsSection() {
           </div>
         ))}
       </div>
+      <StallSwitchSection />
     </section>
+  )
+}
+
+// ---------------- troca automática de torrent travado ----------------
+
+const STALL_FIELDS: { key: 'minutes' | 'stalled_minutes' | 'metadata_minutes'; label: string; hint: string }[] = [
+  { key: 'minutes', label: 'Sem progresso', hint: 'baixando, mas sem avançar' },
+  { key: 'stalled_minutes', label: 'Sem fontes', hint: 'stalledDL: ninguém enviando agora — costuma voltar sozinho' },
+  { key: 'metadata_minutes', label: 'Buscando metadados', hint: 'metaDL: magnet ainda sem a lista de arquivos' },
+]
+
+function StallSwitchSection() {
+  const [cfg, setCfg] = useState<StallSwitchConfig | null>(null)
+  const [defaults, setDefaults] = useState<StallSwitchConfig | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  useEffect(() => {
+    api<{ config: StallSwitchConfig; defaults: StallSwitchConfig }>('/api/stall-switch')
+      .then((r) => { setCfg(r.config); setDefaults(r.defaults) })
+      .catch((e) => setMsg({ ok: false, text: (e as Error).message }))
+  }, [])
+
+  async function save() {
+    if (!cfg) return
+    setSaving(true)
+    setMsg(null)
+    try {
+      const r = await put<{ ok: boolean; config: StallSwitchConfig }>('/api/stall-switch', { config: cfg })
+      setCfg(r.config)
+      setMsg({ ok: true, text: 'Salvo. Vale já no próximo ciclo dos downloads em andamento.' })
+    } catch (e) {
+      setMsg({ ok: false, text: (e as Error).message })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="mt-8 max-w-2xl">
+      <h2 className="mb-1 font-semibold">Troca automática de torrent travado</h2>
+      <p className="mb-3 text-sm text-zinc-500">
+        Torrent que fica sem progresso por este tempo é trocado sozinho pelo próximo candidato
+        reserva (filme: do mesmo corte; série: que cubra os mesmos episódios). Cada torrent pode
+        herdar, ligar ou desligar na tela do job. Os limites de <b>sem fontes</b> e <b>buscando
+        metadados</b> nunca ficam abaixo do de <b>sem progresso</b>.
+      </p>
+      {!cfg ? (
+        <div className="text-sm text-zinc-500">{msg?.text ?? 'Carregando…'}</div>
+      ) : (
+        <>
+          <label className="flex items-center gap-2 text-sm text-zinc-300">
+            <input type="checkbox" checked={cfg.enabled}
+              onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })} />
+            Trocar automaticamente torrent travado
+          </label>
+          <div className={`mt-3 grid gap-3 sm:grid-cols-3 ${cfg.enabled ? '' : 'opacity-50'}`}>
+            {STALL_FIELDS.map((f) => (
+              <label key={f.key} className="text-sm" title={f.hint}>
+                <span className="text-zinc-400">{f.label} (min)</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={cfg[f.key]}
+                  disabled={!cfg.enabled}
+                  onChange={(e) => setCfg({ ...cfg, [f.key]: Number(e.target.value) })}
+                  className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm tabular-nums outline-none focus:border-blue-500"
+                />
+                <span className="mt-0.5 block text-xs text-zinc-600">{f.hint}</span>
+              </label>
+            ))}
+          </div>
+          {defaults && (
+            <p className="mt-2 text-xs text-zinc-600">
+              Padrão do .env (STALL_TIMEOUT_MINUTES): {defaults.enabled
+                ? `ligada, ${defaults.minutes} / ${defaults.stalled_minutes} / ${defaults.metadata_minutes} min`
+                : 'desligada'} — vale enquanto nada for salvo aqui.
+            </p>
+          )}
+          <div className="mt-4 flex items-center gap-3">
+            <button onClick={save} disabled={saving}
+              className="rounded-lg bg-blue-600 px-4 py-1.5 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50">
+              {saving ? 'Salvando…' : 'Salvar'}
+            </button>
+            {msg && <span className={`text-sm ${msg.ok ? 'text-emerald-400' : 'text-red-400'}`}>{msg.text}</span>}
+          </div>
+        </>
+      )}
+    </div>
   )
 }
 

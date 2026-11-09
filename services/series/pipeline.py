@@ -24,7 +24,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 import config
-from services import candidates, jackett, jobs, store, tmdb, transcode
+from services import candidates, jackett, jobs, stall_switch, store, tmdb, transcode
 from services import selector
 from services.series import parse, selector_tv, subs
 
@@ -1470,8 +1470,13 @@ async def _wait_downloads(job: dict):
     """Watchdog: UMA consulta por tick (tag compartilhada), demultiplexada por
     torrent. Mesmas regras do pipeline de filmes: conexão perdida nunca falha o
     job, stall estado-dependente, torrent sumido é reinserido; e as novidades
-    de série: seleção de arquivos em packs e force_continue."""
+    de série: seleção de arquivos em packs e force_continue.
+
+    A troca automática segue a política global com o override de cada
+    torrent (services/stall_switch), relidos a cada tick; o relógio de cada
+    um vai para a tela do job (runtime.stall_publish)."""
     pending = lambda: [t for t in job["torrents"] if t["state"] == "downloading"]  # noqa: E731
+    jobs.runtime.stall_forget(job)   # de um watchdog anterior (gate, restart)
     stall = {t["n"]: {"pct": -1.0, "since": time.monotonic(), "warned": False,
                       "hash": None} for t in job["torrents"]}
     missing = {t["n"]: None for t in job["torrents"]}
@@ -1483,6 +1488,7 @@ async def _wait_downloads(job: dict):
         if job.get("force_continue"):
             _apply_force_continue(job)
             break
+        policy = stall_switch.get()
         try:
             infos = await jobs._qbit.info_by_tag(shared_tag(job))
             if conn_lost:
@@ -1500,6 +1506,7 @@ async def _wait_downloads(job: dict):
             for t in pending():
                 info = by_tag.get(t["tag"])
                 if info is None:
+                    jobs.runtime.stall_forget(job, t["n"])
                     if missing[t["n"]] is None:
                         missing[t["n"]] = time.monotonic()
                         jobs._event(job, "qbit",
@@ -1522,6 +1529,7 @@ async def _wait_downloads(job: dict):
                     "downloaded": info.get("completed", 0),
                 }
                 if pct >= 1:
+                    jobs.runtime.stall_forget(job, t["n"])
                     t["state"] = "done"
                     t["content_path"] = info.get("content_path")
                     jobs._event(job, "qbit",
@@ -1532,12 +1540,13 @@ async def _wait_downloads(job: dict):
                 if info.get("hash") != st["hash"]:
                     st.update(hash=info.get("hash"), pct=-1.0,
                               since=time.monotonic(), warned=False)
-                limit_min = jobs._stall_limit_minutes(state)
+                limit_min = stall_switch.limit_minutes(
+                    policy, state, t.get("stall_mode"), t.get("stall_minutes"))
                 if state in ("stoppedDL", "pausedDL"):
                     st.update(since=time.monotonic(), warned=False)
                 elif pct > st["pct"] + 1e-4:
                     st.update(pct=pct, since=time.monotonic(), warned=False)
-                elif (config.STALL_TIMEOUT_MINUTES > 0
+                elif (limit_min is not None
                       and time.monotonic() - st["since"] > limit_min * 60):
                     if await _switch_stalled(job, t, limit_min):
                         st.update(pct=-1.0, since=time.monotonic(), warned=False)
@@ -1546,12 +1555,17 @@ async def _wait_downloads(job: dict):
                                     f"⚠️ t{t['n']} sem progresso há {limit_min} "
                                     f"min e sem reserva — seguindo esperando")
                         st["warned"] = True
+                jobs.runtime.stall_publish(
+                    job, t["n"], st["since"], limit_min,
+                    paused=state in ("stoppedDL", "pausedDL"),
+                    no_backup=st["warned"])
             job["detail"] = _download_detail(job)
             # cobertura encolheu pelos arquivos reais e sobrou episódio sem
             # ninguém? pausa no gate de lacunas (os torrents seguem baixando
             # no qBittorrent — só o watchdog para até a decisão)
             if not job.get("_gaps_accepted") and _collect_gaps(job):
                 gaps = _collect_gaps(job)
+                jobs.runtime.stall_forget(job)
                 _gate(job, "gaps_confirm", None,
                       f"⚠️ {len(gaps)} episódio(s) ficaram sem torrent (o pack "
                       f"não os contém) — decidir antes de continuar")
@@ -1569,6 +1583,7 @@ async def _wait_downloads(job: dict):
         if pending():
             await asyncio.sleep(jobs.poll_interval())
 
+    jobs.runtime.stall_forget(job)
     await _resolve_episode_files(job)
     await _after_download(job)
 

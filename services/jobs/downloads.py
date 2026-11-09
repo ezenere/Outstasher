@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 import config
-from services import candidates
+from services import candidates, stall_switch
 from services.jobs import runtime
 from services.jobs.runtime import (
     VIDEO_EXTENSIONS, _CONN_ERRORS, _event, _map_qbit_path, _needed_torrents,
@@ -164,21 +164,6 @@ async def _resolve_video_file(job: dict, content_path: str, kind: str) -> Path:
     return await asyncio.to_thread(_find_video_file, job, content_path)
 
 
-def _stall_limit_minutes(state: str) -> int:
-    """Timeout de stall conforme o estado do torrent.
-
-    metaDL (ainda buscando metadados do magnet) merece mais paciência: 30 min.
-    stalledDL (sem seed disponível AGORA) pode voltar sozinho: 2 h.
-    Os valores nunca ficam abaixo do STALL_TIMEOUT_MINUTES configurado.
-    """
-    s = state.lower()
-    if "metadl" in s:       # metaDL / forcedMetaDL
-        return max(config.STALL_TIMEOUT_MINUTES, 30)
-    if "stalleddl" in s:    # stalledDL
-        return max(config.STALL_TIMEOUT_MINUTES, 120)
-    return config.STALL_TIMEOUT_MINUTES
-
-
 async def _wait_downloads(job: dict) -> dict:
     """Espera os torrents necessários terminarem; watchdog troca torrent travado.
 
@@ -186,7 +171,18 @@ async def _wait_downloads(job: dict) -> dict:
     mantém o estado "baixando" e fica tentando reconectar. Torrent que sumiu
     do qBittorrent é reinserido automaticamente — só para de reinserir se o
     job for cancelado/excluído.
-    """
+
+    A troca automática segue a política global com o override de cada papel
+    (services/stall_switch), relidos a cada tick: ligar/desligar na tela vale
+    no próximo. O relógio de cada papel vai para a tela do job
+    (runtime.stall_publish)."""
+    try:
+        return await _watch_downloads(job)
+    finally:
+        runtime.stall_forget(job)
+
+
+async def _watch_downloads(job: dict) -> dict:
     needed = _needed_torrents(job)
     paths = {}
     stall = {k: {"pct": -1.0, "since": time.monotonic(), "warned": False, "hash": None}
@@ -203,6 +199,7 @@ async def _wait_downloads(job: dict) -> dict:
     # via _event, então nunca dependem deste relógio.
     last_persist = 0.0
     while len(paths) < len(needed):
+        policy = stall_switch.get()
         try:
             for kind in needed:
                 if kind in paths:
@@ -220,6 +217,7 @@ async def _wait_downloads(job: dict) -> dict:
                     for m_ in missing.values():
                         m_["since"] = None
                 if not torrents:
+                    runtime.stall_forget(job, kind)
                     miss = missing[kind]
                     if miss["since"] is None:
                         miss["since"] = time.monotonic()
@@ -252,6 +250,7 @@ async def _wait_downloads(job: dict) -> dict:
                     "downloaded": t.get("completed", 0),
                 }
                 if pct >= 1:
+                    runtime.stall_forget(job, kind)
                     paths[kind] = t["content_path"]
                     _event(job, "qbit", f"Download de {kind} concluído: {t['content_path']}")
                     continue
@@ -262,14 +261,16 @@ async def _wait_downloads(job: dict) -> dict:
                     # torrent trocado (watchdog ou troca manual): zera o relógio
                     st.update(hash=t.get("hash"), pct=-1.0,
                               since=time.monotonic(), warned=False)
-                limit_min = _stall_limit_minutes(state)
+                limit_min = stall_switch.limit_minutes(
+                    policy, state, job.get(f"stall_mode_{kind}"),
+                    job.get(f"stall_minutes_{kind}"))
                 if state in ("stoppedDL", "pausedDL"):
                     # usuário parou o torrent manualmente: não conta o tempo de
                     # stall (o relógio recomeça do zero quando ele retomar)
                     st.update(since=time.monotonic(), warned=False)
                 elif pct > st["pct"] + 1e-4:
                     st.update(pct=pct, since=time.monotonic(), warned=False)
-                elif (config.STALL_TIMEOUT_MINUTES > 0
+                elif (limit_min is not None
                       and time.monotonic() - st["since"] > limit_min * 60):
                     if await _switch_torrent(job, kind, t, limit_min):
                         st.update(pct=-1.0, since=time.monotonic(), warned=False)
@@ -279,6 +280,9 @@ async def _wait_downloads(job: dict) -> dict:
                                f"{limit_min} min e sem candidato reserva — "
                                f"continuando a esperar (cancele o job se quiser desistir)")
                         st["warned"] = True
+                runtime.stall_publish(job, kind, st["since"], limit_min,
+                                      paused=state in ("stoppedDL", "pausedDL"),
+                                      no_backup=st["warned"])
             # persiste o progresso no banco só de tempos em tempos (eventos
             # reais persistem via _event, com a janela de EVENT_PERSIST_SECONDS)
             if time.monotonic() - last_persist >= config.PROGRESS_PERSIST_SECONDS:

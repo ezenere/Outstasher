@@ -96,6 +96,40 @@ def poll_interval() -> float:
             else config.POLL_IDLE_INTERVAL_SECONDS)
 
 
+# relógio da troca automática de torrent travado, para a tela do job ("sem
+# progresso há 9 min — troca em 6 min"): job_id -> chave do torrent (papel do
+# filme / n da série) -> {since, limit_min, paused, no_backup}. Efêmero de
+# propósito: é o relógio do watchdog DESTE processo (monotonic), que num
+# restart recomeça do zero — gravá-lo no job só mostraria um tempo que não vale
+_stall_clocks: dict[str, dict[str, dict]] = {}
+
+
+def stall_publish(job: dict, key, since: float, limit_min: int | None,
+                  paused: bool = False, no_backup: bool = False):
+    """O watchdog publica, a cada tick, o relógio de um torrent baixando."""
+    _stall_clocks.setdefault(job["id"], {})[str(key)] = {
+        "since": since, "limit_min": limit_min, "paused": paused,
+        "no_backup": no_backup}
+
+
+def stall_forget(job: dict, key=None):
+    """Torrent concluído/sumido (key) ou watchdog encerrado (sem key)."""
+    if key is None:
+        _stall_clocks.pop(job["id"], None)
+    else:
+        _stall_clocks.get(job["id"], {}).pop(str(key), None)
+
+
+def stall_clocks(job: dict) -> dict[str, dict]:
+    """{chave: {idle_s, limit_s, paused, no_backup}} — idle calculado agora,
+    no relógio do servidor (o do navegador pode estar adiantado)."""
+    now = time.monotonic()
+    return {k: {"idle_s": int(now - c["since"]),
+                "limit_s": None if c["limit_min"] is None else c["limit_min"] * 60,
+                "paused": c["paused"], "no_backup": c["no_backup"]}
+            for k, c in _stall_clocks.get(job["id"], {}).items()}
+
+
 # fila de conversão: só 1 merge/entrega roda por vez (ffmpeg é pesado de CPU/IO).
 # lazy porque o event loop pode não existir no import.
 _merge_lock: asyncio.Lock | None = None

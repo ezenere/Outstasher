@@ -4,7 +4,7 @@ Cada tela da UI faz polling no seu ritmo, então cada função devolve SÓ o que
 aquela tela renderiza, em vez da lista completa de jobs.
 """
 
-from services import candidates, store
+from services import candidates, stall_switch, store
 from services.jobs import runtime
 from services.jobs.runtime import (
     _TERMINAL_STATUSES, _is_recompress, _jobs, _lookup, _needed_torrents,
@@ -35,7 +35,19 @@ def get_job(job_id: str) -> dict | None:
     # o evento "candidates" referencia a consulta; a lista que a lupa mostra
     # é resolvida aqui, a partir dos candidatos do job
     events = candidates.resolve_events(job, store.load_events(job_id))
-    return {**_public(job), "events": events, "search": candidates.search_view(job)}
+    return {**_public(job), "events": events, "search": candidates.search_view(job),
+            "stall": stall_view(job)}
+
+
+def stall_view(job: dict) -> dict | None:
+    """Troca automática de torrent travado, para a tela do job: a política
+    global (o "herdar" de cada torrent mostra o que herda) e o relógio do
+    watchdog por torrent — papel do filme / n da série: {idle_s, limit_s
+    (None = não troca), paused, no_backup}. Só de job baixando: o relógio é
+    do watchdog vivo; fora dele não há o que mostrar."""
+    if job.get("status") != "downloading" or job["id"] not in _jobs:
+        return None
+    return {"global": stall_switch.get(), "torrents": runtime.stall_clocks(job)}
 
 
 # -------------------- leituras enxutas (polling granular) --------------------
@@ -308,4 +320,5 @@ def progress(job_id: str) -> dict | None:
         return None
     return {"id": job["id"], "status": job["status"], "detail": job.get("detail", ""),
             "progress": job["progress"], "output": job.get("output"),
-            "merge_started_at": job.get("merge_started_at")}
+            "merge_started_at": job.get("merge_started_at"),
+            "stall": stall_view(job)}
