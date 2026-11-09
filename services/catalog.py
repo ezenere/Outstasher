@@ -98,6 +98,26 @@ _SEASON_DIR_RE = re.compile(r"^Season (\d{1,2})$", re.I)
 # referência de episódio no NOME DO ARQUIVO (SxxEyy) — para o índice de
 # episódios presentes e o agrupamento do detalhe
 _EPISODE_FILE_RE = re.compile(r"[sS](\d{1,2})[ ._-]?[eE](\d{1,3})")
+# o mesmo SxxEyy com a cauda de multi-episódio dos nomes de outros programas:
+# "S01E01-E02", "S01E01E02", "S01E01-02-03". A forma sem o E ("-02") só vale
+# colada e seguida de não-alfanumérico — senão "S01E01-1080p" e "S01E09-10bit"
+# virariam episódios. Com espaço ("S01E01 - 02 Título") é título, não range.
+_EPISODE_MULTI_RE = re.compile(
+    r"[sS](\d{1,2})[ ._-]?[eE](\d{1,3})"
+    r"((?:-?[eE]\d{1,3}|-\d{1,3}(?![\dA-Za-z]))*)")
+_TAIL_NUM_RE = re.compile(r"\d{1,3}")
+# "1x02" (scene antiga): exatamente 2 dígitos e sem dígito/x antes — "1920x1080"
+# não casa (mesma regra de services/series/parse)
+_NXMM_FILE_RE = re.compile(r"(?<![\dxX])(\d{1,2})[xX](\d{2})(?!\d)")
+# só DENTRO de uma pasta "Season NN" (a temporada vem da pasta): "Episode 05",
+# "Ep05", "E05 - Título" ou "05 - Título" — nomes que o Jellyfin também aceita.
+# O "E" solto só colado no número: "Amor e 2 Amigos" não é o episódio 2
+_EP_IN_SEASON_RE = re.compile(
+    r"(?:^|[ ._\-\[(])(?:(?:episode|episodio|episódio|ep)[ ._-]?|e)(\d{1,3})(?!\d)",
+    re.I)
+_LEADING_EP_RE = re.compile(r"^(\d{1,3})(?!\d)(?=[ ._\-])")
+# teto de um range de multi-episódio: arquivo com 20+ episódios é erro de parse
+_MAX_EPISODES_PER_FILE = 20
 
 
 def season_of_dir(name: str) -> int | None:
@@ -109,6 +129,35 @@ def parse_episode_filename(name: str) -> tuple[int, int] | None:
     """(temporada, episódio) do nome do arquivo, ou None."""
     m = _EPISODE_FILE_RE.search(name)
     return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def episodes_in_filename(name: str, season: int | None = None) -> set[tuple[int, int]]:
+    """TODOS os (temporada, episódio) que um arquivo contém — para o índice de
+    episódios presentes na coleção.
+
+    Além do "S01E02" que o Outstasher grava, entende o que outros programas
+    deixam no destino: multi-episódio ("S01E01-E02" = dois episódios num
+    arquivo; ignorar o segundo o faria parecer faltando e ser baixado de
+    novo), "1x02", e — com `season` vindo da pasta "Season NN" — nomes sem
+    temporada ("Episode 05", "05 - Título")."""
+    out: set[tuple[int, int]] = set()
+    for m in _EPISODE_MULTI_RE.finditer(name):
+        s, first = int(m.group(1)), int(m.group(2))
+        last = max([first] + [int(x) for x in _TAIL_NUM_RE.findall(m.group(3))])
+        if last - first >= _MAX_EPISODES_PER_FILE:
+            last = first
+        out.update((s, e) for e in range(first, last + 1))
+    if out:
+        return out
+    for m in _NXMM_FILE_RE.finditer(name):
+        out.add((int(m.group(1)), int(m.group(2))))
+    if out or season is None:
+        return out
+    stem = Path(name).stem
+    m = _EP_IN_SEASON_RE.search(stem) or _LEADING_EP_RE.match(stem)
+    if m:
+        out.add((season, int(m.group(1))))
+    return out
 
 
 def _is_series_dir(entry: Path) -> bool:
@@ -434,11 +483,19 @@ def rename_folder(destination_id: int | None, folder: str, new_name: str) -> str
     return clean
 
 
-def tag_folder_with_tmdb(destination_id: int | None, folder: str, tmdb_id: int) -> str:
+def tag_folder_with_tmdb(destination_id: int | None, folder: str, tmdb_id: int,
+                         title: str | None = None, year: str | None = None) -> str:
     """Marca a pasta com [tmdbid-N] (o Jellyfin usa isso para identificar o
-    filme). Se já houver um id no nome, é substituído."""
-    title, year = _title_and_year(folder)
-    return rename_folder(destination_id, folder, folder_name(title, year, tmdb_id))
+    filme). Se já houver um id no nome, é substituído.
+
+    Sem `title`, mantém o título/ano da própria pasta. Com `title` (+ `year`),
+    a pasta ganha o nome exato que o Outstasher daria ('Título (Ano)
+    [tmdbid-N]') — uma série baixada por outro programa ("Serie Exemplo/") só
+    recebe os episódios novos na MESMA pasta se o nome bater com o que o
+    merge gera; senão nasce uma segunda pasta da série no destino."""
+    if title is None:
+        title, year = _title_and_year(folder)
+    return rename_folder(destination_id, folder, folder_name(title, year or None, tmdb_id))
 
 
 def delete_folder(destination_id: int | None, folder: str) -> None:
@@ -467,6 +524,9 @@ def delete_folder(destination_id: int | None, folder: str) -> None:
 # fresco). None = nunca escaneado / invalidado.
 LIBRARY_TTL_SECONDS = 30 * 60
 _library_cache: dict = {"at": None, "keys": frozenset()}
+# chave de pasta MARCADA ([tmdbid-N]) no mesmo conjunto das (título, ano): o
+# "#" nunca sai do _norm_title (só [a-z0-9]), então não colide com um título
+_ID_KEY = "#tmdbid"
 
 
 def _norm_title(text: str) -> str:
@@ -477,10 +537,35 @@ def _norm_title(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", stripped)
 
 
+# Normalização FROUXA (2ª tentativa, só séries): pastas criadas por outros
+# programas ou à mão grafam o título de outro jeito que o TMDB — dígito no
+# lugar de letra (título estilizado "S3R1E" x "Serie"), "&" x "and" x nada,
+# artigo inicial ("The Serie" x "Serie" x "Serie, The") e o desambiguador de
+# país que alguns programas acrescentam ("Serie (US)"). Aplicada dos DOIS
+# lados, então o título certo sempre casa consigo mesmo; o risco é só o de
+# duas séries diferentes coincidirem depois de normalizar — por isso o ano
+# (quando a pasta tem) continua valendo e o id marcado manda.
+_LEET = str.maketrans("013457", "oieast")
+_LOOSE_COUNTRY_RE = re.compile(r"\(\s*[A-Za-z]{2}\s*\)")
+_LOOSE_AND_RE = re.compile(r"(?:\band\b|&)", re.I)
+_LOOSE_ARTICLE_RE = re.compile(r"^\s*the\s+|,\s*the\s*$", re.I)
+
+
+def _loose_title(text: str) -> str:
+    t = _LOOSE_COUNTRY_RE.sub(" ", text or "").strip()
+    t = _LOOSE_ARTICLE_RE.sub(" ", t)
+    t = _LOOSE_AND_RE.sub(" ", t)
+    return _norm_title(t).translate(_LEET)
+
+
 def _scan_library() -> frozenset[tuple[str, str | None]]:
     """(titulo_normalizado, ano|None) de cada pasta de filme nos destinos de
     FILMES — as bibliotecas de filme e série são separadas, então uma pasta
-    parecida num destino de séries não conta como "filme na coleção"."""
+    parecida num destino de séries não conta como "filme na coleção".
+
+    Pasta marcada também entra pelo id ((_ID_KEY, "N")): uma pasta com o
+    título numa terceira língua ("Exemplo Film (2014) [tmdbid-N]") não casa
+    com o original nem com o localizado da busca, mas o id é o mesmo."""
     keys = set()
     for dest in store.list_destinations_by_media("movie"):
         root = Path(dest["path"])
@@ -492,6 +577,9 @@ def _scan_library() -> frozenset[tuple[str, str | None]]:
                     title, year = _title_and_year(entry.name)
                     if title:
                         keys.add((_norm_title(title), year))
+                    tid = tmdb_id_in(entry.name)
+                    if tid:
+                        keys.add((_ID_KEY, str(tid)))
         except OSError:
             continue  # destino desmontado/sem permissão não derruba a busca
     return frozenset(keys)
@@ -515,8 +603,11 @@ def invalidate_library() -> None:
 
 
 def in_library(movie: dict, keys: frozenset) -> bool:
-    """O filme do TMDB já está na coleção? Casa título original OU localizado
-    + ano; pasta sem ano no nome casa só pelo título."""
+    """O filme do TMDB já está na coleção? Casa pelo [tmdbid-N] da pasta, ou
+    título original OU localizado + ano; pasta sem ano no nome casa só pelo
+    título."""
+    if movie.get("id") and (_ID_KEY, str(movie["id"])) in keys:
+        return True
     year = movie.get("year") or None
     for t in (movie.get("original_title"), movie.get("title")):
         if not t:
@@ -536,62 +627,139 @@ def in_library(movie: dict, keys: frozenset) -> bool:
 _series_cache: dict = {"at": None, "entries": ()}
 
 
+def _episodes_in_dir(entry: Path) -> dict[int, set[int]]:
+    """{temporada: {episódios}} dos arquivos de vídeo da pasta da série (em
+    qualquer profundidade). Dois arquivos do mesmo episódio (qualidades
+    diferentes, ou merge + original) contam uma vez."""
+    seasons: dict[int, set[int]] = {}
+    for f in entry.rglob("*"):
+        # extensão antes do is_file: não paga um stat por legenda/nfo/imagem
+        if f.suffix.lower() not in VIDEO_EXTENSIONS or not f.is_file():
+            continue
+        hint = season_of_dir(f.parent.name) if f.parent != entry else None
+        for s, e in episodes_in_filename(f.name, hint):
+            seasons.setdefault(s, set()).add(e)
+    return seasons
+
+
 def _scan_series() -> tuple[dict, ...]:
-    """Um registro por pasta de série: {tmdb_id, norm_title, year,
-    seasons: {temporada: set(episódios)}} — episódios lidos do SxxEyy nos
-    nomes de arquivo dentro das subpastas Season NN. Só os destinos de
-    SÉRIES entram (bibliotecas separadas)."""
+    """Um registro por pasta de série: {folder, destination_id,
+    destination_label, tmdb_id, norm_title, loose_title, year,
+    seasons: {temporada: set(episódios)}}. Só os destinos de SÉRIES entram
+    (bibliotecas separadas).
+
+    Num destino de séries, toda pasta é candidata: conta a que tem subpasta
+    "Season NN" OU arquivos com episódio no nome — uma série baixada por
+    outro programa pode vir sem as subpastas, ou com "Season 1" e arquivos
+    "Serie - S01E01 - Titulo WEBDL-1080p.mkv"."""
     entries = []
     for dest in store.list_destinations_by_media("tv"):
         root = Path(dest["path"])
         try:
             if not root.is_dir():
                 continue
-            for entry in root.iterdir():
-                if not entry.is_dir() or not _is_series_dir(entry):
-                    continue
-                title, year = _title_and_year(entry.name)
-                seasons: dict[int, set[int]] = {}
-                for f in entry.rglob("*"):
-                    if not f.is_file() or f.suffix.lower() not in VIDEO_EXTENSIONS:
-                        continue
-                    ref = parse_episode_filename(f.name)
-                    if ref:
-                        seasons.setdefault(ref[0], set()).add(ref[1])
-                entries.append({
-                    "tmdb_id": tmdb_id_in(entry.name),
-                    "norm_title": _norm_title(title),
-                    "year": year,
-                    "seasons": seasons,
-                })
+            children = sorted(root.iterdir(), key=lambda p: p.name.casefold())
         except OSError:
-            continue
+            continue  # destino desmontado/sem permissão não derruba a busca
+        for entry in children:
+            try:
+                # oculta (.Trash-1000, .stfolder...) não é série
+                if entry.name.startswith(".") or not entry.is_dir():
+                    continue
+                seasons = _episodes_in_dir(entry)
+                if not seasons and not _is_series_dir(entry):
+                    continue
+            except OSError:
+                continue  # uma pasta ilegível não derruba o resto do destino
+            title, year = _title_and_year(entry.name)
+            entries.append({
+                "folder": entry.name,
+                "destination_id": dest["id"],
+                "destination_label": dest["label"],
+                "tmdb_id": tmdb_id_in(entry.name),
+                "norm_title": _norm_title(title),
+                "loose_title": _loose_title(title),
+                "year": year,
+                "seasons": seasons,
+            })
     return tuple(entries)
 
 
 def series_index() -> tuple[dict, ...]:
-    """Índice de séries na coleção (cache com o mesmo TTL da biblioteca)."""
+    """Índice de séries na coleção (cache com o mesmo TTL da biblioteca).
+    Bloqueante — chamar via asyncio.to_thread na API.
+
+    Independente do cache de filmes: a busca de séries não consulta o de
+    filmes, e amarrar um ao outro fazia todo pedido refazer o scan de séries
+    enquanto ninguém tivesse buscado um filme."""
     at = _series_cache["at"]
-    if at is None or _library_cache["at"] is None \
-            or time.monotonic() - at > LIBRARY_TTL_SECONDS:
+    if at is None or time.monotonic() - at > LIBRARY_TTL_SECONDS:
         _series_cache["entries"] = _scan_series()
         _series_cache["at"] = time.monotonic()
     return _series_cache["entries"]
 
 
-def owned_episodes(tmdb_id: int | None, title: str | None,
+def match_series(tmdb_id: int | None, titles, year: str | None,
+                 index: tuple[dict, ...] | None = None) -> list[tuple[dict, str]]:
+    """Pastas da coleção que são esta série do TMDB: [(registro, como)], com
+    `como` = "tmdbid" | "title" | "loose".
+
+    - pasta marcada com o MESMO id: casa, sem olhar o nome;
+    - pasta marcada com OUTRO id: é outra série (reboot homônimo, por
+      exemplo) — com o id pedido conhecido, nunca casa pelo título;
+    - sem marca: casa por qualquer um dos `titles` (original, localizado,
+      inglês...) normalizado, e senão pela normalização frouxa. Ano: a pasta
+      sem ano casa com qualquer um; com ano, tem que ser o do TMDB.
+
+    Junta TODAS as pastas que casam: a mesma série pode estar em dois
+    destinos, ou numa pasta do Outstasher e noutra de outro programa."""
+    if isinstance(titles, str):
+        titles = [titles]
+    titles = [t for t in (titles or []) if t]
+    norms = {n for n in map(_norm_title, titles) if n}
+    looses = {n for n in map(_loose_title, titles) if n}
+    year = year or None
+    out = []
+    for e in (series_index() if index is None else index):
+        if tmdb_id and e["tmdb_id"] is not None:
+            if e["tmdb_id"] == tmdb_id:
+                out.append((e, "tmdbid"))
+            continue
+        if e["year"] is not None and e["year"] != year:
+            continue
+        if e["norm_title"] and e["norm_title"] in norms:
+            out.append((e, "title"))
+        elif e["loose_title"] and e["loose_title"] in looses:
+            out.append((e, "loose"))
+    return out
+
+
+def series_in_library(tmdb_id: int | None, titles, year: str | None,
+                      index: tuple[dict, ...] | None = None) -> dict:
+    """O que a coleção tem desta série: {seasons: {temporada: [episódios]}
+    (união das pastas que casam), folders: [{folder, destination_id,
+    destination_label, match, episodes}]}."""
+    seasons: dict[int, set[int]] = {}
+    folders = []
+    for e, how in match_series(tmdb_id, titles, year, index):
+        for s, eps in e["seasons"].items():
+            seasons.setdefault(s, set()).update(eps)
+        folders.append({
+            "folder": e["folder"],
+            "destination_id": e["destination_id"],
+            "destination_label": e["destination_label"],
+            "match": how,
+            "episodes": sum(len(v) for v in e["seasons"].values()),
+        })
+    return {"seasons": {s: sorted(eps) for s, eps in sorted(seasons.items())},
+            "folders": folders}
+
+
+def owned_episodes(tmdb_id: int | None, titles,
                    year: str | None) -> dict[int, list[int]]:
     """Episódios já presentes na coleção para uma série do TMDB.
 
-    Casa por [tmdbid-N] quando a pasta está marcada; senão por título
-    normalizado (+ ano, com fallback sem ano). Alimenta o pré-marcado do
-    modal de série ("adicionar episódios") e o selo parcial."""
-    norm = _norm_title(title or "")
-    for e in series_index():
-        if tmdb_id and e["tmdb_id"] == tmdb_id:
-            return {s: sorted(eps) for s, eps in e["seasons"].items()}
-    for e in series_index():
-        if norm and e["norm_title"] == norm and (
-                e["year"] == (year or None) or e["year"] is None):
-            return {s: sorted(eps) for s, eps in e["seasons"].items()}
-    return {}
+    `titles`: um título ou a lista deles (original, localizado, inglês) —
+    casamento em match_series. Alimenta o "na coleção" do modal de série
+    ("adicionar episódios") e o selo da busca."""
+    return series_in_library(tmdb_id, titles, year)["seasons"]

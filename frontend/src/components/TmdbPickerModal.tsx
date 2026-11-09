@@ -9,6 +9,10 @@ interface Props {
   year?: string | null
   /** Match automático do backend; vem pré-selecionado. Pode ser trocado. */
   suggested: Movie | null
+  /** Pasta de série busca na base de TV: filmes e séries têm espaços de id
+   *  SEPARADOS no TMDB — marcar uma série com um id de filme a desligaria da
+   *  série certa (o id marcado manda no casamento da coleção). */
+  media?: 'movie' | 'tv'
   onConfirm: (tmdbId: number) => Promise<void> | void
   onClose: () => void
 }
@@ -19,7 +23,10 @@ interface Props {
  *  marcação renomeia a pasta — então dá para confirmar (ou trocar) o filme
  *  antes. Mesma busca do modal de adicionar filme manualmente.
  */
-export default function TmdbPickerModal({ title, year, suggested, onConfirm, onClose }: Props) {
+export default function TmdbPickerModal({
+  title, year, suggested, media = 'movie', onConfirm, onClose,
+}: Props) {
+  const noun = media === 'tv' ? 'série' : 'filme'
   const [movie, setMovie] = useState<Movie | null>(suggested)
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<Movie[] | null>(null)
@@ -39,7 +46,8 @@ export default function TmdbPickerModal({ title, year, suggested, onConfirm, onC
     setSearching(true)
     setError(null)
     try {
-      const p = await api<MoviePage>(`/api/movies?q=${encodeURIComponent(query.trim())}&page=1`)
+      const base = media === 'tv' ? '/api/series' : '/api/movies'
+      const p = await api<MoviePage>(`${base}?q=${encodeURIComponent(query.trim())}&page=1`)
       setResults(p.results)
     } catch (e) {
       setError((e as Error).message)
@@ -78,8 +86,9 @@ export default function TmdbPickerModal({ title, year, suggested, onConfirm, onC
           </button>
         </div>
         <p className="mt-1 text-sm text-zinc-400">
-          Confirme o filme antes de renomear a pasta. O Jellyfin usa esse ID para
-          identificar o filme sem depender do título.
+          Confirme {media === 'tv' ? 'a' : 'o'} {noun} antes de renomear a pasta. O
+          Jellyfin usa esse ID para identificar {media === 'tv' ? 'a' : 'o'} {noun} sem
+          depender do título.
         </p>
 
         <div className="mt-4">
@@ -104,7 +113,7 @@ export default function TmdbPickerModal({ title, year, suggested, onConfirm, onC
                     autoFocus
                     onChange={(e) => setQuery(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && search()}
-                    placeholder="Buscar filme no TMDB..."
+                    placeholder={`Buscar ${noun} no TMDB...`}
                     className="w-full rounded-lg border border-zinc-700 bg-zinc-800 py-2 pr-3 pl-9 text-sm outline-none focus:border-blue-500"
                   />
                 </div>
