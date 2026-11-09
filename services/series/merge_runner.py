@@ -171,6 +171,12 @@ async def _align_episode(job: dict, key: str, ep: dict):
     job["progress"]["merge"] = None      # fingerprint terminou: some a barra
     segs = await asyncio.to_thread(
         refine.refine_offsets, segs, dub, dub_a, orig, orig_a, log)
+    # tela preta dos trechos sem dublagem medida já aqui: vai na EDL, a
+    # revisão mostra e o render decide sem decodificar de novo
+    from services import advanced_merge
+    await asyncio.to_thread(advanced_merge.mark_black, segs,
+                            advanced_merge.for_job(job), orig,
+                            edl_dict["source_orig"]["duration"], log)
     dur_a = edl_dict["source_dub"]["duration"]
     segs, needs = rules.apply_rules(segs, job.get("review_rules") or [], dur_a)
     # o rebuild só reescreve os segmentos: os metadados do arquivo FUNDIDO
@@ -292,15 +298,16 @@ async def _render_from_edl(job: dict, key: str, ep: dict):
     # vídeo / fica mudo / recebe o original — como regras PADRÃO, depois das
     # decisões do usuário (segmento com ação explícita não é tocado)
     from services import advanced_merge
-    from services.series.align import rules as rules_mod
     politica = advanced_merge.for_job(job)
     dur_a = float((ep["edl"].get("source_dub") or {}).get("duration") or 0.0)
-    segs, _ = rules_mod.apply_rules(segs, advanced_merge.default_rules(politica), dur_a)
-    tem_cortes = any(sg.extra.get("action") == "cut_video" for sg in segs)
-    extra_kw = advanced_merge.render_kwargs(politica, has_cuts=tem_cortes)
+    dur_b = float((ep["edl"].get("source_orig") or {}).get("duration") or 0.0) or None
     # o passo 1 do render monta a faixa dublada (arquivo intermediário): é a
     # etapa que a UI chama de "Gerando áudio da EDL", não de conversão
     log, on_progress = jobs._ffmpeg_hooks(job, jobs.runtime.PHASE_EDL)
+    # EDL de antes da medição de tela preta é medida aqui (ffmpeg: thread)
+    segs, extra_kw = await asyncio.to_thread(
+        advanced_merge.prepare_render, segs, politica, ep["src"]["original"],
+        dur_b, dur_a, log)
     if ep["edl"].get("note"):
         log(ep["edl"]["note"])
     # legendas externas entram no PRÓPRIO mux do render (remapeadas lá, com a
