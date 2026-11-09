@@ -499,9 +499,11 @@ export interface Progress {
   downloaded?: number | null  // bytes já baixados
 }
 
-/** Progresso do ffmpeg durante o merge (parseado de -progress pipe:1). */
+/** Progresso do ffmpeg durante o merge (parseado de -progress pipe:1).
+ *  Entre duas passadas (refino do alinhamento, preparo do render) vem só a
+ *  `phase`, sem pct: etapa sem barra — a UI mostra o nome dela, não a barra. */
 export interface MergeProgress {
-  pct: number         // ESCRITA: out_time/duração — quanto já saiu codificado
+  pct?: number        // ESCRITA: out_time/duração — quanto já saiu codificado
   read_pct?: number   // LEITURA: frames lidos/total — quanto já entrou no encoder
   out_s: number       // tempo do filme já processado (s)
   duration_s: number  // duração total esperada (s)

@@ -161,6 +161,15 @@ PHASE_MUX = "mux"          # gravando o arquivo final (cópia de tudo)
 PHASE_CONVERT = "convert"  # merge/render/recompressão de fato
 
 
+def _stage(job: dict, phase: str):
+    """Etapa SEM barra: o trabalho entre duas passadas de ffmpeg (refino do
+    alinhamento, preparo do render da EDL). Zerar o progresso aqui fazia a UI
+    cair no padrão "Convertendo" — o job parecia voltar a converter logo
+    depois de "Renderizando a EDL" (caso real), e o preparo de um 4K leva
+    minutos (legendas do dublado, tela preta, keyframes)."""
+    job["progress"]["merge"] = {"phase": phase}
+
+
 def _ffmpeg_hooks(job: dict, phase: str = PHASE_CONVERT):
     """(log, on_progress) para as conversões de ffmpeg. log escreve no detalhe
     + evento 'merge'; on_progress guarda o progresso em memória (a UI lê via

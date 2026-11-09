@@ -129,7 +129,8 @@ export function alignRole(p?: MergeProgress | null): string | null {
 }
 
 export function MergeBar({ p }: { p?: MergeProgress | null }) {
-  if (!p) return null
+  // etapa sem barra (refino do alinhamento, preparo do render): só o rótulo
+  if (!p || p.pct == null) return null
   // etapa intermediária (fingerprint, faixa de áudio da EDL): âmbar — só a
   // conversão de verdade sai na cor de conversão
   const align = mergePhase(p.phase)?.amber ?? p.step != null
