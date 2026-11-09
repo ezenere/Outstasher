@@ -6,6 +6,7 @@ de midia e devolve as tracks parseadas de forma detalhada e legivel.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import time
@@ -188,43 +189,176 @@ def _safe_join(root: Path, *parts: str) -> Path:
 
 
 # -------------------- listagem --------------------
+# A tela do catálogo pagina em scroll infinito, então busca, ordenação e
+# paginação rodam AQUI: filtrar só o que a tela já carregou deixaria a busca
+# sem achar os itens das páginas seguintes. O caro de um item é varrer a
+# pasta inteira (tamanho, nº de arquivos, se tem vídeo) — numa série são
+# centenas de arquivos —, e o nome da pasta já basta para buscar e ordenar
+# por título/ano: só as pastas da página pagam a varredura. Ordenar por
+# tamanho precisa do tamanho de todas; o resultado de cada pasta fica num
+# cache curto, para as páginas seguintes do mesmo scroll não refazerem tudo.
+# A lista de nomes (um readdir da raiz) não é cacheada: custa quase nada e
+# assim a 1ª página reflete o disco na hora, como antes da paginação.
 
-def list_items(destination_id: int | None) -> dict:
+SORT_KEYS = ("title", "year", "size")
+SORT_ORDERS = ("asc", "desc")
+# curto de propósito: além do mtime (abaixo), é o que limita quanto tempo uma
+# mudança feita por fora (cópia pela rede dentro de "Season 01", que não muda
+# o mtime da pasta da série) demora a aparecer na lista
+LISTING_TTL_SECONDS = 2 * 60
+# (caminho do destino, nome da pasta) -> (quando, mtime_ns da pasta, números)
+_stats_cache: dict[tuple[str, str], tuple[float, int | None, dict]] = {}
+
+
+def _walk_folder(path: Path) -> dict:
+    """Varre a pasta de um item: tamanho total, nº de arquivos, se tem vídeo
+    e se é série. Um scandir por diretório e um stat por arquivo (o rglob +
+    is_file + stat de antes fazia dois stats por arquivo e mais um readdir
+    para detectar a série)."""
+    size = file_count = 0
+    has_video = is_series = False
+    stack, top = [str(path)], True
+    while stack:
+        try:
+            it = os.scandir(stack.pop())
+        except OSError:
+            top = False
+            continue
+        with it:
+            for e in it:
+                try:
+                    if e.is_dir():
+                        # série = subpasta "Season NN" no 1º nível (layout Jellyfin)
+                        if top and season_of_dir(e.name) is not None:
+                            is_series = True
+                        # link para pasta não é seguido (como no rglob): evita
+                        # laço e contar a mesma coisa duas vezes
+                        if not e.is_symlink():
+                            stack.append(e.path)
+                    elif e.is_file():
+                        file_count += 1
+                        size += e.stat().st_size
+                        if os.path.splitext(e.name)[1].lower() in VIDEO_EXTENSIONS:
+                            has_video = True
+                except OSError:
+                    continue  # arquivo sumiu no meio da varredura
+        top = False
+    return {"type": "series" if is_series else "movie", "size": size,
+            "size_human": human_size(size), "file_count": file_count,
+            "has_video": has_video}
+
+
+def _folder_stats(root: str, name: str) -> dict:
+    """Números da pasta, do cache quando ainda valem. O mtime da pasta muda
+    quando entra/sai/renomeia arquivo direto nela (o caso comum de filme) —
+    um stat só, bem mais barato que a varredura; o resto o TTL cobre."""
+    path = Path(root) / name
+    try:
+        mtime = path.stat().st_mtime_ns
+    except OSError:
+        mtime = None
+    key = (root, name)
+    hit = _stats_cache.get(key)
+    now = time.monotonic()
+    if hit and hit[1] == mtime and now - hit[0] <= LISTING_TTL_SECONDS:
+        return hit[2]
+    stats = _walk_folder(path)
+    _stats_cache[key] = (now, mtime, stats)
+    return stats
+
+
+def _forget_stats(dest: dict, folder: str) -> None:
+    """Tira uma pasta do cache da listagem (arquivo apagado/renomeado por
+    aqui — numa série ele está em Season NN e o mtime da pasta não muda)."""
+    _stats_cache.pop((dest["path"], Path(folder).parts[0] if folder else folder), None)
+
+
+def _collate(text: str) -> str:
+    """Chave de ordenação de título: sem acento e sem caixa, como o
+    localeCompare('pt-BR') que a tela usava ('Ébano' junto de 'Eco')."""
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c)).casefold()
+
+
+def _folders(root: Path) -> list[dict]:
+    """Pastas do 1º nível do destino (nome, título, ano), em ordem de nome."""
+    out = []
+    try:
+        with os.scandir(root) as it:
+            for e in it:
+                try:
+                    if not e.is_dir():
+                        continue
+                except OSError:
+                    continue
+                title, year = _title_and_year(e.name)
+                out.append({"folder": e.name, "title": title, "year": year})
+    except OSError:
+        return []
+    out.sort(key=lambda r: r["folder"].casefold())
+    return out
+
+
+def list_items(destination_id: int | None, q: str = "", sort: str = "title",
+               order: str = "asc", page: int = 1,
+               per_page: int | None = None) -> dict:
+    """Itens do destino filtrados por `q` (título ou pasta), ordenados e
+    paginados. Sem `per_page` volta tudo numa página (como a lista de jobs).
+
+    Ordenação igual à que a tela fazia no cliente: título sem acento/caixa;
+    ano com os sem-ano sempre no fim e empate por título; tamanho com empate
+    na ordem das pastas. `total` conta o que casa com a busca; `total_all`,
+    a coleção inteira do destino.
+    """
+    if sort not in SORT_KEYS:
+        raise CatalogError(f"Ordenação inválida: {sort!r}")
+    if order not in SORT_ORDERS:
+        raise CatalogError(f"Direção inválida: {order!r}")
     dest = _resolve_dest(destination_id)
     root = Path(dest["path"])
-    items = []
-    if root.is_dir():
-        for entry in sorted(root.iterdir(), key=lambda p: p.name.casefold()):
-            if not entry.is_dir():
-                continue
-            size = 0
-            has_video = False
-            file_count = 0
-            for f in entry.rglob("*"):
-                if f.is_file():
-                    file_count += 1
-                    try:
-                        size += f.stat().st_size
-                    except OSError:
-                        pass
-                    if f.suffix.lower() in VIDEO_EXTENSIONS:
-                        has_video = True
-            title, year = _title_and_year(entry.name)
-            items.append({
-                "folder": entry.name,
-                "title": title,
-                "year": year,
-                # série = pasta com subpastas "Season NN" (layout Jellyfin)
-                "type": "series" if _is_series_dir(entry) else "movie",
-                "size": size,
-                "size_human": human_size(size),
-                "file_count": file_count,
-                "has_video": has_video,
-            })
+    exists = root.is_dir()
+    rows = _folders(root) if exists else []
+    total_all = len(rows)
+
+    needle = q.strip().casefold()
+    if needle:
+        rows = [r for r in rows
+                if needle in r["title"].casefold() or needle in r["folder"].casefold()]
+
+    desc = order == "desc"
+    if sort == "title":
+        # sort estável: empate de título fica na ordem das pastas
+        rows.sort(key=lambda r: _collate(r["title"]), reverse=desc)
+    elif sort == "year":
+        def year_key(r: dict):
+            y = int(r["year"]) if r["year"] else None
+            return (y is None, 0 if y is None else (-y if desc else y),
+                    _collate(r["title"]))
+        rows.sort(key=year_key)
+    else:
+        # tamanho: aqui sim todas as pastas que casam são varridas (cache)
+        for r in rows:
+            r.update(_folder_stats(dest["path"], r["folder"]))
+        rows.sort(key=lambda r: r["size"], reverse=desc)
+
+    total = len(rows)
+    if per_page is None:
+        page, pages, chunk = 1, 1, rows
+    else:
+        page = max(1, page)
+        pages = max(1, -(-total // per_page))
+        chunk = rows[(page - 1) * per_page:page * per_page]
+    items = [r if "size" in r else {**r, **_folder_stats(dest["path"], r["folder"])}
+             for r in chunk]
     return {
         "destination": dest,
-        "exists": root.is_dir(),
+        "exists": exists,
         "items": items,
+        "page": page,
+        "per_page": per_page if per_page is not None else total,
+        "pages": pages,
+        "total": total,
+        "total_all": total_all,
     }
 
 
@@ -410,6 +544,7 @@ def delete_file(destination_id: int | None, folder: str, rel: str) -> None:
     if not target.is_file():
         raise CatalogError("Arquivo não encontrado")
     target.unlink()
+    _forget_stats(dest, folder)  # tamanho/nº de arquivos da lista mudaram
 
 
 def rename_file(destination_id: int | None, folder: str, rel: str, new_name: str) -> str:
@@ -444,6 +579,7 @@ def rename_file(destination_id: int | None, folder: str, rel: str, new_name: str
     if target.exists():
         raise CatalogError(f"Já existe um arquivo chamado '{clean}' nesta pasta")
     src.rename(target)
+    _forget_stats(dest, folder)  # pode ter deixado de ser (ou virado) vídeo
     return target.relative_to(item_dir).as_posix()
 
 
@@ -597,9 +733,11 @@ def library_keys() -> frozenset[tuple[str, str | None]]:
 
 def invalidate_library() -> None:
     """Marca o cache como vencido (a PRÓXIMA busca refaz o scan — nada roda já).
-    Vale para os dois índices: filmes (chaves) e séries (episódios presentes)."""
+    Vale para os dois índices: filmes (chaves) e séries (episódios presentes),
+    e para os números por pasta da listagem do catálogo."""
     _library_cache["at"] = None
     _series_cache["at"] = None
+    _stats_cache.clear()
 
 
 def in_library(movie: dict, keys: frozenset) -> bool:
