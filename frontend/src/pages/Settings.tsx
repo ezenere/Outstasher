@@ -119,6 +119,33 @@ export function ExtraSearchSection() {
     return Object.values(v).filter((l) => l.length > 0).length
   }
 
+  // do estado editado (não do salvo): tirar um chip pelo × já some do aviso
+  const missing = cfg ? missingTrackers(rules, indexers, cfg.languages, cfg.variants) : []
+
+  // Ação explícita, nunca automática: o tracker pode estar fora só por um
+  // tempo (reconfigurando no Jackett) e sumir com ele das regras perderia a
+  // configuração calada. O botão poupa abrir idioma por idioma e clicar o ×
+  // de cada busca. Mexe só no estado editado, como o ×: grava no Salvar.
+  function removeMissing() {
+    if (!indexers?.length) return
+    const known = new Set(indexers.map((i) => i.id))
+    const next: ExtraSearchRules = {}
+    let removed = 0
+    for (const [lang, variants] of Object.entries(rules)) {
+      for (const [variant, ids] of Object.entries(variants)) {
+        const keep = ids.filter((id) => known.has(id))
+        removed += ids.length - keep.length
+        if (keep.length) (next[lang] ??= {})[variant] = keep
+      }
+    }
+    setRules(next)
+    setMsg({
+      ok: true,
+      text: `${removed} marcaç${removed === 1 ? 'ão' : 'ões'} de tracker fora do Jackett ` +
+        `removida${removed === 1 ? '' : 's'}. Falta gravar: clique em Salvar regras.`,
+    })
+  }
+
   async function save() {
     setSaving(true)
     setMsg(null)
@@ -166,9 +193,40 @@ export function ExtraSearchSection() {
 
       {cfg && showRules && (
         <div className="mt-4 flex flex-col gap-4">
+          {missing.length > 0 && (
+            <div className="flex items-start gap-2 rounded-xl border border-amber-900/60 bg-amber-950/20 p-3 text-sm text-amber-300">
+              <WarningTriangle width={16} height={16} className="mt-0.5 shrink-0" />
+              {/* no celular o botão desce para baixo do texto */}
+              <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row sm:items-start">
+                <div className="min-w-0 flex-1">
+                  <ul className="flex flex-col gap-1">
+                    {missing.map((m) => (
+                      <li key={`${m.lang}:${m.id}`}>
+                        Tracker <b className="font-semibold break-all">{m.id}</b> está marcado{' '}
+                        {buscasText(m.variants)} ({m.langLabel}) e não está no Jackett.
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="mt-1.5 text-xs text-amber-500/80">
+                    Os jobs pulam esses trackers nas buscas extras e deixam um aviso no evento da
+                    busca. Remova-os aqui, ou configure-os de novo no Jackett.
+                  </p>
+                </div>
+                <button
+                  onClick={removeMissing}
+                  title="Tira das regras (em todos os idiomas) os trackers que o Jackett não lista mais; grava no Salvar regras"
+                  className="flex shrink-0 items-center gap-1.5 self-start rounded-lg border border-amber-700/60 px-3 py-1.5 text-xs font-semibold text-amber-200 hover:bg-amber-900/30"
+                >
+                  <Trash width={14} height={14} /> Remover os ausentes
+                </button>
+              </div>
+            </div>
+          )}
+
           {cfg.languages.map((lang) => {
             const open = openLang === lang.code
             const count = langSummary(lang.code)
+            const nMissing = missing.filter((m) => m.lang === lang.code).length
             return (
               // sem overflow-hidden: a lista do "+ adicionar" sai para fora do card
               <div key={lang.code} className="rounded-xl border border-zinc-700 bg-zinc-900">
@@ -180,6 +238,13 @@ export function ExtraSearchSection() {
                 >
                   {open ? <NavArrowDown width={16} height={16} /> : <NavArrowRight width={16} height={16} />}
                   <span className="flex-1 font-semibold">{lang.label}</span>
+                  {/* o idioma fechado esconde os chips âmbar: o selo diz onde estão */}
+                  {nMissing > 0 && (
+                    <span className="flex items-center gap-1 rounded-full bg-amber-950/60 px-2 py-0.5 text-xs font-semibold text-amber-300">
+                      <WarningTriangle width={11} height={11} />
+                      {nMissing} fora do Jackett
+                    </span>
+                  )}
                   {count > 0 && (
                     <span className="rounded-full bg-blue-950 px-2 py-0.5 text-xs font-semibold text-blue-300">
                       {count} variante{count === 1 ? '' : 's'} ativa{count === 1 ? '' : 's'}
@@ -222,6 +287,52 @@ export function ExtraSearchSection() {
       )}
     </section>
   )
+}
+
+interface MissingTracker {
+  lang: string
+  langLabel: string
+  id: string
+  /** regras (no_year, roman...) em que o tracker está marcado nesse idioma */
+  variants: string[]
+}
+
+// Trackers marcados nas regras que o Jackett não lista mais, um por (idioma,
+// tracker), na ordem da tela. Mesmo critério do filtro dos jobs
+// (_skip_missing_trackers em services/jobs/search.py): lista indisponível ou
+// VAZIA não acusa nada — sem indexer nenhum é mais provável o Jackett estar
+// com problema do que o usuário ter tirado todos (aí o backend também não
+// descarta nada, e o "Nenhum indexer configurado" já diz o que há).
+function missingTrackers(
+  rules: ExtraSearchRules, indexers: JackettIndexer[] | null,
+  languages: { code: string; label: string }[], variants: string[],
+): MissingTracker[] {
+  if (!indexers?.length) return []
+  const known = new Set(indexers.map((i) => i.id))
+  const out: MissingTracker[] = []
+  for (const lang of languages) {
+    const byId = new Map<string, MissingTracker>()
+    for (const variant of variants) {
+      for (const id of rules[lang.code]?.[variant] ?? []) {
+        if (known.has(id)) continue
+        let m = byId.get(id)
+        if (!m) {
+          m = { lang: lang.code, langLabel: lang.label, id, variants: [] }
+          byId.set(id, m)
+          out.push(m)
+        }
+        m.variants.push(variant)
+      }
+    }
+  }
+  return out
+}
+
+// ["no_year"] -> na busca “Sem o ano”; várias -> nas buscas “A” e “B”
+function buscasText(variants: string[]) {
+  const names = variants.map((v) => `“${VARIANT_LABEL[v] ?? v}”`)
+  if (names.length === 1) return `na busca ${names[0]}`
+  return `nas buscas ${names.slice(0, -1).join(', ')} e ${names[names.length - 1]}`
 }
 
 // Indexers de uma regra de busca extra, no molde do MarkerChips: só os
@@ -311,13 +422,13 @@ function IndexerChips({ selected, indexers, onChange }: {
       )}
       {selected.map((id) => {
         const idx = byId.get(id)
-        // na regra salva, mas o Jackett não lista mais: a busca nele vai falhar
+        // na regra salva, mas o Jackett não lista mais: os jobs pulam a busca nele
         const missing = indexers !== null && !idx
         return (
           <span
             key={id}
             title={missing
-              ? `${id}: não está mais configurado no Jackett, a busca extra nele vai falhar. Remova, ou configure de novo no Jackett.`
+              ? `${id}: não está mais configurado no Jackett, esta busca extra não acha nada nele. Remova, ou configure de novo no Jackett.`
               : `${id}${idx?.language ? ` · ${idx.language}` : ''}`}
             className={`flex items-center gap-1 rounded-md px-2 py-0.5 text-xs ${
               missing ? 'bg-amber-950/60 text-amber-300 ring-1 ring-amber-800/70' : 'bg-zinc-700'
