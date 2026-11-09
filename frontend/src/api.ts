@@ -311,6 +311,9 @@ export interface EdlSegment {
   note: string
   /** Decisão de revisão já aplicada (explícita ou por regra). */
   action?: ReviewAction
+  /** Medidas extras do alinhador. picture_s: segundos de IMAGEM (o que não é
+   *  tela preta) no trecho do original — ausente quando não foi medido. */
+  extra?: { picture_s?: number } & Record<string, unknown>
 }
 
 export interface Edl {

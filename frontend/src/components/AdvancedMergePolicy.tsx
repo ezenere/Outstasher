@@ -44,7 +44,8 @@ export default function AdvancedMergePolicy({ value, onChange, forceCustom, titl
                 <input type="radio" checked={cfg.undubbed === 'cut'} className="mt-1"
                   onChange={() => onChange({ ...cfg, undubbed: 'cut' })} />
                 <span><b>A cena sai do vídeo</b> — só fica o que existe nos dois lados.
-                  <span className="block text-xs text-zinc-500">Trechos menores que o limite ficam mudos em vez de cortados.</span></span>
+                  <span className="block text-xs text-zinc-500">Trechos menores que o limite ficam mudos em vez de cortados.
+                    Tela preta (abertura, intervalo, fim) também fica, muda: não é cena, e cortá-la re-encodaria o vídeo inteiro.</span></span>
               </label>
               {cfg.undubbed === 'cut' && (
                 <label className="ml-6 flex items-center gap-2 text-xs text-zinc-400">

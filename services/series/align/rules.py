@@ -7,7 +7,8 @@ as decisões são REGRAS sobre a forma do segmento (tipo, posição, faixa de
 duração), não timestamps de um episódio específico.
 
 Regra: {"when": {"kind", "position": "start|end|middle|any",
-                 "min_len": s, "max_len": s},
+                 "min_len": s, "max_len": s,
+                 "max_picture_s": s},   # imagem fora da tela preta (align.black)
         "action": "fill_original" | "silence" | "use_dub" | "accept"}
 
 Ações por tipo de segmento:
@@ -19,8 +20,10 @@ Ações por tipo de segmento:
 - gap_dub   (dublado sem vídeo):    sempre descartado (a timeline é a do
                                     original); "accept" só o marca revisado
 
-cut_video corta em keyframes por stream copy (mkvmerge): raspas de até um
-GOP (~2 s) ficam nas bordas com áudio original — nada é recodificado.
+cut_video tira o trecho do vídeo. Com re-encode configurado na política
+(advanced_merge), o vídeo INTEIRO é re-encodado com keyframe forçado nos
+pontos de corte (frame exato, mas perde DV/HDR10+); sem re-encode, corta em
+keyframes por stream copy e raspas de até um GOP ficam nas bordas.
 """
 from services.series.align.classify import Segment
 
@@ -49,6 +52,13 @@ def _matches(rule: dict, seg: Segment, duration_a: float) -> bool:
         return False
     if when.get("max_len") is not None and dur > when["max_len"]:
         return False
+    # imagem (o que não é tela preta) dentro do trecho — medida por
+    # align.black. Trecho NÃO medido não casa: sem a medida, a regra seguinte
+    # (o corte da política) decide como antes
+    if when.get("max_picture_s") is not None:
+        pic = seg.extra.get("picture_s")
+        if pic is None or pic > when["max_picture_s"]:
+            return False
     return True
 
 

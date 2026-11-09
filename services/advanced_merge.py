@@ -18,6 +18,9 @@ DEFAULTS = {
     # é decidido pela máquina em default_reencode(): AV1 na GPU se houver.
     "reencode": None,
 }
+# imagem fora da tela preta abaixo disto é borda de fade, não cena — vale
+# mesmo com cut_min_s 0 ("corta tudo"), senão um frame de fade cortaria
+BLACK_PICTURE_TOL_S = 0.5
 
 
 def default_reencode() -> dict:
@@ -85,13 +88,58 @@ def default_rules(cfg: dict | None = None) -> list[dict]:
         return []          # o default do render já é preencher com o original
     if cfg["undubbed"] == "silence":
         return [{"when": {"kind": "gap_orig"}, "action": "silence"}]
-    # cut: cena sem dublagem sai do vídeo a partir de cut_min_s; abaixo, muda
-    rules = [{"when": {"kind": "gap_orig", "min_len": cfg["cut_min_s"]},
+    # cut: cena sem dublagem sai do vídeo a partir de cut_min_s; abaixo, muda.
+    # Tela preta (abertura, intervalo entre atos, fim) não é cena: se a IMAGEM
+    # que sobra fora do preto não chega ao mínimo de corte, o trecho fica no
+    # vídeo, mudo — como no original. Cortá-lo re-encodava o vídeo inteiro
+    # (ver align.black). Trecho não medido segue para o corte, como antes
+    rules = [{"when": {"kind": "gap_orig",
+                       "max_picture_s": max(cfg["cut_min_s"], BLACK_PICTURE_TOL_S)},
+              "action": "silence"},
+             {"when": {"kind": "gap_orig", "min_len": cfg["cut_min_s"]},
               "action": "cut_video"}]
     if cfg["cut_min_s"] > 0:
         rules.append({"when": {"kind": "gap_orig", "max_len": cfg["cut_min_s"]},
                       "action": "silence"})
     return rules
+
+
+def mark_black(segs: list, cfg: dict, orig_path: str,
+               dur_orig: float | None, log=None) -> int:
+    """Mede a tela preta dos trechos sem dublagem (align.black) quando a
+    política pode cortá-los; nas outras o trecho fica no vídeo de qualquer
+    jeito e a medida não muda nada. Bloqueante (ffmpeg)."""
+    if cfg["undubbed"] != "cut":
+        return 0
+    from services.series.align import black
+    return black.mark(segs, orig_path, dur_orig, log)
+
+
+def prepare_render(segs: list, cfg: dict, orig_path: str,
+                   dur_orig: float | None, dur_a: float, log=None):
+    """Segmentos prontos para o render sob esta política: mede a tela preta
+    do que ainda não foi medido (só na política de corte — nas outras o
+    trecho fica no vídeo de qualquer jeito) e aplica as regras padrão.
+    Devolve (segs, kwargs do render). Bloqueante (ffmpeg)."""
+    from services.series.align import rules as rules_mod
+    mark_black(segs, cfg, orig_path, dur_orig, log)
+    tol =max(cfg["cut_min_s"], BLACK_PICTURE_TOL_S)
+    # os que a política CORTARIA e ficam por serem preto (para o log): sem
+    # ação ainda, do tamanho de corte, e com pouca imagem
+    poupados = [s for s in segs
+                if cfg["undubbed"] == "cut" and s.kind == "gap_orig"
+                and not s.extra.get("action")
+                and (s.b_end or 0) - (s.b_start or 0) >= cfg["cut_min_s"]
+                and s.extra.get("picture_s") is not None
+                and s.extra["picture_s"] <= tol]
+    segs, _ = rules_mod.apply_rules(segs, default_rules(cfg), dur_a)
+    has_cuts = any(s.extra.get("action") == "cut_video" for s in segs)
+    if log and poupados:
+        total = sum(s.b_end - s.b_start for s in poupados)
+        log(f"{len(poupados)} trecho(s) de tela preta sem dublagem ({total:.1f}s) "
+            f"ficam no vídeo, mudos — sem corte"
+            + ("" if has_cuts else "; o vídeo segue em stream copy"))
+    return segs, render_kwargs(cfg, has_cuts=has_cuts)
 
 
 def render_kwargs(cfg: dict | None = None, has_cuts: bool = False) -> dict:

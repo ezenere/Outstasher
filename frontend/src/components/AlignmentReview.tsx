@@ -53,6 +53,20 @@ function fmtT(s: number): string {
   return `${m}:${String(Math.floor(s % 60)).padStart(2, '0')}`
 }
 
+/** Selo de tela preta no original (medida do alinhador, extra.picture_s):
+ *  intervalo/abertura/fim sem dublagem que a política de corte deixa no
+ *  vídeo, mudo. Abaixo de 0,5 s de imagem é borda de fade (mesmo limite do
+ *  backend, advanced_merge.BLACK_PICTURE_TOL_S). */
+function blackLabel(s: EdlSegment): string | null {
+  const pic = s.extra?.picture_s
+  if (pic == null || s.b_start == null || s.b_end == null) return null
+  if (pic < 0.5) return 'tela preta'
+  if (pic <= (s.b_end - s.b_start) / 2) {
+    return `tela preta + ${pic.toFixed(1).replace('.', ',')} s de imagem`
+  }
+  return null
+}
+
 function positionOf(seg: EdlSegment, dur: number): 'start' | 'end' | 'middle' {
   if (seg.a_start <= dur * 0.15) return 'start'
   if (seg.a_end >= dur * 0.85) return 'end'
@@ -302,6 +316,11 @@ export default function AlignmentReview({ job, onResolved }: {
                             <span className="ml-1.5 text-zinc-500 tabular-nums">
                               {fmtT(s.a_start)}–{fmtT(s.a_end)}
                             </span>
+                            {blackLabel(s) && (
+                              <span className="ml-1.5 rounded bg-zinc-800 px-1 py-px text-[10px] text-zinc-400">
+                                {blackLabel(s)}
+                              </span>
+                            )}
                           </span>
                           {act ? (
                             <span className="shrink-0 rounded bg-emerald-950 px-1.5 py-px text-[10px] text-emerald-300">
@@ -358,6 +377,11 @@ export default function AlignmentReview({ job, onResolved }: {
                                     : `${Math.round(seg.residual)}/64 (${seg.residual < 12 ? 'igual' : seg.residual < 20 ? 'parecido' : 'diferente'})`}
                                 </span>
                               : <> · confiança {(seg.confidence * 100).toFixed(0)}%</>}
+                            {blackLabel(seg) && (
+                              <span title="No original, este trecho é tela preta. Com a política de corte ele fica no vídeo, mudo — cortar re-encodaria o vídeo inteiro.">
+                                {' '}· {blackLabel(seg)}
+                              </span>
+                            )}
                           </span>
                         </div>
                       </div>

@@ -151,6 +151,12 @@ async def _run_advanced(job: dict, video_file: Path, audio_file: Path):
         job["detail"] = "Alinhamento avançado: refino por áudio..."
         segs = await asyncio.to_thread(
             refine.refine_offsets, segs, dub, dub_a, orig, orig_a, log)
+        # tela preta dos trechos sem dublagem medida já aqui: vai na EDL, a
+        # revisão mostra e o render decide sem decodificar de novo
+        from services import advanced_merge
+        await asyncio.to_thread(advanced_merge.mark_black, segs,
+                                advanced_merge.for_job(job), orig,
+                                edl_dict["source_orig"]["duration"], log)
         dur_a = edl_dict["source_dub"]["duration"]
         segs, needs = rules.apply_rules(segs, job.get("review_rules") or [], dur_a)
         extras = {k: edl_dict[k] for k in ("merged_side", "a_window", "b_window", "note")
@@ -192,14 +198,15 @@ async def _render_advanced(job: dict):
         _set(job, "merging", "Renderizando a EDL...")
         segs = edl_mod.segments(adv["edl"])
         from services import advanced_merge
-        from services.series.align import rules as rules_mod
         politica = advanced_merge.for_job(job)
         dur_a = float((adv["edl"].get("source_dub") or {}).get("duration") or 0.0)
-        segs, _ = rules_mod.apply_rules(segs, advanced_merge.default_rules(politica), dur_a)
-        extra_kw = advanced_merge.render_kwargs(
-            politica, has_cuts=any(sg.extra.get("action") == "cut_video" for sg in segs))
+        dur_b = float((adv["edl"].get("source_orig") or {}).get("duration") or 0.0) or None
         # passo 1 do render: faixa dublada remontada (arquivo intermediário)
         log, on_progress = _ffmpeg_hooks(job, runtime.PHASE_EDL)
+        # EDL de antes da medição de tela preta é medida aqui (ffmpeg: thread)
+        segs, extra_kw = await asyncio.to_thread(
+            advanced_merge.prepare_render, segs, politica, adv["video_file"],
+            dur_b, dur_a, log)
         if adv["edl"].get("note"):
             log(adv["edl"]["note"])
         # legendas externas dos DOIS torrents entram no próprio mux do render
