@@ -261,13 +261,15 @@ def torrent_view(c: dict | None) -> dict | None:
 
 def search_view(job: dict) -> dict | None:
     """A antiga job["search"] de filme: {audio: [...], video: [...]}, ou None
-    quando o job não tem lista para escolher (busca não terminou/falhou,
-    recompressão, arquivos locais, série). "Pular busca" abre a escolha com
-    as listas vazias — é nela que o magnet é colado."""
+    quando o job não tem lista para escolher (busca não rodou, recompressão,
+    arquivos locais, série). "Pular busca" e a busca que não achou nada
+    (há consultas gravadas, mas nenhum escolhível) abrem a escolha com as
+    listas vazias — é nela que o magnet é colado."""
     if job.get("media_type") == "tv":
         return None
     lists = {r: [movie_view(c) for c in selectable(job, r)] for r in ("audio", "video")}
-    if lists["audio"] or lists["video"] or job.get("skip_search"):
+    if (lists["audio"] or lists["video"] or job.get("skip_search")
+            or job.get("search_queries")):
         return lists
     return None
 

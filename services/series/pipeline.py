@@ -34,6 +34,11 @@ KIND_LABEL = {"both": "original + dublado (merge)",
               "original": "só original", "dubbed": "só dublado"}
 
 
+def _roles_phrase(roles) -> str:
+    """"o original", "o dublado" ou "o original e o dublado" (mensagens)."""
+    return " e ".join(f"o {ROLE_LABEL[r]}" for r in roles)
+
+
 def roles_of(job: dict) -> tuple[str, ...]:
     """Papéis que este job baixa — o mesmo `kind` dos filmes. Job antigo
     (kind "series", de antes da opção existir) baixa os dois."""
@@ -443,6 +448,22 @@ async def _plan_and_gate(job: dict):
             for role in roles_of(job)}
         _store_plan(job, plans)
 
+        vazios = [r for r in roles_of(job)
+                  if not any(t["role"] == r for t in job["torrents"])]
+        if vazios and not job.get("skip_search"):
+            # a busca não achou NADA para um papel (ou para o job): sem torrent
+            # num papel, todo episódio é lacuna e "continuar com as lacunas"
+            # não teria o que baixar — antes o job acabava em "Plano vazio".
+            # Abre a escolha manual (que aceita magnet/link próprio por papel
+            # e buscar de novo) SEM trocar o modo do job: um job auto que
+            # depois acha tudo na nova busca segue sozinho, como os filmes
+            detail = (f"Nenhum torrent encontrado para "
+                      f"{_roles_phrase(vazios)} — cole um magnet/link ou "
+                      f"tente buscar de novo")
+            jobs._event(job, "search", f"⚠️ {detail}")
+            _gate(job, "manual_pick", None, detail)
+            return
+
     if job["mode"] == "manual" and not job.get("_manual_done"):
         _gate(job, "manual_pick", None, "Escolha os torrents (modo manual)")
         return
@@ -533,10 +554,21 @@ def _aired_ref(job: dict, search_ref: tuple[int, int]) -> tuple[int, int]:
     return search_ref
 
 
-def _plan_summary(job: dict) -> list[dict]:
-    return [{"n": t["n"], "role": t["role"], "title": t["title"],
-             "quality": t.get("quality"), "coverage": t["coverage"]}
-            for t in job["torrents"]]
+def _preselected(by_torrent: dict[str, list[dict]]) -> list[dict]:
+    """O plano atual como a escolha manual o pré-marca: cada torrent do plano
+    com o id da linha que o representa em by_torrent e a cobertura de agora
+    (a que os ARQUIVOS confirmaram, num torrent já enviado)."""
+    out = [{"n": c["planned"]["n"], "role": role, "candidate_id": c["id"],
+            "title": c["title"], "quality": c.get("quality"),
+            "coverage": c["planned"]["coverage"],
+            "state": c["planned"]["state"]}
+           for role, lst in by_torrent.items() for c in lst if c["planned"]]
+    return sorted(out, key=lambda p: p["n"])
+
+
+def _sent(t: dict) -> bool:
+    """O torrent já foi enviado ao qBittorrent por este job (baixa/baixou)."""
+    return t["state"] != "pending"
 
 
 def _collect_gaps(job: dict) -> list[dict]:
@@ -588,31 +620,90 @@ def _episode_counts_by_season(job: dict) -> dict[int, int]:
     return counts
 
 
+def _remaining_after_gaps(job: dict) -> list[str]:
+    """Episódios que sobram para baixar se as lacunas forem aceitas (os
+    cobertos em todos os papéis do job)."""
+    gaps = {g["episode"] for g in _collect_gaps(job)}
+    return [ep_key(s, e) for s, e in _active_refs(job)
+            if ep_key(s, e) not in gaps]
+
+
+def _plan_id(t: dict) -> str:
+    """Id, na escolha manual, de um torrent do plano que não está entre os
+    candidatos da busca (magnet próprio; candidato que uma busca refeita
+    não trouxe de novo)."""
+    return f"plan:{t['n']}"
+
+
+def _plan_as_candidate(t: dict) -> dict:
+    """Torrent do plano no formato de candidato (a cobertura do candidato é
+    o RÓTULO; a do torrent é a lista de episódios)."""
+    return {"id": _plan_id(t), "title": t["title"], "tracker": t.get("tracker"),
+            "seeders": t.get("seeders"), "size": t.get("size"),
+            "quality": t.get("quality"), "coverage": t.get("coverage_label"),
+            "score": None, "tier": None, "magnet": t.get("magnet"),
+            "link": t.get("link"), "infohash": t.get("infohash"),
+            "files": t.get("files_count")}
+
+
+def _planned_view(t: dict) -> dict:
+    prog = t.get("progress")
+    return {"n": t["n"], "state": t["state"], "coverage": list(t["coverage"]),
+            "pct": prog.get("pct") if isinstance(prog, dict) else None}
+
+
+def _title_matches(job: dict, title: str, shrunk=()) -> list[str]:
+    """Episódios pedidos que o TÍTULO cobre, fora os que os ARQUIVOS de um
+    torrent já enviado desmentiram (coverage_shrunk): devolvê-los a ele
+    pelo "auto" recriaria a lacuna que o watchdog acabou de achar."""
+    known = set(job.get("known_seasons") or [])
+    cov = parse.parse_coverage(title)
+    return [ep_key(s, e) for s, e in _active_refs(job)
+            if ep_key(s, e) not in shrunk
+            and cov.covers(*_search_ref(job, ep_key(s, e)), known)]
+
+
 def _torrent_candidates(job: dict) -> dict[str, list[dict]]:
     """Candidatos ÚNICOS por papel (dedup por identidade), cada um com os
     episódios pedidos que o TÍTULO cobre — a visão invertida da escolha
-    manual: marca-se o torrent e atribuem-se episódios a ele."""
-    known = set(job.get("known_seasons") or [])
-    refs = _active_refs(job)
+    manual: marca-se o torrent e atribuem-se episódios a ele.
+
+    Os torrents do PLANO (pendentes e os já enviados ao qBittorrent) vêm
+    marcados em `planned` e no topo: a escolha abre com o plano atual
+    pré-selecionado e a confirmação o SUBSTITUI. Caso real: o gate de
+    lacunas aberto no meio do download levava a uma escolha vazia; o usuário
+    marcava só o que faltava e o job juntava tudo, baixando em dobro."""
     out: dict[str, list[dict]] = {}
     for role in roles_of(job):
+        plan: dict[str, dict] = {}
+        for t in job["torrents"]:
+            if t["role"] == role:
+                plan.setdefault(parse.torrent_identity(t), t)
         seen: dict[str, dict] = {}
-        for c in candidates.selectable(job, role):
-            ident = parse.torrent_identity(c)
-            if ident in seen:
-                continue
-            cov = parse.parse_coverage(c["title"])
-            matches = [ep_key(s, e) for s, e in refs
-                       if cov.covers(*_search_ref(job, ep_key(s, e)), known)]
+
+        def add(c: dict, ident: str):
+            t = plan.get(ident)
             seen[ident] = {
                 "id": c["id"], "title": c["title"],
                 "tracker": c.get("tracker"), "seeders": c.get("seeders"),
                 "size": c.get("size"), "quality": c.get("quality"),
                 "coverage": c.get("coverage"), "score": c.get("score"),
-                "tier": c.get("tier"), "matches": matches,
+                "tier": c.get("tier"),
+                "matches": _title_matches(
+                    job, c["title"], (t or {}).get("coverage_shrunk") or ()),
+                "planned": _planned_view(t) if t else None,
             }
+        for c in candidates.selectable(job, role):
+            ident = parse.torrent_identity(c)
+            if ident not in seen:
+                add(c, ident)
+        for ident, t in plan.items():
+            if ident not in seen:
+                add(_plan_as_candidate(t), ident)
         out[role] = sorted(seen.values(),
-                           key=lambda c: (-(c.get("tier") or 0),
+                           key=lambda c: (c["planned"] is None,
+                                          (c["planned"] or {}).get("n", 0),
+                                          -(c.get("tier") or 0),
                                           -len(c["matches"])))
     return out
 
@@ -654,7 +745,11 @@ def gate_payload(job: dict, reason: str) -> dict | None:
         return {"missing": _collect_gaps(job),
                 # aberto com download em curso (pack sem os arquivos esperados):
                 # algum torrent já foi enviado ao qBittorrent
-                "mid_download": any(t.get("hash") for t in job["torrents"])}
+                "mid_download": any(t.get("hash") for t in job["torrents"]),
+                # aceitar as lacunas não deixaria NENHUM episódio para baixar:
+                # a UI não oferece "continuar" (o resolve também recusa)
+                "nothing_left": not _remaining_after_gaps(job),
+                "can_research": _can_research(job)}
     if reason == "alignment_review":
         # .get: o dict de uma listagem não carrega as EDLs (store.LIST_SECTIONS)
         return {"episodes": {k: v.get("edl") for k, v in sorted(job["episodes"].items())
@@ -665,9 +760,16 @@ def gate_payload(job: dict, reason: str) -> dict | None:
     if reason == "manual_pick":
         # visão INVERTIDA (torrent -> episódios): candidatos únicos por papel
         # com os episódios pedidos que o TÍTULO de cada um cobre
-        return {"by_torrent": _torrent_candidates(job),
+        by = _torrent_candidates(job)
+        return {"by_torrent": by,
                 "requested": [ep_key(s, e) for s, e in _active_refs(job)],
-                "preselected": _plan_summary(job)}
+                "preselected": _preselected(by),
+                # papéis em que a busca não trouxe NENHUM candidato (a UI
+                # explica e oferece o magnet/link próprio e a nova busca)
+                "empty_roles": ([r for r in roles_of(job)
+                                 if not candidates.selectable(job, r)]
+                                if not job.get("skip_search") else []),
+                "can_research": _can_research(job)}
     if reason == "incompatible_torrents":
         return {"torrents": _collect_signals(job),
                 "episode_groups": job.get("episode_groups") or []}
@@ -697,7 +799,9 @@ async def resolve(job_id: str, reason: str, decision: dict) -> dict | None:
 
     Decisões por gate:
     - manual_pick:           {torrents: [{candidate_id, role,
-                              episodes: [ep_key,...] | "auto"}]}  (invertido)
+                              episodes: [ep_key,...] | "auto"}],
+                              replace_plan: true}  (invertido; a seleção
+                              SUBSTITUI o plano — ver _plan_manual_torrents)
                              ou {picks: {ep_key: {role: id}}}     (legado)
     - gaps_confirm:          {accept: bool} | {edit: true} (voltar ao manual)
     - incompatible_torrents: {action: "accept"}
@@ -749,6 +853,13 @@ async def resolve(job_id: str, reason: str, decision: dict) -> dict | None:
                 cancelled = jobs._lookup(job_id)
                 return jobs._public(cancelled) if cancelled else None
             else:
+                if not _remaining_after_gaps(job):
+                    # sem nenhum episódio coberto o job só acabaria em erro
+                    # ("Plano vazio"/"Nenhum episódio baixado")
+                    raise ValueError(
+                        "Nenhum episódio tem torrent em todos os papéis — não "
+                        "há o que baixar. Edite a seleção (dá para colar um "
+                        "magnet/link próprio), busque de novo ou cancele o job")
                 _apply_gaps(job)
                 job["_gaps_accepted"] = True
                 jobs._event(job, "chosen",
@@ -767,7 +878,7 @@ async def resolve(job_id: str, reason: str, decision: dict) -> dict | None:
             else:
                 raise ValueError(f"Ação inválida: {action!r}")
         elif reason == "manual_pick":
-            _apply_manual(job, decision)
+            await _resolve_manual(job, decision)
             job["_manual_done"] = True
         elif reason == "mismatched_pairs":
             from services.series import rematch
@@ -950,25 +1061,41 @@ async def _apply_remap(job: dict, decision: dict):
                 f"busca e plano refeitos nessa numeração")
 
 
-def _apply_manual(job: dict, decision: dict):
+async def _resolve_manual(job: dict, decision: dict):
+    """Escolha manual vinda do resolve. No formato invertido, o qBittorrent
+    vem PRIMEIRO: os torrents que saem do plano depois de enviados são
+    removidos de lá antes de o plano novo valer — se o qBittorrent não
+    responder, o resolve restaura o gate com o plano antigo intacto (nada
+    de um plano que não baixa mais o torrent X enquanto o X segue baixando)."""
+    if decision.get("torrents") is None:
+        _apply_manual(job, decision)
+        return
+    plan, removed, msg = _plan_manual_torrents(job, decision)
+    await _drop_sent(job, removed, plan)
+    _commit_manual(job, plan, msg)
+
+
+def _apply_manual(job: dict, decision: dict) -> list[dict]:
     """Aplica a escolha manual. Dois formatos:
 
     - INVERTIDO (a UI atual): {torrents: [{candidate_id, role,
-      episodes: [ep_key,...] | "auto"}]} — marca-se o torrent e diz-se quais
-      episódios ele atende; "auto" usa o match pelo TÍTULO (e o match fino
-      pelo ARQUIVO acontece de graça depois do download, no
-      _resolve_episode_files). Papel com algum torrent marcado tem o plano
-      SUBSTITUÍDO pela seleção; papel sem marca mantém o plano automático.
-      Episódio atribuído que o título não indica é aceito (decisão explícita
-      do usuário — a UI avisa antes).
+      episodes: [ep_key,...] | "auto"}], replace_plan} — marca-se o torrent
+      e diz-se quais episódios ele atende; "auto" usa o match pelo TÍTULO (e
+      o match fino pelo ARQUIVO acontece de graça depois do download, no
+      _resolve_episode_files). Regras em _plan_manual_torrents. Episódio
+      atribuído que o título não indica é aceito (decisão explícita do
+      usuário — a UI avisa antes).
     - por episódio (legado): {picks: {ep_key: {role: candidate_id}}}.
+
+    Devolve os torrents que saíram do plano já tendo sido enviados ao
+    qBittorrent (quem chama pelo resolve os remove de lá: _resolve_manual).
     """
     if decision.get("torrents") is not None:
         return _apply_manual_torrents(job, decision)
     picks = decision.get("picks") or {}
     if not picks:
         jobs._event(job, "chosen", "Modo manual: usuário manteve o plano automático")
-        return
+        return []
     # agrupa escolhas por candidato (o mesmo pack escolhido para vários
     # episódios vira UM torrent)
     by_ident: dict[tuple[str, str], dict] = {}
@@ -1015,6 +1142,7 @@ def _apply_manual(job: dict, decision: dict):
     jobs._event(job, "chosen",
                 f"Modo manual: {len(picks)} episódio(s) com escolha explícita")
     jobs._persist(job)
+    return []
 
 
 def _find_candidate(job: dict, role: str, candidate_id: str) -> dict:
@@ -1055,18 +1183,90 @@ def _custom_candidate(sel: dict) -> dict:
     }
 
 
-def _apply_manual_torrents(job: dict, decision: dict):
+def _plan_torrent(job: dict, role: str, cid: str) -> dict:
+    """Torrent do plano referenciado pela escolha manual ("plan:<n>"): o
+    magnet próprio já planejado, que não é candidato da busca."""
+    try:
+        n = int(cid.split(":", 1)[1])
+    except (IndexError, ValueError):
+        raise ValueError(f"Torrent do plano inválido: {cid!r}")
+    t = next((x for x in job["torrents"] if x["n"] == n and x["role"] == role),
+             None)
+    if t is None:
+        raise ValueError(f"t{n} não está mais no plano ({ROLE_LABEL[role]})")
+    return _plan_as_candidate(t)
+
+
+def _new_entry(job: dict, n: int, role: str, cand: dict, eps) -> dict:
+    return {
+        "n": n, "role": role, "tag": f"dl-{job['id']}-t{n}",
+        "title": cand["title"], "tracker": cand.get("tracker"),
+        "seeders": cand.get("seeders"), "size": cand.get("size"),
+        "quality": cand.get("quality"),
+        "coverage_label": cand.get("coverage"),
+        "magnet": cand.get("magnet"), "link": cand.get("link"),
+        "infohash": cand.get("infohash"), "files_count": cand.get("files"),
+        "coverage": sorted(eps), "state": "pending",
+        "hash": None, "progress": None, "selected_files": None,
+        "content_path": None,
+    }
+
+
+def _kept_entry(t: dict, eps) -> dict:
+    """Torrent do plano MANTIDO pela escolha: a mesma entrada (n, tag, hash,
+    estado — nada é reenviado ao qBittorrent), com a cobertura nova.
+
+    Pack já enviado teve os arquivos escolhidos para a cobertura antiga. Se
+    GANHA episódio, os arquivos dele podem estar com prioridade 0; se, ainda
+    baixando, PERDE episódio para outro torrent, seguiria baixando-o em
+    dobro. Nos dois casos selected_files volta a None e o watchdog refaz a
+    seleção (religando/desligando arquivos); um pack que já tinha concluído
+    e ganhou episódio volta a baixar."""
+    new = dict(t, coverage=sorted(eps))
+    grew = set(eps) - set(t["coverage"])
+    shrank = set(t["coverage"]) - set(eps)
+    if _sent(t) and t.get("selected_files") and (
+            grew or (shrank and t["state"] == "downloading")):
+        new["selected_files"] = None
+        if t["state"] == "done":
+            new.update(state="downloading", content_path=None)
+    return new
+
+
+def _plan_manual_torrents(job: dict, decision: dict
+                          ) -> tuple[list[dict], list[dict], str]:
     """Formato invertido: torrents marcados -> episódios atribuídos. Cada item
-    referencia um candidato da busca (candidate_id) OU um magnet/link próprio
-    (magnet/link + title opcional)."""
+    referencia um candidato da busca (candidate_id), um torrent do plano sem
+    candidato ("plan:<n>") OU um magnet/link próprio (magnet/link + title
+    opcional). PURO: devolve (plano novo, torrents enviados que saem, evento)
+    sem mexer no job — _commit_manual aplica.
+
+    Conflitos no mesmo papel: atribuição explícita vence a "auto" (entre
+    explícitas, a última); entre "auto", vence a primeira da seleção — a UI
+    manda o plano atual na frente. Nunca dois torrents do job cobrem o mesmo
+    episódio no mesmo papel.
+
+    replace_plan (a UI atual, que abre com o plano PRÉ-SELECIONADO): a
+    seleção é o plano inteiro, em todos os papéis. Torrent mantido (mesma
+    identidade: infohash/btih/link) continua sendo a mesma entrada; o que
+    não foi marcado — ou ficou sem episódio — sai do plano, inclusive o que
+    já baixa/baixou (o resolve o tira do qBittorrent); o novo entra pendente.
+
+    Sem replace_plan (formato antigo, de uma aba aberta antes): só o papel
+    com marca muda, e o torrent dele que já foi enviado fica, perdendo os
+    episódios que a seleção assumiu — não dá para apagar dados baixados com
+    base numa escolha que não mostrava o plano."""
     sels = decision.get("torrents") or []
+    replace = bool(decision.get("replace_plan"))
     if not sels:
-        jobs._event(job, "chosen",
-                    "Modo manual: usuário manteve o plano automático")
-        return
-    known = set(job.get("known_seasons") or [])
+        if replace:
+            raise ValueError(
+                "Nenhum torrent marcado — marque ao menos um (ou cole um "
+                "magnet/link próprio), busque de novo ou cancele o job")
+        return (job["torrents"], [],
+                "Modo manual: usuário manteve o plano automático")
     valid_keys = {ep_key(s, e) for s, e in _active_refs(job)}
-    # (role, identidade) -> {cand, eps explícitos, auto?}
+    # (role, identidade) -> {cand, eps, explícitos}; a ordem é a da seleção
     chosen: dict[tuple[str, str], dict] = {}
     roles_touched: set[str] = set()
     n_custom = 0
@@ -1074,16 +1274,21 @@ def _apply_manual_torrents(job: dict, decision: dict):
         role = sel.get("role")
         if role not in roles_of(job):
             raise ValueError(f"Papel inválido para este job: {role!r}")
+        cid = sel.get("candidate_id")
         if sel.get("magnet") or sel.get("link"):
             cand = _custom_candidate(sel)
             n_custom += 1
+        elif isinstance(cid, str) and cid.startswith("plan:"):
+            cand = _plan_torrent(job, role, cid)
         else:
-            cand = _find_candidate(job, role, sel.get("candidate_id"))
+            cand = _find_candidate(job, role, cid)
+        ident = parse.torrent_identity(cand)
+        in_plan = next((t for t in job["torrents"] if t["role"] == role
+                        and parse.torrent_identity(t) == ident), None)
         eps = sel.get("episodes", "auto")
         if eps == "auto":
-            cov = parse.parse_coverage(cand["title"])
-            eps = [ep_key(s, e) for s, e in _active_refs(job)
-                   if cov.covers(*_search_ref(job, ep_key(s, e)), known)]
+            eps = _title_matches(job, cand["title"],
+                                 (in_plan or {}).get("coverage_shrunk") or ())
             if not eps and cand["tracker"] == "manual":
                 raise ValueError(
                     f"O título '{cand['title']}' não indica temporada/episódio "
@@ -1095,74 +1300,139 @@ def _apply_manual_torrents(job: dict, decision: dict):
                 raise ValueError("Episódio(s) fora do pedido: " + ", ".join(bad))
             explicit = True
         roles_touched.add(role)
-        key = (role, parse.torrent_identity(cand))
-        entry = chosen.setdefault(key, {"cand": cand, "eps": set(),
-                                        "explicit": set()})
+        entry = chosen.setdefault((role, ident), {"cand": cand, "eps": set(),
+                                                  "explicit": set()})
         entry["eps"].update(eps)
         if explicit:
             entry["explicit"].update(eps)
 
-    # atribuição explícita vence a automática quando dois torrents do mesmo
-    # papel disputam o mesmo episódio
     for role in roles_touched:
         taken: dict[str, tuple[str, str]] = {}
         for key, entry in chosen.items():
-            if key[0] != role:
-                continue
-            for k in sorted(entry["explicit"]):
-                taken[k] = key
+            if key[0] == role:
+                for k in sorted(entry["explicit"]):
+                    taken[k] = key            # explícito: o último vence
         for key, entry in chosen.items():
-            if key[0] != role:
-                continue
-            entry["eps"] = {k for k in entry["eps"]
-                            if taken.get(k, key) == key}
+            if key[0] == role:
+                # "auto": o primeiro que chega fica com o episódio
+                entry["eps"] = {k for k in sorted(entry["eps"])
+                                if taken.setdefault(k, key) == key}
 
-    # papel com seleção: o plano daquele papel É a seleção — entre os torrents
-    # ainda PENDENTES. Torrent que já baixa/baixou (edição no meio do download,
-    # depois de o pack revelar que não tinha tudo) fica, mas perde os episódios
-    # que a nova seleção assume; se um candidato escolhido JÁ está no plano,
-    # só a cobertura dele é atualizada
-    newly: dict[str, set[str]] = {}
+    affected = set(roles_of(job)) if replace else roles_touched
+    newly: dict[str, set[str]] = {r: set() for r in affected}
     for (role, _ident), entry in chosen.items():
-        newly.setdefault(role, set()).update(entry["eps"])
-    kept = []
+        newly[role] |= entry["eps"]
+    # n nunca repete o de um torrent que acabou de sair (a tag dl-<job>-t<n>
+    # é como o watchdog acha o torrent no qBittorrent)
+    next_n = max((t["n"] for t in job["torrents"]), default=-1) + 1
+    plan: list[dict] = []
+    removed: list[dict] = []
+    kept: set[tuple[str, str]] = set()
     for t in job["torrents"]:
-        if t["role"] not in roles_touched:
-            kept.append(t)
+        if t["role"] not in affected:
+            plan.append(t)
             continue
-        if t["state"] == "pending":
-            continue  # substituído pela seleção
-        t["coverage"] = [k for k in t["coverage"] if k not in newly[t["role"]]]
-        kept.append(t)
-    job["torrents"] = kept
-    for (role, ident), entry in chosen.items():
-        if not entry["eps"]:
+        key = (t["role"], parse.torrent_identity(t))
+        entry = chosen.get(key)
+        if entry is not None and entry["eps"] and key not in kept:
+            kept.add(key)
+            plan.append(_kept_entry(t, entry["eps"]))
             continue
-        cand = entry["cand"]
-        existing = next((t for t in job["torrents"] if t["role"] == role
-                         and parse.torrent_identity(t) == ident), None)
-        if existing:
-            existing["coverage"] = sorted(set(existing["coverage"]) | entry["eps"])
+        if replace or not _sent(t):
+            if _sent(t):
+                removed.append(t)
             continue
-        n = max((t["n"] for t in job["torrents"]), default=-1) + 1
-        job["torrents"].append({
-            "n": n, "role": role, "tag": f"dl-{job['id']}-t{n}",
-            "title": cand["title"], "tracker": cand.get("tracker"),
-            "seeders": cand.get("seeders"), "size": cand.get("size"),
-            "quality": cand.get("quality"),
-            "coverage_label": cand.get("coverage"),
-            "magnet": cand.get("magnet"), "link": cand.get("link"),
-            "infohash": cand.get("infohash"), "files_count": cand.get("files"),
-            "coverage": sorted(entry["eps"]), "state": "pending",
-            "hash": None, "progress": None, "selected_files": None,
-            "content_path": None,
-        })
-    jobs._event(job, "chosen",
-                f"Modo manual: {len(sels)} torrent(s) escolhido(s) "
-                f"({', '.join(sorted(roles_touched))})"
-                + (f", {n_custom} magnet(s)/link(s) próprio(s)" if n_custom else "")
-                + " — lacunas passam pelo gate normal")
+        # formato antigo: o que já baixa/baixou fica, sem os episódios que a
+        # seleção assumiu
+        plan.append(dict(t, coverage=[k for k in t["coverage"]
+                                      if k not in newly[t["role"]]]))
+    n_new = 0
+    for key, entry in chosen.items():
+        if not entry["eps"] or key in kept:
+            continue
+        plan.append(_new_entry(job, next_n + n_new, key[0], entry["cand"],
+                               entry["eps"]))
+        n_new += 1
+    if not plan:
+        raise ValueError(
+            "A seleção não deixa nenhum torrent com episódio atribuído — "
+            "marque ao menos um (ou cole um magnet/link próprio)")
+    msg = (f"Modo manual: {len(sels)} torrent(s) escolhido(s) "
+           f"({', '.join(sorted(roles_touched))})"
+           + (f", {n_custom} magnet(s)/link(s) próprio(s)" if n_custom else "")
+           + (f" — plano substituído: {len(kept)} mantido(s), {n_new} novo(s), "
+              f"{len(removed)} enviado(s) removido(s)" if replace else "")
+           + " — lacunas passam pelo gate normal")
+    return plan, removed, msg
+
+
+def _commit_manual(job: dict, plan: list[dict], msg: str):
+    job["torrents"] = plan
+    jobs._event(job, "chosen", msg)
     jobs._persist(job)
+
+
+def _apply_manual_torrents(job: dict, decision: dict) -> list[dict]:
+    """Calcula e aplica a escolha invertida (sem tocar no qBittorrent:
+    devolve os enviados que saíram — o resolve usa _resolve_manual)."""
+    plan, removed, msg = _plan_manual_torrents(job, decision)
+    _commit_manual(job, plan, msg)
+    return removed
+
+
+async def _drop_sent(job: dict, removed: list[dict], plan: list[dict]):
+    """Tira do qBittorrent os torrents que saíram do plano depois de enviados.
+
+    Acha cada um pela tag dele (dl-<job>-t<n>), não pelo hash: um magnet
+    ainda sem metadados já está no qBittorrent, mas o job ainda não leu o
+    hash. Apaga COM os dados baixados — a mesma regra da troca de torrent
+    (filme e série) e da limpeza do cancel: o torrent desmarcado é o que o
+    usuário decidiu não usar, e deixá-lo lá (sem a tag, ninguém do job o
+    limparia depois) é justamente o download em dobro do caso real; a UI
+    confirma antes, avisando que os arquivos vão junto. O mesmo torrent
+    servindo a OUTRO torrent do plano (pack DUAL nos dois papéis) ou a outro
+    job (409 no add = tag do outro no mesmo torrent) perde só as tags que
+    não valem mais."""
+    if not removed:
+        return
+    shared = shared_tag(job)
+    live = {t["tag"] for t in plan}
+    for t in removed:
+        try:
+            infos = await asyncio.wait_for(
+                jobs._qbit.info_by_tag(t["tag"]), timeout=15)
+            for info in infos:
+                h = info.get("hash")
+                if not h:
+                    continue
+                tags = {x.strip() for x in (info.get("tags") or "").split(",")
+                        if x.strip()}
+                ours = {x for x in tags
+                        if x == shared or x.startswith(shared + "-t")}
+                vivos = ours & live
+                if vivos or tags - ours:
+                    drop = ours - vivos - ({shared} if vivos else set())
+                    if drop:
+                        await asyncio.wait_for(jobs._qbit.remove_tag(
+                            h, ",".join(sorted(drop))), timeout=15)
+                    quem = "outro torrent deste job" if vivos else "outro job"
+                    jobs._event(job, "qbit",
+                                f"t{t['n']} saiu do plano — o torrent fica no "
+                                f"qBittorrent porque também serve a {quem}: "
+                                f"{t['title']}")
+                else:
+                    await asyncio.wait_for(
+                        jobs._qbit.delete(h, delete_files=True), timeout=15)
+                    jobs._event(job, "qbit",
+                                f"🗑️ t{t['n']} saiu do plano — removido do "
+                                f"qBittorrent com os dados baixados: "
+                                f"{t['title']}")
+        except (asyncio.TimeoutError, *jobs._CONN_ERRORS) as e:
+            reason = (f"{type(e).__name__}: {e}" if str(e)
+                      else type(e).__name__)
+            raise ValueError(
+                f"O qBittorrent não respondeu ao remover t{t['n']} "
+                f"({reason}) — a seleção não foi aplicada; tente de novo") from e
 
 
 # -------------------- download --------------------
@@ -1251,7 +1521,8 @@ async def _wait_downloads(job: dict):
                     continue
                 missing[t["n"]] = None
                 t["hash"] = info.get("hash")
-                await _ensure_file_selection(job, t)
+                if await _ensure_file_selection(job, t):
+                    continue  # arquivos religados: o progresso deste tick é velho
                 pct = info.get("progress", 0)
                 t["progress"] = {
                     "pct": round(pct * 100, 1), "speed": info.get("dlspeed", 0),
@@ -1352,29 +1623,39 @@ def _match_pack_files(job: dict, t: dict, files: list[dict]
     return keep, drop, found
 
 
-async def _ensure_file_selection(job: dict, t: dict):
+async def _ensure_file_selection(job: dict, t: dict) -> bool:
     """Pack: baixa só os arquivos dos episódios atendidos por este torrent.
 
-    Roda uma vez, quando os metadados chegam. Arquivo sem referência de
-    episódio no nome fica FORA (não dá para saber o que é); se nenhum arquivo
-    casar, mantém tudo (nome de arquivo fora do padrão — melhor baixar de mais
-    do que de menos)."""
+    Roda uma vez, quando os metadados chegam — e de novo quando a edição da
+    escolha muda a cobertura de um pack já enviado (_kept_entry zera
+    selected_files). Arquivo sem referência de episódio no nome fica FORA
+    (não dá para saber o que é); se nenhum arquivo casar, mantém tudo (nome
+    de arquivo fora do padrão — melhor baixar de mais do que de menos).
+
+    Devolve True quando RELIGOU arquivo que uma seleção anterior desligou: o
+    progresso lido neste tick é de antes disso (um pack concluído ainda
+    marcaria 100%) e não vale."""
     if t["selected_files"] is not None or not t.get("hash"):
-        return
+        return False
     cov = parse.parse_coverage(t["title"])
     if cov.kind in ("episode",):  # torrent de 1 episódio: nada a desmarcar
         t["selected_files"] = []
-        return
+        return False
     files = await jobs._qbit.files(t["hash"])
     if not files:
-        return  # metadados ainda não chegaram; tenta no próximo tick
+        return False  # metadados ainda não chegaram; tenta no próximo tick
     keep, drop, found = _match_pack_files(job, t, files)
+    # arquivo desligado (prioridade 0) por uma seleção anterior que agora
+    # volta a ser preciso
+    revive = [f["index"] for f in (keep or files) if f.get("priority") == 0]
+    if revive:
+        await jobs._qbit.file_prio(t["hash"], revive, 1)
     if not keep:
         t["selected_files"] = []
         jobs._event(job, "qbit",
                     f"⚠️ t{t['n']}: nenhum arquivo do pack casa com os episódios "
                     f"pedidos pelo nome — baixando o pack inteiro")
-        return
+        return bool(revive)
     await jobs._qbit.file_prio(t["hash"], [f["index"] for f in drop], 0)
     t["selected_files"] = [f["name"] for f in keep]
     jobs._event(job, "qbit",
@@ -1397,6 +1678,7 @@ async def _ensure_file_selection(job: dict, t: dict):
         # tenha aceitado lacunas antes (são OUTRAS lacunas)
         job.pop("_gaps_accepted", None)
         jobs._persist(job)
+    return bool(revive)
 
 
 async def _readd(job: dict, t: dict):
@@ -1516,6 +1798,46 @@ def torrent_alternatives(job_id: str, torrent_n: int) -> list[dict]:
     if t is None:
         raise ValueError(f"Torrent t{torrent_n} não existe neste job")
     return _alternatives_for(job, t)
+
+
+def _can_research(job: dict) -> bool:
+    """Dá para refazer a busca do zero? Só antes de qualquer torrent ir para
+    o qBittorrent (depois disso o plano tem downloads a preservar — o
+    caminho é editar a seleção) e se o job não pulou a busca."""
+    return (not job.get("skip_search")
+            and not any(_sent(t) for t in job["torrents"]))
+
+
+async def research(job_id: str) -> dict:
+    """"Buscar de novo" na escolha manual / no aviso de lacunas (ex.: a busca
+    não achou nada e o indexador estava fora, ou o release saiu agora).
+    Descarta o plano e o pool e reentra no _plan_and_gate, que refaz a busca
+    quando o pool não existe — o mesmo caminho de um restart."""
+    job = jobs._jobs.get(job_id)
+    if not job or job.get("media_type") != "tv":
+        raise ValueError("Job de série não encontrado")
+    gate = job.get("awaiting")
+    if (job["status"] != "awaiting" or not gate
+            or gate["reason"] not in ("manual_pick", "gaps_confirm")):
+        raise ValueError("Só dá para buscar de novo na escolha dos torrents "
+                         "ou no aviso de lacunas")
+    if job.get("skip_search"):
+        raise ValueError("Este job pulou a busca de torrents — cole o "
+                         "magnet/link na escolha")
+    if not _can_research(job):
+        raise ValueError("Já há torrent deste job no qBittorrent — use "
+                         "\"Editar seleção\" para trocar o plano")
+    job["awaiting"] = None
+    job["torrents"] = []
+    _pools.pop(job_id, None)
+    # decisões tomadas sobre o plano antigo não valem para o novo
+    for flag in ("_phase2_done", "_gaps_accepted", "_signals_accepted",
+                 "_manual_done"):
+        job.pop(flag, None)
+    jobs._event(job, "chosen", "Usuário pediu uma nova busca de torrents")
+    jobs._set(job, "searching", "Buscando de novo no Jackett...")
+    jobs._spawn(job_id, _continue_after_gate(job))
+    return jobs._public(job)
 
 
 async def _resolve_episode_files(job: dict):

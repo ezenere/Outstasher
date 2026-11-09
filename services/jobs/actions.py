@@ -110,6 +110,33 @@ async def select(job_id: str, audio_id: str | None, video_id: str | None,
     return _public(job)
 
 
+async def research(job_id: str) -> dict | None:
+    """"Buscar de novo" enquanto o job aguarda a escolha do torrent (ex.: a
+    busca não achou nada para um papel). Refaz a busca NO MESMO job — o ↻
+    (retry) é para job em erro/cancelado e cria outro. Filme: reentra no
+    pipeline do começo (_run), que no modo auto já baixa o que achar."""
+    job = _jobs.get(job_id)
+    if not job:
+        return None
+    if job.get("media_type") == "tv":
+        from services.series import pipeline as series_pipeline
+        return await series_pipeline.research(job_id)
+    if (job["status"] != "awaiting" or job.get("drift_confirm")
+            or job.get("awaiting") or not _has_torrents(job)):
+        raise ValueError("Só dá para buscar de novo enquanto o job aguarda a "
+                         "escolha do torrent")
+    if job.get("skip_search"):
+        raise ValueError("Este job pulou a busca de torrents — cole o "
+                         "magnet/link na escolha")
+    if any(candidates.active(job, k) for k in ("audio", "video")):
+        raise ValueError("Este job já tem torrent no qBittorrent — escolha "
+                         "outro na lista em vez de buscar de novo")
+    _event(job, "chosen", "Usuário pediu uma nova busca de torrents")
+    _set(job, "searching", "Buscando de novo no Jackett...")
+    _spawn(job["id"], movies._run(job))
+    return _public(job)
+
+
 async def switch(job_id: str, kind: str, candidate_id: str | None = None,
                  custom: dict | None = None) -> dict | None:
     """Troca manual de torrent durante o download.

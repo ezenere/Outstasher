@@ -604,14 +604,19 @@ def test_gates_de_busca_tambem_sao_derivados(temp_db):
     pipeline._gate(job, "manual_pick", {"by_torrent": "snapshot"}, "manual")
     assert job["awaiting"]["payload"] is None
     view = jobs._public(job)["awaiting"]["payload"]
-    assert set(view) == {"by_torrent", "requested", "preselected"}
+    assert set(view) == {"by_torrent", "requested", "preselected",
+                         "empty_roles", "can_research"}
     assert view["requested"] == ["S01E01", "S01E02"]
     by = {c["title"]: c for c in view["by_torrent"]["original"]}
-    # o pack é UM candidato (estava no ranking dos dois episódios)
-    assert len(view["by_torrent"]["original"]) == 2
+    # o pack é UM candidato (estava no ranking dos dois episódios); o torrent
+    # do plano que não é candidato da busca entra como "plan:<n>", no topo
+    assert [c["id"] for c in view["by_torrent"]["original"]][0] == "plan:0"
+    assert len(view["by_torrent"]["original"]) == 3
     assert by["Serie Exemplo S01 1080p BluRay"]["matches"] == ["S01E01", "S01E02"]
     assert by["Serie Exemplo S01E02 720p WEB-DL"]["matches"] == ["S01E02"]
     assert view["preselected"][0]["coverage"] == ["S01E01", "S01E02"]
+    assert view["preselected"][0]["candidate_id"] == "plan:0"
+    assert view["empty_roles"] == ["dubbed"] and view["can_research"] is True
 
     # torrent com nome ambíguo (numeração absoluta) -> sinal + alternativas
     job["torrents"] = [_torrent(0, "original", ["S01E01", "S01E02"],

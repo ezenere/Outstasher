@@ -1113,6 +1113,19 @@ async def retry_job(job_id: str):
     return job
 
 
+@app.post("/api/jobs/{job_id}/research")
+async def research_job(job_id: str):
+    """Refaz a busca de torrents no MESMO job enquanto ele aguarda a escolha
+    (ex.: a busca não achou nada para um papel). O retry é para job em erro."""
+    try:
+        job = await jobs.research(job_id)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    if not job:
+        raise HTTPException(404, "Job não encontrado")
+    return job
+
+
 @app.delete("/api/jobs/{job_id}")
 async def delete_job(job_id: str, delete_torrents: bool = False):
     if not await jobs.remove(job_id, delete_torrents):

@@ -1,11 +1,11 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Check, Download, EditPencil, FastArrowRight, MediaVideo, Refresh,
   SkipNext, SoundHigh, WarningTriangle,
 } from 'iconoir-react'
 import {
-  EPISODE_STATE_LABEL, fmtSize, post, prog, resolveGate,
+  EPISODE_STATE_LABEL, fmtSize, post, prog, researchJob, resolveGate,
   seriesTorrentCandidates, switchSeriesTorrent,
   type Candidate, type EpisodeState, type Job, type SeriesCandidate,
   type TorrentChoice,
@@ -520,7 +520,31 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
   const [custom, setCustom] = useState<TorrentChoice[]>([])
   const [customUrls, setCustomUrls] = useState<Record<string, string>>({})
   const [magnetForm, setMagnetForm] = useState<{ role: 'original' | 'dubbed'; url: string; title: string } | null>(null)
+  // a escolha abre com o PLANO ATUAL marcado (inclusive o que já baixa) e a
+  // confirmação o substitui — semeado uma vez por abertura do gate, para o
+  // reload de 5s não desfazer o que o usuário mexeu
+  const [seeded, setSeeded] = useState(false)
   const gate = job.awaiting
+  const pickOpen = job.status === 'awaiting' && gate?.reason === 'manual_pick'
+  const preselected = pickOpen ? gate?.payload?.preselected : undefined
+  useEffect(() => {
+    if (!pickOpen) {
+      setSeeded(false)
+      return
+    }
+    if (seeded || !preselected) return
+    const next: Record<string, Record<string, string[] | 'auto'>> = { original: {}, dubbed: {} }
+    for (const p of preselected) {
+      next[p.role] = { ...next[p.role], [p.candidate_id]: [...p.coverage] }
+    }
+    setSel(next)
+    setEditing(null)
+    // magnet colado numa abertura anterior já é torrent do plano ("plan:<n>")
+    setCustom([])
+    setCustomUrls({})
+    setMagnetForm(null)
+    setSeeded(true)
+  }, [pickOpen, preselected, seeded])
   if (job.status !== 'awaiting' || !gate) return null
 
   if (gate.reason === 'alignment_review') {
@@ -549,8 +573,42 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
     }
   }
 
+  // "buscar de novo" no MESMO job (só antes de qualquer torrent ir para o
+  // qBittorrent — o backend confere)
+  async function research() {
+    if (busy) return
+    if (!(await dialog.confirm({
+      title: 'Buscar de novo',
+      message: 'Refazer a busca no Jackett? O plano atual (ainda não enviado ao qBittorrent) é descartado e montado de novo.',
+      confirmText: 'Buscar',
+    }))) return
+    setBusy(true)
+    try {
+      await researchJob(job.id)
+      onResolved()
+    } catch (e) {
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const researchButton = gate.payload?.can_research ? (
+    <button
+      onClick={research}
+      disabled={busy}
+      title="Refaz a busca de torrents neste mesmo job"
+      className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+    >
+      <Refresh width={14} height={14} /> Buscar de novo
+    </button>
+  ) : null
+
   if (gate.reason === 'gaps_confirm') {
     const missing = gate.payload.missing ?? []
+    // aceitar as lacunas não deixaria nenhum episódio para baixar (ex.: um
+    // papel sem torrent nenhum): "continuar" só acabaria em erro
+    const nothingLeft = !!gate.payload.nothing_left
     return (
       <section className="mt-6 rounded-xl border border-amber-900/60 bg-amber-950/20 p-4">
         <h2 className="mb-2 flex items-center gap-1.5 font-semibold text-amber-300">
@@ -560,8 +618,12 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
           {gate.payload.mid_download
             ? 'Os ARQUIVOS reais de um pack mostraram que ele não contém episódios que o título prometia — esses episódios ficaram sem torrent. Os downloads em andamento continuam; escolha o que fazer com os que faltam.'
             : 'Não encontrei torrent para todos os episódios pedidos.'}
-          {' '}Se continuar, os episódios abaixo ficam de fora (dá para buscá-los
-          de novo depois num novo job) — ou edite a seleção para cobri-los.
+          {nothingLeft
+            ? ' Nenhum episódio tem torrent em todos os papéis — não há o que baixar. Edite a seleção (dá para colar um magnet/link próprio) ou cancele o job.'
+            : ' Se continuar, os episódios abaixo ficam de fora (dá para buscá-los de novo depois num novo job) — ou edite a seleção para cobri-los.'}
+          {' '}A edição abre com o plano atual já marcado (inclusive o que está
+          baixando): dá para completar o que falta ou trocar um torrent sem
+          baixar nada em dobro.
         </p>
         <ul className="mt-2 space-y-1 text-sm">
           {missing.map((m) => (
@@ -573,21 +635,26 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
           ))}
         </ul>
         <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            onClick={() => send('gaps_confirm', { accept: true })}
-            disabled={busy}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-zinc-950 hover:bg-amber-500 disabled:opacity-50"
-          >
-            Continuar com as lacunas
-          </button>
+          {!nothingLeft && (
+            <button
+              onClick={() => send('gaps_confirm', { accept: true })}
+              disabled={busy}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-zinc-950 hover:bg-amber-500 disabled:opacity-50"
+            >
+              Continuar com as lacunas
+            </button>
+          )}
           <button
             onClick={() => send('gaps_confirm', { edit: true })}
             disabled={busy}
-            title="Abre a escolha manual para cobrir os episódios que faltam com outros torrents"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+            title="Abre a escolha com o plano atual já marcado (inclusive o que está baixando) — a nova seleção substitui o plano"
+            className={nothingLeft
+              ? 'inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-zinc-950 hover:bg-amber-500 disabled:opacity-50'
+              : 'inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50'}
           >
             <EditPencil width={14} height={14} /> Editar seleção manual
           </button>
+          {researchButton}
           <button
             onClick={() => send('gaps_confirm', { accept: false },
               { message: 'Cancelar o job inteiro por causa das lacunas?', tone: 'danger' })}
@@ -728,19 +795,47 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
       setMagnetForm(null)
     }
 
-    // episódios cobertos por papel com a seleção atual (auto = matches)
-    function coveredBy(role: string): Set<string> {
-      const out = new Set<string>()
-      for (const [cid, eps] of Object.entries(sel[role] ?? {})) {
-        if (eps === 'auto') {
-          const c = byTorrent[role as 'original' | 'dubbed']?.find((x) => x.id === cid)
-          c?.matches.forEach((k) => out.add(k))
-        } else {
-          eps.forEach((k) => out.add(k))
-        }
+    // atribuição EFETIVA de cada torrent marcado — a mesma regra do backend:
+    // explícito vence "auto" (entre explícitos, o último); entre "auto", o
+    // primeiro marcado fica com o episódio (o plano atual vem na frente).
+    // Nunca dois torrents no mesmo episódio do mesmo papel.
+    function assignment(role: 'original' | 'dubbed'): Map<string, string[]> {
+      const entries = Object.entries(sel[role] ?? {})
+      const owner = new Map<string, string>()
+      for (const [cid, eps] of entries) {
+        if (eps !== 'auto') for (const k of [...eps].sort()) owner.set(k, cid)
+      }
+      const out = new Map<string, string[]>()
+      for (const [cid, eps] of entries) {
+        const want = eps === 'auto'
+          ? (byTorrent[role].find((x) => x.id === cid)?.matches ?? [])
+          : eps
+        out.set(cid, [...want].sort().filter((k) => {
+          if (!owner.has(k)) owner.set(k, cid)
+          return owner.get(k) === cid
+        }))
       }
       return out
     }
+    const assigned: Record<'original' | 'dubbed', Map<string, string[]>> = {
+      original: assignment('original'), dubbed: assignment('dubbed'),
+    }
+
+    function coveredBy(role: 'original' | 'dubbed'): Set<string> {
+      return new Set([...assigned[role].values()].flat())
+    }
+
+    function plannedLabel(p: NonNullable<TorrentChoice['planned']>): string {
+      if (p.state === 'pending') return 'no plano'
+      if (p.state === 'done') return 'baixado'
+      if (p.state === 'abandoned') return 'abandonado'
+      return `baixando${p.pct != null ? ` ${p.pct}%` : ''}`
+    }
+
+    // torrents do plano que saem com esta seleção (desmarcados ou sem
+    // episódio); os que já estão no qBittorrent são removidos de lá
+    const leavingSent = jobRoles.flatMap((role) => byTorrent[role].filter((c) =>
+      c.planned && c.planned.state !== 'pending' && !(assigned[role].get(c.id)?.length)))
 
     function toggleTorrent(role: string, cid: string) {
       setSel((cur) => {
@@ -763,7 +858,8 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
       })
     }
 
-    const anySelected = Object.values(sel).some((m) => Object.keys(m).length > 0)
+    const anySelected = jobRoles.some((r) =>
+      [...assigned[r].values()].some((eps) => eps.length > 0))
 
     function submit() {
       const torrents: Record<string, unknown>[] = []
@@ -781,24 +877,42 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
           }
         }
       }
-      void send('manual_pick', { torrents })
+      // a seleção SUBSTITUI o plano (o backend tira do qBittorrent o que saiu)
+      void send('manual_pick', { torrents, replace_plan: true }, leavingSent.length ? {
+        message: 'Sai(em) do plano e será(ão) removido(s) do qBittorrent, COM os arquivos já baixados: '
+          + leavingSent.map((c) => `t${c.planned!.n} ${c.title}`).join('; ') + '. Continuar?',
+        tone: 'danger',
+      } : undefined)
     }
 
+    const emptyRoles = gate.payload.empty_roles ?? []
 
     return (
       <section className="mt-6 rounded-xl border border-purple-900/60 bg-purple-950/20 p-4">
         <h2 className="mb-2 font-semibold text-purple-300">Escolha os torrents</h2>
+        {emptyRoles.length > 0 && (
+          <div className="mb-3 flex items-start gap-1.5 rounded-lg border border-amber-900/60 bg-amber-950/30 p-2.5 text-sm text-amber-200">
+            <WarningTriangle width={15} height={15} className="mt-0.5 shrink-0" />
+            <span>
+              A busca não encontrou nenhum torrent para{' '}
+              {emptyRoles.map((r) => (r === 'original' ? 'o original' : 'o dublado')).join(' e ')}
+              {' '}— cole um magnet/link próprio no papel abaixo
+              {gate.payload.can_research ? ' ou use “Buscar de novo”' : ''}.
+            </span>
+          </div>
+        )}
         <p className="mb-3 text-sm text-zinc-300">
-          Marque os torrents que quer baixar; cada um assume automaticamente os
-          episódios que o TÍTULO indica (dá para editar). Papel sem nenhuma
-          marca mantém o plano automático. O que ficar sem cobertura passa pelo
-          aviso de lacunas antes de baixar; o match fino com os ARQUIVOS
-          acontece depois do download. Sem candidato bom? Cole um magnet/link
-          próprio no papel.
+          O plano atual já vem marcado — inclusive o que já está baixando. Cada
+          torrent marcado assume os episódios que o TÍTULO indica (dá para
+          editar). Confirmar SUBSTITUI o plano: o que ficar desmarcado sai (e,
+          se já estava no qBittorrent, é removido de lá com os arquivos); o
+          mantido segue de onde está, sem ser reenviado. O que ficar sem
+          cobertura passa pelo aviso de lacunas; o match fino com os ARQUIVOS
+          acontece no download. Sem candidato bom? Cole um magnet/link próprio
+          no papel.
         </p>
         {jobRoles.map((role) => {
           const covered = coveredBy(role)
-          const touched = Object.keys(sel[role] ?? {}).length > 0
           const missing = requested.filter((k) => !covered.has(k))
           return (
             <div key={role} className="mb-4">
@@ -806,19 +920,22 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
                 {role === 'original'
                   ? <><MediaVideo width={14} height={14} /> Original (vídeo)</>
                   : <><SoundHigh width={14} height={14} /> Dublado ({job.language})</>}
-                {touched && (
-                  <span className={`text-xs ${missing.length ? 'text-amber-300' : 'text-emerald-400'}`}>
-                    {missing.length
-                      ? `faltando: ${missing.join(', ')}`
-                      : 'todos os episódios cobertos'}
-                  </span>
-                )}
-                {!touched && <span className="text-xs text-zinc-500">(plano automático)</span>}
+                <span className={`text-xs ${missing.length ? 'text-amber-300' : 'text-emerald-400'}`}>
+                  {missing.length
+                    ? `faltando: ${missing.join(', ')}`
+                    : 'todos os episódios cobertos'}
+                </span>
               </h3>
               <div className="max-h-80 space-y-1 overflow-y-auto pr-1">
                 {(byTorrent[role] ?? []).map((c) => {
                   const checked = c.id in (sel[role] ?? {})
                   const eps = sel[role]?.[c.id]
+                  const eff = assigned[role].get(c.id) ?? []
+                  // o que este torrent pediu mas outro marcado levou
+                  const lost = checked
+                    ? (eps === 'auto' ? c.matches : (eps as string[])).filter((k) => !eff.includes(k))
+                    : []
+                  const leaves = !!c.planned && eff.length === 0
                   const isEditing = editing?.role === role && editing.cid === c.id
                   return (
                     <div key={c.id} className={`rounded-lg border px-2.5 py-1.5 ${
@@ -828,21 +945,42 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
                         <input type="checkbox" checked={checked}
                           onChange={() => toggleTorrent(role, c.id)} />
                         <span className="min-w-0 flex-1 truncate" title={c.title}>{c.title}</span>
+                        {c.planned && (
+                          <span className={`shrink-0 rounded px-1.5 py-0.5 text-xs ${
+                            c.planned.state === 'pending'
+                              ? 'bg-zinc-800 text-zinc-300' : 'bg-yellow-950 text-yellow-300'}`}
+                            title="Torrent do plano atual"
+                          >
+                            t{c.planned.n} · {plannedLabel(c.planned)}
+                          </span>
+                        )}
                         <span className="shrink-0 text-xs text-zinc-500">
-                          {c.quality ?? '—'} · {fmtSize(c.size)} · {c.seeders} seeds
+                          {c.quality ?? '—'} · {fmtSize(c.size)} · {c.seeders ?? '?'} seeds
                         </span>
                         <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-300"
                           title="O que o título do torrent indica">
                           {c.coverage ?? '?'}
                         </span>
                       </label>
+                      {leaves && (
+                        <div className="mt-1 pl-6 text-xs text-amber-300">
+                          {c.planned!.state === 'pending'
+                            ? 'Sai do plano ao confirmar.'
+                            : 'Sai do plano ao confirmar e é removido do qBittorrent, com os arquivos já baixados.'}
+                        </div>
+                      )}
                       {checked && (
                         <div className="mt-1 flex flex-wrap items-center gap-1.5 pl-6 text-xs">
                           <span className="text-zinc-400">
                             {eps === 'auto'
-                              ? `auto: ${c.matches.length ? c.matches.join(', ') : 'nenhum match pelo título!'}`
-                              : `episódios: ${(eps as string[]).join(', ') || 'nenhum'}`}
+                              ? `auto: ${eff.length ? eff.join(', ') : c.matches.length ? 'nenhum' : 'nenhum match pelo título!'}`
+                              : `episódios: ${eff.join(', ') || 'nenhum'}`}
                           </span>
+                          {lost.length > 0 && (
+                            <span className="text-zinc-500">
+                              ({lost.join(', ')} com outro torrent marcado)
+                            </span>
+                          )}
                           {eps === 'auto' && c.matches.length === 0 && (
                             <span className="text-amber-300">— atribua manualmente</span>
                           )}
@@ -864,7 +1002,9 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
                                     key={k}
                                     onClick={() => toggleEp(role, c.id, k, c.matches)}
                                     title={offTitle
-                                      ? 'O título do torrent não indica este episódio — atribuir mesmo assim é decisão sua'
+                                      ? (c.planned && c.planned.state !== 'pending'
+                                        ? 'Nem o título nem os arquivos já vistos deste torrent indicam este episódio — atribuir mesmo assim é decisão sua'
+                                        : 'O título do torrent não indica este episódio — atribuir mesmo assim é decisão sua')
                                       : undefined}
                                     className={`rounded px-1.5 py-0.5 font-mono text-[11px] ${
                                       active
@@ -924,14 +1064,22 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
             </div>
           )
         })}
-        <button
-          onClick={submit}
-          disabled={busy}
-          className="mt-1 inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
-        >
-          <Download width={15} height={15} />
-          {anySelected ? 'Confirmar seleção' : 'Confirmar plano automático'}
-        </button>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <button
+            onClick={submit}
+            disabled={busy || !anySelected}
+            title={anySelected ? undefined : 'Marque ao menos um torrent (ou cole um magnet/link próprio)'}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
+          >
+            <Download width={15} height={15} /> Confirmar seleção
+          </button>
+          {researchButton}
+          {!anySelected && (
+            <span className="text-xs text-zinc-500">
+              Nenhum torrent marcado — marque um ou cole um magnet/link próprio.
+            </span>
+          )}
+        </div>
       </section>
     )
   }
