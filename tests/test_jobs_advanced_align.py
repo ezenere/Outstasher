@@ -189,3 +189,53 @@ def test_decisao_durante_a_medicao_nao_e_atropelada(drift_env, monkeypatch):
             liberar.set()
             perfil_ok.set()
     asyncio.run(go())
+
+
+def test_preparo_do_render_mostra_a_etapa_da_edl(drift_env, monkeypatch, tmp_path):
+    """Entre "Renderizando a EDL..." e a 1ª passada do ffmpeg o progresso
+    ficava zerado, e progresso zerado é exibido como "Convertendo" — o job
+    parecia voltar a converter depois do render (caso real). O preparo de um
+    4K leva minutos: a etapa tem que ser a da EDL, sem barra."""
+    from services import advanced_merge
+    from services.jobs import delivery, views
+    from services.series.align import render as render_mod
+    vf, af = drift_env
+    job = _review_job(vf, af)
+    job.pop("awaiting")
+    job["status"] = "merging"
+    job["progress"]["merge"] = None
+    jobs._jobs["adv1"] = job
+    store.upsert_job(job)
+    vistos = {}
+
+    async def saida(j):
+        return tmp_path / "Filme Exemplo (2014).mkv"
+
+    async def sem_limpeza(j):
+        return None
+
+    def prep(segs, *a, **k):
+        vistos["preparo"] = views._merge_phase(job)
+        vistos["pct"] = job["progress"]["merge"].get("pct")
+        return segs, {}
+
+    def render(*a, **k):
+        vistos["render"] = views._merge_phase(job)
+        return {}
+
+    monkeypatch.setattr(delivery, "_movie_output", saida)
+    monkeypatch.setattr(delivery, "_cleanup_torrents", sem_limpeza)
+    monkeypatch.setattr(advanced_merge, "prepare_render", prep)
+    monkeypatch.setattr(render_mod, "render", render)
+    asyncio.run(jobs.advanced._render_advanced(job))
+    assert vistos == {"preparo": "edl", "pct": None, "render": "edl"}
+    assert job["status"] == "done"
+
+
+def test_etapa_sem_barra(temp_db):
+    from services.jobs import runtime, views
+    job = {"status": "merging", "progress": {"merge": None}}
+    assert views._merge_phase(job) == runtime.PHASE_CONVERT   # ffmpeg sem etapa
+    runtime._stage(job, runtime.PHASE_ALIGN)
+    assert views._merge_phase(job) == "align"
+    assert job["progress"]["merge"] == {"phase": "align"}     # sem pct: sem barra

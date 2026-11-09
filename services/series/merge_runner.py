@@ -138,6 +138,8 @@ async def _align_episode(job: dict, key: str, ep: dict):
     dub, orig = ep["src"]["dubbed"], ep["src"]["original"]
 
     log, on_progress = jobs._ffmpeg_hooks(job, jobs.runtime.PHASE_ALIGN)
+    # na fila do alinhador e lendo os arquivos: a etapa já é alinhamento
+    jobs.runtime._stage(job, jobs.runtime.PHASE_ALIGN)
 
     def on_wait():   # roda na thread do alinhador (como o log do ffmpeg)
         job["detail"] = f"{key}: na fila de alinhamento..."
@@ -168,7 +170,9 @@ async def _align_episode(job: dict, key: str, ep: dict):
     # Para MEDIR usa o par de mesma língua (faixa inglesa do dual áudio vs
     # original): correlação bem mais nítida do que dublagem vs original
     dub_a, orig_a = await asyncio.to_thread(_alignment_pair, dub, orig)
-    job["progress"]["merge"] = None      # fingerprint terminou: some a barra
+    # fingerprint terminou: some a barra, fica a etapa (o refino por áudio
+    # ainda é alinhamento)
+    jobs.runtime._stage(job, jobs.runtime.PHASE_ALIGN)
     segs = await asyncio.to_thread(
         refine.refine_offsets, segs, dub, dub_a, orig, orig_a, log)
     # tela preta dos trechos sem dublagem medida já aqui: vai na EDL, a
@@ -293,6 +297,8 @@ async def _render_from_edl(job: dict, key: str, ep: dict):
                                     job["language"])
     output = await _episode_output(job, key, ep, f"{stem}.mkv")
     job["output"] = str(output)
+    # preparo do render (sondagem, legendas, tela preta) antes da 1ª passada
+    jobs.runtime._stage(job, jobs.runtime.PHASE_EDL)
     segs = edl_mod.segments(ep["edl"])
     # política do merge avançado (Configurações): trecho sem dublagem sai do
     # vídeo / fica mudo / recebe o original — como regras PADRÃO, depois das

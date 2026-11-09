@@ -127,6 +127,7 @@ async def _run_advanced(job: dict, video_file: Path, audio_file: Path):
     from services.series.merge_runner import _alignment_pair
     try:
         _set(job, "merging", "Buscando alinhamento: lendo os dois arquivos...")
+        runtime._stage(job, runtime.PHASE_ALIGN)
         job["merge_started_at"] = datetime.now().isoformat(timespec="seconds")
         dub, orig = str(audio_file), str(video_file)
 
@@ -147,7 +148,9 @@ async def _run_advanced(job: dict, video_file: Path, audio_file: Path):
                                            on_wait=on_wait, on_progress=on_fp)
         segs = edl_mod.segments(edl_dict)
         dub_a, orig_a = await asyncio.to_thread(_alignment_pair, dub, orig)
-        job["progress"]["merge"] = None      # fingerprint terminou: some a barra
+        # fingerprint terminou: some a barra, fica a etapa (o refino por
+        # áudio ainda é alinhamento — num 4K leva minutos)
+        runtime._stage(job, runtime.PHASE_ALIGN)
         job["detail"] = "Alinhamento avançado: refino por áudio..."
         segs = await asyncio.to_thread(
             refine.refine_offsets, segs, dub, dub_a, orig, orig_a, log)
@@ -196,6 +199,8 @@ async def _render_advanced(job: dict):
         _set(job, "merging", "Na fila de conversão...")
     async with lock:
         _set(job, "merging", "Renderizando a EDL...")
+        # preparo do render (sondagem, legendas, tela preta) antes da 1ª passada
+        runtime._stage(job, runtime.PHASE_EDL)
         segs = edl_mod.segments(adv["edl"])
         from services import advanced_merge
         politica = advanced_merge.for_job(job)
