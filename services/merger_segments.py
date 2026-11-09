@@ -162,16 +162,18 @@ def build_segments(cuts: list[float], duration: float) -> list[tuple[float, floa
 # -------------------- offset por segmento --------------------
 
 def _extract_wav_window(path: str, a_idx: int, out_wav: str, start: float, dur: float):
-    """Como merger._extract_mono_wav, mas com duração configurável (a janela
-    precisa caber dentro do segmento)."""
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-           "-ss", f"{start:.3f}", "-i", path,
-           "-map", f"0:a:{a_idx}", "-vn", "-sn",
-           "-ac", "1", "-ar", str(merger.ALIGN_SR), "-acodec", "pcm_s16le",
-           "-t", f"{dur:.3f}", out_wav]
-    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if p.returncode != 0:
-        raise MergeError(f"falha ao extrair áudio de '{path}': {p.stderr.strip()}")
+    """Janela [start, start + dur] em WAV mono a ALIGN_SR — a MESMA extração
+    do merge clássico (merger._extract_mono_wav, com o pré-roll). Esta
+    função tinha uma cópia própria só com o -ss de entrada, e o refino das
+    séries (refine._measure) mede tudo por ela: com o alvo num keyframe do
+    MKV o pacote de áudio que cobre o instante era pulado e a janela saía
+    adiantada — medido com áudio a 48 kHz e keyframe a cada 2 s: 0-62 ms
+    em PCM/FLAC, 6-36 ms em AC3/E-AC3, 21-42 ms em AAC (o áudio dos dumps
+    de streaming), 6-24 ms em Opus; com AAC a 8 kHz (quadro de 128 ms),
+    128-240 ms. Acima do CHANGE_TOL_S (30 ms) do refino isso é um "degrau"
+    que divide o match por uma edição que não existe. Ver
+    tests/test_align_measure.py."""
+    merger._extract_mono_wav(path, a_idx, out_wav, start, dur)
 
 
 def _measure_window(ref_path: str, ref_a: int, oth_path: str, oth_a: int,

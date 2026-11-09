@@ -37,7 +37,36 @@ STEP_S = 15.0           # passo entre janelas
 SEARCH_RADIUS_S = 0.6   # busca em torno do palpite do vídeo (±0,25 de precisão
                         # do dHash + folga para o wobble)
 MIN_SEGMENT_S = 10.0    # abaixo disto não há áudio para pico estável: herda
-MIN_PEAK_QUALITY = 6.0  # razão pico/média mínima (dublagem real: 20-600)
+# Pico mínimo (razão pico/média do GCC-PHAT) para uma medição VALER. O piso
+# do ruído depende do raio de busca — e, em janela curta, da janela —, então
+# foi MEDIDO com ruído puro: dois sinais independentes (branco e rosa, 3200
+# a 4000 pares por linha), a mesma gcc_phat_delay_with_confidence e a
+# quantização int16 do WAV:
+#
+#   busca ±0,6 s   janela 3-30 s   média 5,0  p99 6,2   p99,9 6,5-7,0  máx 7,5
+#                  janela 1,5 s    média 5,1  p99 6,3   p99,9 7,0      máx 7,3
+#                  janela 0,75 s   média 5,6  p99 7,0   p99,9 7,6-7,8  máx 8,3
+#                  janela 0,5 s    média 5,9  p99 7,5   p99,9 8,3      máx 8,5
+#   busca ±60 s    janela 12 s     média 8,5  p99 10,2  p99,9 11,0     máx 12,1
+#   (scan_constant_offset; a busca efetiva é nfft/2 = ±16 s)
+#
+# O piso sobe com a razão raio/janela (defasagem longe do zero tem pouca
+# sobreposição e baixa a média): por isso o scan fica ACIMA do merge de
+# filmes (60 s x 120 s, ±90 s: média 7,8, máx 9,5 — os "7-9" do
+# merger.ALIGN_MIN_QUALITY) mesmo olhando menos defasagens. O 6 antigo
+# estava dentro do ruído: passavam 2% das janelas de ruído puro no perfil
+# (12 s), 20% na bissecção fina (0,75 s) e 100% no scan — uma janela de
+# música/silêncio votava com offset aleatório.
+#
+# Ruído puro é o piso, não o teto: conteúdo esparso e independente (rajadas
+# de fala, música com ataques) em janela curta passa disto (rajadas de fala
+# em 0,75 s chegam a ~20). Por isso as medições curtas não confiam só no
+# limiar: a bissecção compara os dois lados (q_a > 2 q_b) e todas exigem o
+# desvio pequeno em torno do palpite.
+MIN_PEAK_QUALITY = 8.0  # busca ±SEARCH_RADIUS_S: acima do máximo do ruído
+                        # puro em janela >= 0,75 s (dublagem real: 20-600)
+SCAN_MIN_PEAK_QUALITY = 13.0  # busca ±60 s do scan_constant_offset: acima do
+                              # máximo do ruído (12,1; rajadas de fala 12,7)
 CHANGE_TOL_S = 0.030    # mudança de offset que conta como edição (lip sync)
 GROUP_TOL_S = 0.020     # janelas dentro disto = mesmo offset
 BISECT_WIN_S = 6.0      # janela nas iterações de bissecção
@@ -1138,8 +1167,11 @@ def scan_constant_offset(dub_path: str, dub_a: int, orig_path: str,
     segundos (busca ±60 s, como o merge de filmes). Duas janelas (0:30 e ~60%)
     NÃO bastam em série: junções de intervalo comercial (2 frames) e cenas
     cortadas aparecem em qualquer ponto. `tol` = 50 ms, o limiar de lip sync.
-    Retorna (constante?, [(t, offset, q)]). Janelas com pico fraco são
-    ignoradas."""
+    Retorna (constante?, [(t, offset, q)]). Janelas com pico abaixo de
+    SCAN_MIN_PEAK_QUALITY são ignoradas: com a busca de ±60 s o ruído puro
+    já dá 8-12, e com o limiar do refino (o 6 de antes) TODA janela de
+    música/silêncio votava com um offset aleatório — o episódio de offset
+    constante ia para o alinhador por conteúdo à toa."""
     pts = []
     t = 30.0
     while t + win < duration - 30.0:
@@ -1149,7 +1181,7 @@ def scan_constant_offset(dub_path: str, dub_a: int, orig_path: str,
         except merger.MergeError:
             t += step
             continue
-        if q >= MIN_PEAK_QUALITY:
+        if q >= SCAN_MIN_PEAK_QUALITY:
             pts.append((t, tau, q))
         t += step
     if len(pts) < 2:
