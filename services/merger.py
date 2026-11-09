@@ -81,11 +81,11 @@ ALIGN_PREROLL = 1.0       # decodificado antes de cada janela e descartado (ver 
 ALIGN_TAIL_FRAC = 0.85
 ALIGN_TAIL_MIN = 60.0     # ... e nunca a menos de 60 s do fim
 # Qualidade mínima do pico (razão pico/média) para a janela VOTAR. Não é o
-# MIN_PEAK_QUALITY (6) do refino de séries: aquele busca ±0,6 s; aqui a
+# MIN_PEAK_QUALITY (8) do refino de séries: aquele busca ±0,6 s; aqui a
 # busca é ±60 s (+folga), e só o máximo do ruído puro em ~1,4 M lags já dá
-# 7-9 (medido). 12 fica acima do ruído com margem; janela abaixo disto
-# (silêncio, música com mixagem diferente, conteúdo que não existe no
-# outro arquivo) é descartada.
+# 7-9 (medido; a tabela por raio está em series/align/refine.py). 12 fica
+# acima do ruído com margem; janela abaixo disto (silêncio, música com
+# mixagem diferente, conteúdo que não existe no outro arquivo) é descartada.
 ALIGN_MIN_QUALITY = 12.0
 ALIGN_MIN_GOOD = 3        # janelas boas mínimas para decidir (ou todas, se houver menos)
 # Janelas boas que concordam dentro disto = offset constante (o mesmo limiar
@@ -401,10 +401,19 @@ def _extract_mono_wav(input_path: str, a_type_index: int, output_wav: str,
     atraso com PCM/FLAC/AC3 e 220 ms com AAC (o pré-roll do decoder some
     junto). Com N janelas isso aparece como degrau falso. Por isso a busca
     de entrada para ALIGN_PREROLL antes e o -ss de SAÍDA (por timestamp,
-    exato) descarta o excesso."""
+    exato) descarta o excesso.
+
+    Alvo a menos de ALIGN_PREROLL do começo: SEM -ss de entrada. Um
+    `-ss 0.000` de entrada ainda faz o demuxer buscar, e o 1º pacote do
+    MKV some do mesmo jeito (medido a 48 kHz: 21 ms com AAC, 32 ms com
+    AC3/E-AC3, 20 ms com Opus, 128 ms com AAC a 8 kHz; PCM/FLAC intactos)
+    — e o -ss de saída não devolve o que nunca foi decodificado. Era o caso
+    da 1ª janela do merge (a do outro arquivo começa em 30 - ALIGN_PAD = 0)
+    e das janelas do refino das séries coladas no início do arquivo."""
     seek = max(0.0, start - ALIGN_PREROLL)
+    pre = ["-ss", f"{seek:.3f}"] if seek > 0 else []
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-           "-ss", f"{seek:.3f}", "-i", input_path, "-ss", f"{start - seek:.3f}",
+           *pre, "-i", input_path, "-ss", f"{start - seek:.3f}",
            "-map", f"0:a:{a_type_index}", "-vn", "-sn",
            "-ac", "1", "-ar", str(ALIGN_SR), "-acodec", "pcm_s16le",
            "-t", f"{duration:.3f}", output_wav]
