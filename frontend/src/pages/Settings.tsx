@@ -11,7 +11,7 @@ import {
   type ExtraSearchRules, type JackettIndexer, type LanguageConfig, type LanguageEntry,
   type StallSwitchConfig, type TorrentTarget,
 } from '../api'
-import { DiskBar, Empty } from '../components/ui'
+import { DiskBar, Empty, Toggle } from '../components/ui'
 import { useDialog } from '../components/Dialog'
 import AdvancedOptions, { CONVERT_DEFAULTS } from '../components/AdvancedOptions'
 import AdvancedMergePolicy from '../components/AdvancedMergePolicy'
@@ -926,7 +926,7 @@ export function DestinationsSection() {
             </label>
           </div>
           <label className="mt-3 flex items-center gap-2 text-sm text-zinc-300">
-            <input type="checkbox" checked={form.is_default} onChange={(e) => setForm({ ...form, is_default: e.target.checked })} />
+            <Toggle checked={form.is_default} onChange={(v) => setForm({ ...form, is_default: v })} />
             Usar como padrão {form.media === 'tv' ? 'de séries' : 'de filmes'}
           </label>
           <FormButtons saving={saving} onSave={save} onCancel={() => setForm(null)} />
@@ -1187,7 +1187,7 @@ export function TorrentTargetsSection() {
             <Field label="Caminho local (deste serviço)" value={form.local_path} onChange={(v) => setForm({ ...form, local_path: v })} placeholder="Ex.: /mnt/nas/downloads" mono />
           </div>
           <label className="mt-3 flex items-center gap-2 text-sm text-zinc-300">
-            <input type="checkbox" checked={form.is_default} onChange={(e) => setForm({ ...form, is_default: e.target.checked })} />
+            <Toggle checked={form.is_default} onChange={(v) => setForm({ ...form, is_default: v })} />
             Usar como padrão
           </label>
           <FormButtons saving={saving} onSave={save} onCancel={() => setForm(null)} />
@@ -1281,8 +1281,8 @@ function StallSwitchSection() {
       ) : (
         <>
           <label className="flex items-center gap-2 text-sm text-zinc-300">
-            <input type="checkbox" checked={cfg.enabled}
-              onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })} />
+            <Toggle checked={cfg.enabled}
+              onChange={(v) => setCfg({ ...cfg, enabled: v })} />
             Trocar automaticamente torrent travado
           </label>
           <div className={`mt-3 grid gap-3 sm:grid-cols-3 ${cfg.enabled ? '' : 'opacity-50'}`}>

@@ -12,7 +12,7 @@ import AdvancedMergePolicy from '../components/AdvancedMergePolicy'
 import { useDialog } from '../components/Dialog'
 import SeriesModal from '../components/SeriesModal'
 import { InfiniteScrollFooter, useInfiniteScroll } from '../components/InfiniteScroll'
-import { DiskFree, Empty, MovieStateBadge, MovieStateIcon, useScrollLock } from '../components/ui'
+import { DiskFree, Empty, MovieStateBadge, MovieStateIcon, useScrollLock, Toggle } from '../components/ui'
 
 // estados "em progresso": se um filme estava num destes e sumiu do summary,
 // entendemos que terminou -> marca como 'done' (Baixado) localmente.
@@ -384,7 +384,7 @@ export default function Movies() {
             {/* opções */}
             <div className="mt-3 flex flex-col gap-1.5">
               <label className="flex items-center gap-1.5 text-sm text-zinc-300">
-                <input type="checkbox" checked={manual} onChange={(e) => setManual(e.target.checked)} />
+                <Toggle checked={manual} onChange={(v) => setManual(v)} />
                 Escolher torrents manualmente
               </label>
               {manual && (
@@ -392,8 +392,8 @@ export default function Movies() {
                   className="ml-5 flex items-center gap-1.5 text-sm text-zinc-300"
                   title="Não consulta o indexador: você cola o magnet/link de cada torrent"
                 >
-                  <input type="checkbox" checked={skipSearch}
-                    onChange={(e) => setSkipSearch(e.target.checked)} />
+                  <Toggle checked={skipSearch}
+                    onChange={(v) => setSkipSearch(v)} />
                   Pular busca de torrents
                 </label>
               )}
@@ -407,7 +407,7 @@ export default function Movies() {
                 className="flex items-center gap-1.5 text-sm text-zinc-300"
                 title="Só baixa pelo qBittorrent e conclui — sem conversão, hardlink ou cópia"
               >
-                <input type="checkbox" checked={downloadOnly} onChange={(e) => setDownloadOnly(e.target.checked)} />
+                <Toggle checked={downloadOnly} onChange={(v) => setDownloadOnly(v)} />
                 Apenas baixar
               </label>
               {downloadOnly && (

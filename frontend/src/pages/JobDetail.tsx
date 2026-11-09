@@ -11,7 +11,7 @@ import { useDialog } from '../components/Dialog'
 import AdvancedMergePolicy from '../components/AdvancedMergePolicy'
 import { SeriesEpisodes, SeriesGate, SeriesReport, SeriesTorrents } from '../components/SeriesJobSections'
 import AlignmentReview from '../components/AlignmentReview'
-import StallSwitchControl from '../components/StallSwitch'
+import StallSwitchControl, { StallClockLine } from '../components/StallSwitch'
 import { jobTitle, removeJob } from './Jobs'
 
 export default function JobDetail() {
@@ -273,16 +273,7 @@ export default function JobDetail() {
     const current = kind === 'video' ? job.video_torrent : job.audio_torrent
     return (
       <div className="mt-1.5">
-        <StallSwitchControl
-          jobId={job.id}
-          target={{ kind }}
-          mode={kind === 'video' ? job.stall_mode_video : job.stall_mode_audio}
-          minutes={kind === 'video' ? job.stall_minutes_video : job.stall_minutes_audio}
-          clock={job.stall?.torrents[kind]}
-          global={job.stall?.global}
-          onChanged={reload}
-        />
-        <div className="mt-1.5 flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => trySwitch(kind)}
             disabled={switching}
@@ -306,7 +297,20 @@ export default function JobDetail() {
           >
             {magnetForm?.kind === kind ? 'Cancelar' : '+ Magnet/link próprio'}
           </button>
+          {/* troca automática na mesma linha, encostada à direita — só
+              enquanto o torrent baixa (concluído não tem o que trocar sozinho) */}
+          {(prog(job.progress?.[kind])?.pct ?? 0) < 100 && (
+            <StallSwitchControl
+              jobId={job.id}
+              target={{ kind }}
+              mode={kind === 'video' ? job.stall_mode_video : job.stall_mode_audio}
+              minutes={kind === 'video' ? job.stall_minutes_video : job.stall_minutes_audio}
+              global={job.stall?.global}
+              onChanged={reload}
+            />
+          )}
         </div>
+        <StallClockLine clock={job.stall?.torrents[kind]} />
         {magnetForm?.kind === kind && (
           <div className="mt-2 rounded-lg border border-zinc-700 bg-zinc-900 p-2.5">
             <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">

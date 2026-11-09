@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, del, post, type Capabilities, type ConvertOptions, type ConvertPreset } from '../api'
 import { useDialog } from './Dialog'
+import { Toggle } from './ui'
 
 /** Bloco "Opções avançadas" de conversão, compartilhado pelo modal de download
  *  (página de filmes) e pelo modal de conversão manual.
@@ -247,11 +248,10 @@ export default function AdvancedOptions({ value, onChange, blocked, hidePresets,
           )}
 
           {!hideButtton && <label className="flex items-center gap-1.5 text-sm text-zinc-300">
-            <input
-              type="checkbox"
+            <Toggle
               checked={enabled && !blocked}
               disabled={!!blocked || !caps}
-              onChange={(e) => onChange(e.target.checked ? opts : null)}
+              onChange={(v) => onChange(v ? opts : null)}
             />
             Habilitar opções avançadas
           </label>}

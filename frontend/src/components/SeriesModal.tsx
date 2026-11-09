@@ -13,7 +13,7 @@ import {
 import AdvancedOptions from './AdvancedOptions'
 import AdvancedMergePolicy from './AdvancedMergePolicy'
 import { useDialog } from './Dialog'
-import { DiskFree, Empty, useScrollLock } from './ui'
+import { DiskFree, Empty, useScrollLock, Toggle } from './ui'
 
 /** Seleção do modal: temporadas inteiras + episódios avulsos por temporada.
  *  É o shape que o job de série recebe (request.seasons / request.episodes). */
@@ -665,7 +665,7 @@ export default function SeriesModal({
         {/* opções */}
         <div className="mt-3 flex flex-col gap-1.5">
           <label className="flex items-center gap-1.5 text-sm text-zinc-300">
-            <input type="checkbox" checked={manual} onChange={(e) => setManual(e.target.checked)} />
+            <Toggle checked={manual} onChange={(v) => setManual(v)} />
             Escolher torrents manualmente (por episódio)
           </label>
           {manual && (
@@ -673,8 +673,8 @@ export default function SeriesModal({
               className="ml-5 flex items-center gap-1.5 text-sm text-zinc-300"
               title="Não consulta o indexador: você cola o magnet/link de cada torrent"
             >
-              <input type="checkbox" checked={skipSearch}
-                onChange={(e) => setSkipSearch(e.target.checked)} />
+              <Toggle checked={skipSearch}
+                onChange={(v) => setSkipSearch(v)} />
               Pular busca de torrents
             </label>
           )}

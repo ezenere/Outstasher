@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, type AdvancedMergeConfig, type AdvancedMergeInfo } from '../api'
 import AdvancedOptions, { CONVERT_DEFAULTS } from './AdvancedOptions'
+import { Toggle } from './ui'
 
 interface Props {
   /** null = usar a configuração global (Configurações → Merge avançado) */
@@ -30,8 +31,8 @@ export default function AdvancedMergePolicy({ value, onChange, forceCustom, titl
       {title && <div className="mb-2 text-sm font-semibold text-zinc-300">{title}</div>}
       {!forceCustom && (
         <label className="mb-2 flex items-center gap-2 text-sm text-zinc-300">
-          <input type="checkbox" checked={!custom}
-            onChange={(e) => onChange(e.target.checked ? null : (global ?? { undubbed: 'cut', cut_min_s: 1, reencode: null }))} />
+          <Toggle checked={!custom}
+            onChange={(v) => onChange(v ? null : (global ?? { undubbed: 'cut', cut_min_s: 1, reencode: null }))} />
           Usar a configuração global (Configurações → Merge avançado)
         </label>
       )}
@@ -74,8 +75,8 @@ export default function AdvancedMergePolicy({ value, onChange, forceCustom, titl
               em cada corte deixa o corte exato no frame. Só as opções de <b>vídeo</b> valem aqui.
             </p>
             <label className="mb-2 flex items-center gap-2 text-sm text-zinc-300">
-              <input type="checkbox" checked={cfg.reencode !== null}
-                onChange={(e) => onChange({ ...cfg, reencode: e.target.checked
+              <Toggle checked={cfg.reencode !== null}
+                onChange={(v) => onChange({ ...cfg, reencode: v
                   ? { ...CONVERT_DEFAULTS, video_codec: 'av1', quality_mode: 'crf', crf: 20 } : null })} />
               Recodificar o vídeo nos cortes
             </label>
