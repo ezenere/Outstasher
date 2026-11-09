@@ -8,3 +8,5 @@ jobs.db-*
 .env
 output/
 fpcache/
+.claude/
+.kilo
