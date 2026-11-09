@@ -4,7 +4,7 @@ import {
   Check, Download, Folder, Magnet, MediaVideo, NavArrowLeft, Play, Refresh,
   Settings as SettingsIcon, SkipNext, SoundHigh, Trash, WarningTriangle,
 } from 'iconoir-react'
-import { convertSummary, mergePhase, post, prog, type Job, type JobEvent, type JobProgress, type AdvancedMergeConfig } from '../api'
+import { convertSummary, mergePhase, post, prog, researchJob, type Job, type JobEvent, type JobProgress, type AdvancedMergeConfig } from '../api'
 import { api } from '../api'
 import { Badge, CandidatesTable, ClampText, Collapsible, Elapsed, Empty, KindTags, MergeBar, ProgressBar, alignRole } from '../components/ui'
 import { useDialog } from '../components/Dialog'
@@ -114,6 +114,15 @@ export default function JobDetail() {
   const okAudio = !!selAudio || !!selCustom.audio.url.trim()
   const okVideo = !!selVideo || !!selCustom.video.url.trim()
   const selectionReady = (!needAudio || okAudio) && (!needVideo || okVideo)
+  // a busca rodou e não achou nada para um papel: o job aguarda o magnet/link
+  // próprio (ou uma nova busca) em vez de falhar
+  const emptyRoles = job.search && !job.skip_search
+    ? [needAudio && !job.search.audio.length ? 'o dublado' : null,
+       needVideo && !job.search.video.length ? 'o original' : null].filter(Boolean)
+    : []
+  // nova busca só na escolha "limpa" (sem torrent no ar nem pausa de conversão)
+  const canResearch = job.status === 'awaiting' && !job.skip_search
+    && !job.drift_confirm && !job.awaiting && !job.current
 
   async function submitSelection() {
     if (!job || !selectionReady) return
@@ -153,6 +162,23 @@ export default function JobDetail() {
         video_id: needVideo ? selVideo : null,
         custom: Object.keys(custom).length ? custom : null,
       })
+      void reload()
+    } catch (e) {
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  // "buscar de novo" no MESMO job enquanto ele aguarda a escolha (ex.: a
+  // busca não achou nada para um papel) — o ↻ é só para job em erro
+  async function research() {
+    if (!job || submitting) return
+    setSubmitting(true)
+    try {
+      await researchJob(job.id)
+      setSelAudio(undefined)
+      setSelVideo(undefined)
       void reload()
     } catch (e) {
       await dialog.alert({ title: 'Erro', message: (e as Error).message })
@@ -322,9 +348,11 @@ export default function JobDetail() {
       <div className={`rounded-lg border border-dashed p-2.5 ${
         v.url.trim() ? 'border-blue-700 bg-blue-950/20' : 'border-zinc-700'} ${vazio ? '' : 'mt-2'}`}>
         <div className="mb-1.5 text-xs text-zinc-400">
-          {vazio
-            ? 'Busca pulada: informe o magnet ou link .torrent'
-            : 'Ou use um magnet/link próprio (ignora a lista acima)'}
+          {!vazio
+            ? 'Ou use um magnet/link próprio (ignora a lista acima)'
+            : job?.skip_search
+              ? 'Busca pulada: informe o magnet ou link .torrent'
+              : 'Nada encontrado na busca: informe o magnet ou link .torrent'}
         </div>
         <div className="grid gap-2 sm:grid-cols-2">
           <input
@@ -481,6 +509,15 @@ export default function JobDetail() {
           <h2 className="mb-3 font-semibold text-purple-300">
             {needAudio && needVideo ? 'Escolha os torrents' : 'Escolha o torrent'}
           </h2>
+          {emptyRoles.length > 0 && (
+            <div className="mb-3 flex items-start gap-1.5 rounded-lg border border-amber-900/60 bg-amber-950/30 p-2.5 text-sm text-amber-200">
+              <WarningTriangle width={15} height={15} className="mt-0.5 shrink-0" />
+              <span>
+                Nenhum torrent encontrado para {emptyRoles.join(' e ')} — cole um
+                magnet/link abaixo{canResearch ? ' ou tente buscar de novo' : ''}.
+              </span>
+            </div>
+          )}
           {needAudio && (
             <>
               <h3 className="mb-2 flex items-center gap-1.5 text-sm text-zinc-400">
@@ -513,13 +550,25 @@ export default function JobDetail() {
               {customTorrentFields('video')}
             </>
           )}
-          <button
-            onClick={submitSelection}
-            disabled={submitting || !selectionReady}
-            className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
-          >
-            <Download width={15} height={15} /> Confirmar e baixar
-          </button>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              onClick={submitSelection}
+              disabled={submitting || !selectionReady}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
+            >
+              <Download width={15} height={15} /> Confirmar e baixar
+            </button>
+            {canResearch && (
+              <button
+                onClick={research}
+                disabled={submitting}
+                title="Refaz a busca no Jackett neste mesmo job"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+              >
+                <Refresh width={14} height={14} /> Buscar de novo
+              </button>
+            )}
+          </div>
         </section>
       )}
 

@@ -53,7 +53,7 @@ from services.jobs.movies import (
     _probe_manual_file, _run_from_download, create, create_manual,
 )
 from services.jobs.actions import (
-    cancel, remove, resume_pending, retry, select, switch,
+    cancel, remove, research, resume_pending, retry, select, switch,
 )
 
 __all__ = [
@@ -63,7 +63,8 @@ __all__ = [
     # API usada por main.py
     "KINDS", "VIDEO_EXTENSIONS", "cancel", "counts", "create", "create_manual",
     "create_recompress", "flush_dirty", "get_job", "list_group", "list_jobs",
-    "load", "persist_loop", "poll_interval", "proceed", "progress", "remove", "resolve_review",
+    "load", "persist_loop", "poll_interval", "proceed", "progress", "remove", "research",
+    "resolve_review",
     "resume_pending", "retry", "select", "summary", "switch",
     "touch_progress_demand",
     # infraestrutura compartilhada com services/series/*

@@ -362,14 +362,37 @@ async def _search(job: dict):
         _event(job, "candidates", f"Avaliação para VÍDEO — busca '{query_original}'",
                {"role": "video", "query": query_original, "search_query": qn})
 
+    # papel sem nenhum viável NÃO falha mais o job: quem chama (movies._run)
+    # deixa o job aguardando o magnet/link próprio ou uma nova busca
     if want_audio and not audio_viable:
-        raise RuntimeError(f"Nenhum torrent encontrado com áudio em {label}")
+        _event(job, "search", f"⚠️ Nenhum torrent encontrado com áudio em {label}")
     if want_video and not video_viable:
-        raise RuntimeError(f"Nenhum torrent de vídeo viável para '{original}'")
+        _event(job, "search", f"⚠️ Nenhum torrent de vídeo viável para '{original}'")
 
     _store_selectable(job, "audio", audio_viable[:MAX_SELECTABLE])
     _store_selectable(job, "video", video_viable[:MAX_SELECTABLE])
     _persist(job)
+
+
+_ROLE_PHRASE = {"audio": "o dublado", "video": "o original"}
+
+
+class NoCompatibleCut(RuntimeError):
+    """Há dublado e há original, mas nenhum par do mesmo corte."""
+
+
+def missing_roles(job: dict) -> list[str]:
+    """Papéis que o job baixa e para os quais a busca não trouxe nenhum
+    candidato escolhível."""
+    return [k for k in _needed_torrents(job) if not candidates.selectable(job, k)]
+
+
+def nothing_found_detail(missing: list[str]) -> str:
+    """O detail do job que ficou aguardando por falta de torrent (a UI da
+    escolha explica de novo, ao lado do campo do magnet)."""
+    quais = " e ".join(_ROLE_PHRASE[k] for k in ("audio", "video") if k in missing)
+    return (f"Nenhum torrent encontrado para {quais} — cole um magnet/link "
+            f"ou tente buscar de novo")
 
 
 def _auto_pick(job: dict) -> tuple[dict | None, dict | None]:
@@ -397,6 +420,6 @@ def _auto_pick(job: dict) -> tuple[dict | None, dict | None]:
         _event(job, "info",
                f"Nenhum vídeo com corte '{ed_label}' para casar com "
                f"'{a['title']}' — tentando o próximo candidato de áudio")
-    raise RuntimeError(
+    raise NoCompatibleCut(
         "Nenhum torrent de vídeo com o mesmo corte das versões dubladas encontradas "
         "(as duas versões precisam ser do mesmo corte para os áudios alinharem)")

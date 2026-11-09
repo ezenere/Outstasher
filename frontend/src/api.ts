@@ -131,6 +131,9 @@ export type GateReason =
  *  dele cobre (o match fino pelo arquivo acontece após o download). */
 export interface TorrentChoice extends SeriesCandidate {
   matches: string[]
+  /** Torrent do PLANO atual (pendente ou já no qBittorrent) — a escolha abre
+   *  com ele marcado e a confirmação substitui o plano. */
+  planned?: { n: number; state: SeriesTorrent['state']; coverage: string[]; pct: number | null } | null
 }
 
 /** Gate ativo de um job de série (job.awaiting). */
@@ -142,6 +145,10 @@ export interface JobGate {
     /** gaps_confirm no MEIO do download: os arquivos reais de um pack
      *  revelaram que ele não tinha episódios atribuídos pelo título. */
     mid_download?: boolean
+    /** gaps_confirm: aceitar as lacunas não deixaria episódio para baixar */
+    nothing_left?: boolean
+    /** gaps_confirm/manual_pick: dá para refazer a busca (nada enviado ainda) */
+    can_research?: boolean
     /** incompatible_torrents */
     torrents?: {
       n: number
@@ -160,7 +167,13 @@ export interface JobGate {
     /** manual_pick */
     by_torrent?: Record<'original' | 'dubbed', TorrentChoice[]>
     requested?: string[]
-    preselected?: { n: number; role: string; title: string; quality: string | null; coverage: string[] }[]
+    /** o plano atual: id da linha em by_torrent + cobertura de agora */
+    preselected?: {
+      n: number; role: 'original' | 'dubbed'; candidate_id: string; title: string
+      quality: string | null; coverage: string[]; state: SeriesTorrent['state']
+    }[]
+    /** papéis em que a busca não trouxe nenhum candidato */
+    empty_roles?: ('original' | 'dubbed')[]
   }
 }
 
@@ -169,6 +182,12 @@ export function switchSeriesTorrent(jobId: string, torrentN: number,
                                     candidateId: string | null = null) {
   return post<Job>(`/api/jobs/${jobId}/switch-torrent`,
     { torrent_n: torrentN, candidate_id: candidateId })
+}
+
+/** Refaz a busca de torrents no MESMO job enquanto ele aguarda a escolha
+ *  (filme ou série — ex.: a busca não achou nada para um papel). */
+export function researchJob(jobId: string) {
+  return post<Job>(`/api/jobs/${jobId}/research`)
 }
 
 /** Candidatos compatíveis (mesma cobertura) para trocar um torrent do plano. */
@@ -484,6 +503,8 @@ export interface Job {
   kind?: string // both | original | dubbed
   /** Só baixa pelo qBittorrent e conclui — sem conversão, hardlink ou cópia. */
   download_only?: boolean
+  /** Modo manual sem consultar o indexador (o magnet é colado na escolha). */
+  skip_search?: boolean
   /** Opções avançadas de conversão do job (null/ausente = pipeline clássico). */
   convert?: ConvertOptions | null
   status: string

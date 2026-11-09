@@ -231,10 +231,27 @@ async def _run(job: dict):
             _set(job, "awaiting", "Informe o magnet/link de cada torrent")
             return
         await search._search(job)
+        missing = search.missing_roles(job)
+        if missing:
+            # nada no indexador para um papel (ou os dois): o job NÃO falha —
+            # fica na escolha (a mesma do modo manual), que aceita magnet/link
+            # próprio por papel e oferece buscar de novo
+            _set(job, "awaiting", search.nothing_found_detail(missing))
+            return
         if job["mode"] == "manual":
             _set(job, "awaiting", "Escolha os torrents para baixar")
             return
-        a, v = search._auto_pick(job)
+        try:
+            a, v = search._auto_pick(job)
+        except search.NoCompatibleCut as e:
+            # há dublado e original, mas nenhum par do mesmo corte: a escolha
+            # à mão (com o aviso de cortes diferentes) ou um magnet próprio
+            # resolvem — falhar jogava fora a busca
+            _event(job, "info", f"⚠️ {e}")
+            _set(job, "awaiting",
+                 "Nenhum vídeo do mesmo corte do dublado — escolha o par à "
+                 "mão, cole um magnet/link ou tente buscar de novo")
+            return
         await downloads._start_download(job, a, v)
     except asyncio.CancelledError:
         raise
