@@ -194,7 +194,10 @@ async def _merge(job: dict, video_file: Path, audio_file: Path,
         # tinha o áudio alvo): não houve alinhamento, não há offset
         sync = (f" (offset {result.offset_ms:+.2f} ms)"
                 if result.offset_ms is not None else "")
-        _set(job, "done", f"Concluído{sync}: {result.output}")
+        # drift corrigido sozinho: o aviso fica no status final, não só no
+        # meio do log — a dublagem perdeu o codec original
+        aviso = f" — {result.drift_warning}" if result.drift_warning else ""
+        _set(job, "done", f"Concluído{sync}{aviso}: {result.output}")
 
     await _cleanup_torrents(job)
 

@@ -351,6 +351,9 @@ async def _merge_episode(job: dict, key: str, ep: dict, convert_opts):
     finally:
         jobs._ffmpeg_procs.pop(job["id"], None)
     ep["output"] = result.output
+    if result.drift_warning:
+        # com o episódio na frente: num lote, o aviso solto no log não diz qual
+        jobs._event(job, "merge", f"{key}: {result.drift_warning}")
     # legendas externas: offset constante do container (por input); se o
     # merge foi pulado (hardlink), só o lado que virou a saída tem tempo
     # conhecido

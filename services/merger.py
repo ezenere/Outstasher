@@ -163,6 +163,10 @@ class MergeResult:
     # velocidade relativa de cada input quando o drift linear foi corrigido:
     # tempo_saída = tempo_no_arquivo / input_rates[i] + input_shifts[i]
     input_rates: tuple[float, float] = (1.0, 1.0)
+    # aviso para o usuário quando o merge corrigiu drift linear sozinho: a
+    # dublagem foi RE-ENCODADA (o codec original — TrueHD/DTS — não sobrevive).
+    # Decisão do usuário: corrigir sem parar no gate, mas avisar sempre.
+    drift_warning: str | None = None
 
 
 class MergeError(RuntimeError):
@@ -1221,9 +1225,12 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
                 else "~0: remux puro, sem re-encode")
     elif drift_rate:
         mode = f"drift linear: re-encode com adelay/atrim + velocidade {1 + drift_rate:.6f}"
-        result.notes.append(
-            f"drift linear de {drift_rate * 3600 * 1000:+.0f} ms/h corrigido "
-            f"(áudio do outro arquivo com velocidade {1 + drift_rate:.6f})")
+        result.drift_warning = (
+            f"⚠️ drift linear de {drift_rate * 3600 * 1000:+.0f} ms/h corrigido "
+            f"automaticamente — a dublagem foi re-encodada (velocidade "
+            f"{1 + drift_rate:.6f}), o codec original dela não foi preservado")
+        result.notes.append(result.drift_warning)
+        log(result.drift_warning)
     else:
         mode = "drift: re-encode com adelay/atrim"
     log(f"Offset aplicado: {result.offset_ms:+.2f} ms ({mode})")

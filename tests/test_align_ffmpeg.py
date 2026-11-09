@@ -173,8 +173,12 @@ def test_drift_linear_e_corrigido_na_velocidade(tmp_path):
     assert any("drift linear" in m for m in logs), logs
     assert result.input_rates[1] == pytest.approx(1 + rate, rel=2e-6)
     # 288 ms/h reais; a reta pelas 4 janelas acerta a menos de 1%
-    assert any(re.match(r"drift linear de \+28\d ms/h corrigido", n)
+    assert any(re.search(r"drift linear de \+28\d ms/h corrigido", n)
                for n in result.notes), result.notes
+    # corrigir sozinho re-encoda a dublagem: o usuário pediu que isso SEMPRE
+    # venha com aviso (o status final do job e o evento do episódio usam este)
+    assert result.drift_warning and "re-encodada" in result.drift_warning
+    assert result.drift_warning.startswith("⚠️")
     # saída: a:0 = por (corrigida), a:1 = eng (referência)
     for t in (60.0, 1500.0, 2900.0):
         tau, q = merger._measure_window(str(out), 1, str(out), 0, t)
