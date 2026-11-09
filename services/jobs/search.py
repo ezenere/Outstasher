@@ -166,6 +166,53 @@ def _extra_searches(spellings: list[str], year: str, lang: str) -> list[dict]:
     return out
 
 
+# rótulos das regras de busca extra, como a tela os mostra (VARIANT_LABEL em
+# frontend/src/api.ts): o aviso do job fala a língua da configuração
+_VARIANT_LABEL = {
+    "no_year": "Sem o ano",
+    "roman": "Trocando romanos (II → 2)",
+    "roman_no_year": "Trocando romanos e sem o ano",
+}
+
+
+def _buscas_text(variants: list[str]) -> str:
+    """["no_year"] -> "na busca 'Sem o ano'"; várias -> "nas buscas 'A' e 'B'"."""
+    names = [f"'{_VARIANT_LABEL.get(v, v)}'" for v in variants]
+    if len(names) == 1:
+        return f"na busca {names[0]}"
+    return f"nas buscas {', '.join(names[:-1])} e {names[-1]}"
+
+
+async def _skip_missing_trackers(job: dict, specs: list[dict], lang: str) -> list[dict]:
+    """Tira das buscas extras os trackers que o Jackett não tem mais.
+
+    Caso real: um tracker removido do Jackett continuava marcado nas regras e
+    cada job o consultava, colhendo erro/timeout a cada busca. Agora ele não
+    é consultado, e o job ganha UM aviso por tracker (as grafias do título
+    repetem a mesma regra várias vezes; o aviso não). Se a lista do Jackett
+    não vier, nada sai: sem ela não dá para saber o que sumiu."""
+    if not specs:
+        return specs
+    known = await jackett.configured_indexer_ids()
+    if known is None:
+        return specs
+    missing: dict[str, list[str]] = {}  # tracker -> regras, na ordem das buscas
+    kept = []
+    for spec in specs:
+        if spec["indexer"] in known:
+            kept.append(spec)
+            continue
+        variants = missing.setdefault(spec["indexer"], [])
+        if spec["variant"] not in variants:
+            variants.append(spec["variant"])
+    label = config.LANGUAGES[lang]["label"]
+    for tracker, variants in missing.items():
+        _event(job, "search",
+               f"⚠️ Tracker {tracker} está marcado {_buscas_text(variants)} ({label}) "
+               f"e não está no Jackett — ignorado")
+    return kept
+
+
 async def _run_extra_search(job: dict, spec: dict) -> list[dict]:
     """Roda uma busca extra; falha de um indexer não derruba o job."""
     try:
@@ -240,6 +287,8 @@ async def _search(job: dict):
         _event(job, "search",
                f"Título original não é inglês — buscando também pelo nome em "
                f"inglês '{query_english}' (trackers indexam estrangeiros assim)")
+    # tracker que saiu do Jackett não é consultado (o job só ganha o aviso)
+    extra_specs = await _skip_missing_trackers(job, extra_specs, lang)
     if extra_specs:
         _event(job, "search",
                f"{len(extra_specs)} busca(s) extra(s) configurada(s) para {label} "
