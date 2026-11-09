@@ -198,7 +198,7 @@ export default function CatalogItem() {
         {detail.tmdb_id == null && (
           <button
             onClick={() => setPickingTmdb(true)}
-            title="Escolher o filme e renomear a pasta para incluir [tmdbid-N]"
+            title={`Escolher ${isSeries ? 'a série' : 'o filme'} e renomear a pasta para incluir [tmdbid-N]`}
             className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:border-blue-700 hover:text-blue-300"
           >
             <Label width={15} height={15} /> Marcar ID do TMDB
@@ -344,6 +344,7 @@ export default function CatalogItem() {
           title={detail.title}
           year={detail.year}
           suggested={detail.tmdb}
+          media={isSeries ? 'tv' : 'movie'}
           onConfirm={tagTmdbId}
           onClose={() => setPickingTmdb(false)}
         />

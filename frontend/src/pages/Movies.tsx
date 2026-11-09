@@ -268,10 +268,13 @@ export default function Movies() {
                 {m.in_catalog && !state && (
                   <div className="mt-1.5">
                     <span
-                      title="Já existe uma pasta deste filme na coleção"
+                      title={mediaKind === 'tv'
+                        ? 'Já existe uma pasta desta série num destino de séries'
+                        : 'Já existe uma pasta deste filme na coleção'}
                       className="inline-flex items-center gap-1 rounded bg-emerald-950 px-1.5 py-0.5 text-xs font-medium text-emerald-300"
                     >
                       <Check width={12} height={12} /> Na coleção
+                      {mediaKind === 'tv' && m.owned_episodes ? ` · ${m.owned_episodes} ep.` : ''}
                     </span>
                   </div>
                 )}

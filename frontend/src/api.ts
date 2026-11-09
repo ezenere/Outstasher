@@ -10,6 +10,8 @@ export interface Movie {
   rating: number | null
   /** Já existe na coleção (pasta em algum destino) — cache de 30 min no backend. */
   in_catalog?: boolean
+  /** Série: quantos episódios a coleção já tem (só nos cards de /api/series). */
+  owned_episodes?: number
   /** 'tv' nos cards vindos de /api/series; ausente = filme. */
   media_type?: 'movie' | 'tv'
 }
@@ -56,6 +58,39 @@ export interface SeasonDetail {
   season: number
   name: string | null
   episodes: EpisodeInfo[]
+}
+
+/** Pasta da coleção que casou com a série (/api/series/{id}/owned). */
+export interface OwnedFolder {
+  folder: string
+  destination_id: number
+  destination_label: string
+  /** como casou: pelo [tmdbid-N], pelo título, ou pela grafia aproximada */
+  match: 'tmdbid' | 'title' | 'loose'
+  episodes: number
+}
+
+/** O que a coleção já tem da série (scan dos destinos de séries). */
+export interface SeriesOwned {
+  seasons: Record<number, number[]>
+  folders: OwnedFolder[]
+  /** nome que o Outstasher daria à pasta; null = TMDB indisponível */
+  canonical_name: string | null
+}
+
+/** Episódio da série num job ATIVO (/api/series/{id}/in-progress). */
+export interface InFlightEpisode {
+  episode: number
+  state: EpisodeState
+  job_id: string
+  job_status: string
+  kind: string | null
+}
+
+export interface SeriesInProgress {
+  seasons: Record<number, InFlightEpisode[]>
+  /** já entregues por jobs ainda ativos (o scan só os vê no fim do job) */
+  done: Record<number, number[]>
 }
 
 /** Subestado de um episódio dentro de um job de série. */

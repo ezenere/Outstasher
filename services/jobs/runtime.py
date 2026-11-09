@@ -389,8 +389,12 @@ def _set(job: dict, status: str, detail: str = ""):
     _add_event(job, "status", detail or status)
     # transição de status é durável na hora (não espera a janela do _event)
     _persist(job)
-    if status == "done":
-        # entrou filme novo no destino: a próxima busca refaz o scan da coleção
+    if status == "done" or (status in _TERMINAL_STATUSES
+                            and job.get("media_type") == "tv"):
+        # entrou filme novo no destino: a próxima busca refaz o scan da coleção.
+        # Série entrega POR EPISÓDIO: o job que termina em erro (regra dos 75%)
+        # ou cancelado pode já ter deixado episódios no destino — e o modal da
+        # série não os veria até o TTL vencer
         catalog.invalidate_library()
     if status in _TERMINAL_STATUSES:
         # virou histórico: tira da memória (quem chamou ainda tem a referência

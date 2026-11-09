@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Calendar, Check, Download, MediaVideo, NavArrowDown, NavArrowRight, SoundHigh, Xmark } from 'iconoir-react'
 import {
-  api, type AdvancedMergeConfig, post,
-  type ConvertOptions, type Destination, type EpisodeInfo, type Job,
-  type Language, type Movie, type SeasonDetail, type SeriesDetail,
-  type TorrentTarget,
+  Calendar, Check, Download, Folder, Hourglass, MediaVideo, NavArrowDown, NavArrowRight,
+  SoundHigh, Xmark,
+} from 'iconoir-react'
+import {
+  api, type AdvancedMergeConfig, EPISODE_STATE_LABEL, post,
+  type ConvertOptions, type Destination, type EpisodeInfo, type InFlightEpisode, type Job,
+  type Language, type Movie, type OwnedFolder, type SeasonDetail, type SeriesDetail,
+  type SeriesInProgress, type SeriesOwned, type TorrentTarget,
 } from '../api'
 import AdvancedOptions from './AdvancedOptions'
 import AdvancedMergePolicy from './AdvancedMergePolicy'
@@ -31,6 +34,30 @@ function fmtAirDate(d: string | null): string {
   const [y, m, day] = d.split('-')
   return `${day}/${m}/${y}`
 }
+
+/** Como a pasta da coleção casou com a série. */
+const MATCH_LABEL: Record<OwnedFolder['match'], string> = {
+  tmdbid: 'pelo ID do TMDB',
+  title: 'pelo nome',
+  loose: 'pelo nome (grafia aproximada)',
+}
+
+/** Rótulo do episódio num job ativo: o subestado, ou "aguardando você" quando
+ *  o job parou num gate antes de baixar. */
+function inFlightLabel(x: InFlightEpisode): string {
+  if (x.job_status === 'awaiting' && x.state === 'pending') return 'Aguardando você'
+  return EPISODE_STATE_LABEL[x.state] ?? x.state
+}
+
+/** Resumo da temporada: "3 baixando" enquanto nenhum passou do download;
+ *  depois "em andamento" (convertendo, em revisão...). */
+function busySummary(busy: Map<number, InFlightEpisode>): string {
+  const all = [...busy.values()]
+  const downloading = all.every((x) => x.state === 'pending' || x.state === 'downloading')
+  return `${all.length} ${downloading ? 'baixando' : 'em andamento'}`
+}
+
+const NO_BUSY: Map<number, InFlightEpisode> = new Map()
 
 /** Modal de série: escolha de temporada(s)/episódio(s) + idioma/destino e
  *  disparo do job (sempre original + dublado de cada episódio). */
@@ -66,18 +93,34 @@ export default function SeriesModal({
   const [skipSearch, setSkipSearch] = useState(false)
   const [advanced, setAdvanced] = useState<ConvertOptions | null>(null)
   const [starting, setStarting] = useState(false)
-  // episódios já na coleção ({temporada: [eps]}) — badge informativo; baixar
-  // de novo continua permitido (o usuário pode querer trocar a versão)
-  const [owned, setOwned] = useState<Record<number, number[]>>({})
+  // o que a coleção já tem (scan dos destinos de séries: episódios + pastas
+  // que casaram) — badge informativo; baixar de novo continua permitido (o
+  // usuário pode querer trocar a versão)
+  const [owned, setOwned] = useState<SeriesOwned | null>(null)
+  // episódios em jobs ATIVOS desta série: esses ficam bloqueados (ver abaixo)
+  const [inProgress, setInProgress] = useState<SeriesInProgress>({ seasons: {}, done: {} })
+  // o usuário escolheu o destino na mão: a pasta encontrada não o sobrescreve
+  const [destTouched, setDestTouched] = useState(false)
+
+  // o backend resolve os títulos da série no TMDB (o card só tem o
+  // localizado); os daqui são reforço, caso o TMDB não responda
+  const loadOwned = useCallback(() => {
+    const qs = new URLSearchParams({
+      title: series.title ?? '', original_title: series.original_title ?? '',
+      year: series.year ?? '',
+    })
+    return api<SeriesOwned>(`/api/series/${series.id}/owned?${qs}`)
+      .then(setOwned)
+      .catch(() => {})
+  }, [series.id, series.title, series.original_title, series.year])
 
   useEffect(() => {
     api<SeriesDetail>(`/api/series/${series.id}`)
       .then(setDetail)
       .catch((e) => setError((e as Error).message))
-    api<{ seasons: Record<number, number[]> }>(
-      `/api/series/${series.id}/owned?title=${encodeURIComponent(series.title ?? '')}`
-      + `&year=${encodeURIComponent(series.year ?? '')}`)
-      .then((r) => setOwned(r.seasons))
+    void loadOwned()
+    api<SeriesInProgress>(`/api/series/${series.id}/in-progress`)
+      .then(setInProgress)
       .catch(() => {})
     api<Language[]>('/api/languages').then(setLanguages).catch(() => {})
     api<Destination[]>('/api/destinations?media=tv')
@@ -92,9 +135,73 @@ export default function SeriesModal({
         setTargetId(ts.find((t) => t.is_default)?.id ?? ts[0]?.id ?? null)
       })
       .catch(() => {})
-  }, [series.id])
+  }, [series.id, loadOwned])
 
-  async function toggleOpen(season: number) {
+  // a série já tem pasta num destino de séries: os episódios novos vão para
+  // lá por padrão (a pasta com o nome do Outstasher primeiro — é nela que o
+  // merge entrega), senão nasceria a mesma série em outro destino
+  useEffect(() => {
+    if (destTouched || !owned?.folders.length) return
+    const known = owned.folders.filter((f) => destinations.some((d) => d.id === f.destination_id))
+    const pref = known.find((f) => f.folder === owned.canonical_name) ?? known[0]
+    if (pref) setDestId(pref.destination_id)
+  }, [owned, destinations, destTouched])
+
+  // na coleção = scan do destino + o que jobs ainda ativos já entregaram (o
+  // cache do scan só é invalidado quando o job inteiro termina)
+  const ownedBySeason = useMemo(() => {
+    const m = new Map<number, Set<number>>()
+    for (const rec of [owned?.seasons ?? {}, inProgress.done]) {
+      for (const [s, eps] of Object.entries(rec)) {
+        const set = m.get(Number(s)) ?? new Set<number>()
+        for (const e of eps) set.add(e)
+        m.set(Number(s), set)
+      }
+    }
+    return m
+  }, [owned, inProgress])
+
+  // Episódio em job ativo: desmarcado e BLOQUEADO (não só sinalizado). Pedir
+  // de novo cria um segundo job escrevendo o mesmo arquivo final — e o
+  // cancelamento de um apaga a entrega do outro (caso real). Quem quer
+  // refazer resolve/cancela o job existente (o badge leva até ele).
+  const busyBySeason = useMemo(() => {
+    const m = new Map<number, Map<number, InFlightEpisode>>()
+    for (const [s, eps] of Object.entries(inProgress.seasons)) {
+      m.set(Number(s), new Map(eps.map((x) => [x.episode, x])))
+    }
+    return m
+  }, [inProgress])
+  const busyOf = (season: number) => busyBySeason.get(season) ?? NO_BUSY
+  const busyJobs = useMemo(() => {
+    const ids = new Set<string>()
+    let n = 0
+    for (const eps of Object.values(inProgress.seasons)) {
+      for (const x of eps) { ids.add(x.job_id); n++ }
+    }
+    return { ids: [...ids], count: n }
+  }, [inProgress])
+
+  /** Episódios da temporada (do estado ou buscando agora). null = falhou. */
+  async function loadEpisodes(season: number): Promise<EpisodeInfo[] | null> {
+    const cur = episodes.get(season)
+    if (Array.isArray(cur)) return cur
+    setEpisodes((m) => new Map(m).set(season, 'loading'))
+    try {
+      const d = await api<SeasonDetail>(`/api/series/${series.id}/season/${season}`)
+      setEpisodes((m) => new Map(m).set(season, d.episodes))
+      return d.episodes
+    } catch {
+      setEpisodes((m) => {
+        const n = new Map(m)
+        n.delete(season)
+        return n
+      })
+      return null
+    }
+  }
+
+  function toggleOpen(season: number) {
     const next = new Set(open)
     if (next.has(season)) {
       next.delete(season)
@@ -103,45 +210,68 @@ export default function SeriesModal({
     }
     next.add(season)
     setOpen(next)
-    if (!episodes.has(season)) {
-      setEpisodes((cur) => new Map(cur).set(season, 'loading'))
-      try {
-        const d = await api<SeasonDetail>(`/api/series/${series.id}/season/${season}`)
-        setEpisodes((cur) => new Map(cur).set(season, d.episodes))
-      } catch {
-        setEpisodes((cur) => {
-          const m = new Map(cur)
-          m.delete(season)
-          return m
-        })
-      }
-    }
+    if (!episodes.has(season)) void loadEpisodes(season)
   }
 
-  function toggleSeason(season: number) {
-    setPickedSeasons((cur) => {
-      const next = new Set(cur)
-      if (next.has(season)) next.delete(season)
-      else next.add(season)
-      return next
-    })
-    // marcar/desmarcar a temporada inteira descarta a seleção parcial dela
-    setPickedEpisodes((cur) => {
-      const next = new Map(cur)
-      next.delete(season)
-      return next
-    })
+  /** O que dá para pedir na temporada: já lançado e fora de jobs ativos. */
+  function selectableOf(season: number, eps: EpisodeInfo[]): number[] {
+    const busy = busyOf(season)
+    return eps.filter((e) => !isFutureEpisode(e.air_date) && !busy.has(e.episode))
+      .map((e) => e.episode)
+  }
+
+  /** Temporada toda marcada: inteira, ou todos os pedíveis um a um (a que
+   *  tem episódio em job ativo só pode ser marcada assim). */
+  function seasonFullyPicked(season: number): boolean {
+    if (pickedSeasons.has(season)) return true
+    const eps = episodes.get(season)
+    const picked = pickedEpisodes.get(season)
+    if (!Array.isArray(eps) || !picked) return false
+    const sel = selectableOf(season, eps)
+    return sel.length > 0 && sel.every((e) => picked.has(e))
+  }
+
+  async function toggleSeason(season: number) {
+    const clear = () => {
+      setPickedSeasons((cur) => {
+        const next = new Set(cur)
+        next.delete(season)
+        return next
+      })
+      // marcar/desmarcar a temporada inteira descarta a seleção parcial dela
+      setPickedEpisodes((cur) => {
+        const next = new Map(cur)
+        next.delete(season)
+        return next
+      })
+    }
+    if (seasonFullyPicked(season)) {
+      clear()
+      return
+    }
+    if (busyOf(season).size === 0) {
+      clear()
+      setPickedSeasons((cur) => new Set(cur).add(season))
+      return
+    }
+    // "temporada inteira" pediria de novo o que o job ativo está baixando:
+    // vira a lista explícita sem esses episódios
+    const eps = await loadEpisodes(season)
+    if (!eps) return
+    const sel = selectableOf(season, eps)
+    clear()
+    if (sel.length) setPickedEpisodes((cur) => new Map(cur).set(season, new Set(sel)))
   }
 
   function toggleEpisode(season: number, ep: number) {
     const eps = episodes.get(season)
-    if (!Array.isArray(eps)) return
+    if (!Array.isArray(eps) || busyOf(season).has(ep)) return
     setPickedEpisodes((cur) => {
       const next = new Map(cur)
       // temporada inteira marcada + desmarcar um episódio = vira seleção
-      // explícita com todos menos ele (só os já lançados)
+      // explícita com todos menos ele (só os já lançados e fora de jobs ativos)
       const base = pickedSeasons.has(season)
-        ? new Set(eps.filter((e) => !isFutureEpisode(e.air_date)).map((e) => e.episode))
+        ? new Set(selectableOf(season, eps))
         : new Set(next.get(season) ?? [])
       if (base.has(ep)) base.delete(ep)
       else base.add(ep)
@@ -157,6 +287,7 @@ export default function SeriesModal({
   }
 
   function isEpisodePicked(season: number, ep: number): boolean {
+    if (busyOf(season).has(ep)) return false
     if (pickedSeasons.has(season)) return true
     return pickedEpisodes.get(season)?.has(ep) ?? false
   }
@@ -170,16 +301,78 @@ export default function SeriesModal({
 
   const hasSelection = selection.seasons.length > 0 || Object.keys(selection.episodes).length > 0
 
+  /** A seleção sem os episódios em jobs ativos — cobre a temporada marcada
+   *  inteira ANTES de o aviso de "baixando" chegar. */
+  async function requestable(): Promise<SeriesSelection> {
+    const seasons: number[] = []
+    const eps: Record<number, number[]> = {}
+    for (const [s, list] of Object.entries(selection.episodes)) {
+      const busy = busyOf(Number(s))
+      const keep = list.filter((e) => !busy.has(e))
+      if (keep.length) eps[Number(s)] = keep
+    }
+    for (const s of selection.seasons) {
+      if (busyOf(s).size === 0) {
+        seasons.push(s)
+        continue
+      }
+      const list = await loadEpisodes(s)
+      if (!list) throw new Error(`Não deu para carregar os episódios da temporada ${s}`)
+      const sel = selectableOf(s, list)
+      if (sel.length) eps[s] = sel
+    }
+    return { seasons, episodes: eps }
+  }
+
+  // pasta que casou por nome (ou com nome fora do padrão): renomear para o
+  // nome do Outstasher faz os episódios novos caírem NELA — ação explícita,
+  // nunca automática (outro programa pode depender do caminho)
+  function canStandardize(f: OwnedFolder): boolean {
+    const canonical = owned?.canonical_name
+    if (!canonical || !detail?.original_title || f.folder === canonical) return false
+    return !owned.folders.some((o) => o.destination_id === f.destination_id && o.folder === canonical)
+  }
+
+  async function standardize(f: OwnedFolder) {
+    const canonical = owned?.canonical_name
+    if (!canonical || !detail) return
+    if (!(await dialog.confirm({
+      title: 'Padronizar a pasta da série',
+      message: `Renomear "${f.folder}" para "${canonical}"? Os episódios novos que o `
+        + 'Outstasher baixar vão para esta mesma pasta (em vez de uma segunda pasta '
+        + 'da série) e o Jellyfin passa a identificá-la pelo ID do TMDB. Os arquivos '
+        + 'dentro dela não mudam. Se outro programa gerencia esta pasta, ele perde o caminho.',
+      confirmText: 'Renomear',
+    }))) return
+    try {
+      await post('/api/catalog/item/tmdbid', {
+        folder: f.folder, destination_id: f.destination_id, tmdb_id: series.id,
+        title: detail.original_title, year: detail.year,
+      })
+      await loadOwned()
+    } catch (e) {
+      await dialog.alert({ title: 'Erro ao renomear', message: (e as Error).message })
+    }
+  }
+
   // mesmo `kind` dos filmes: os dois lados com merge, ou um lado só entregue direto
   async function start(kind: 'both' | 'original' | 'dubbed') {
     if (!hasSelection || starting) return
     setStarting(true)
     try {
+      const sel = await requestable()
+      if (!sel.seasons.length && !Object.keys(sel.episodes).length) {
+        await dialog.alert({
+          title: 'Nada a pedir',
+          message: 'Os episódios marcados já estão em jobs ativos desta série.',
+        })
+        return
+      }
       const job = await post<Job>('/api/jobs/series', {
         tmdb_id: series.id,
         language,
-        seasons: selection.seasons,
-        episodes: selection.episodes,
+        seasons: sel.seasons,
+        episodes: sel.episodes,
         mode: manual ? 'manual' : 'auto',
         skip_search: manual && skipSearch,
         // um lado só não passa por merge: a política do merge avançado não vale
@@ -232,6 +425,47 @@ export default function SeriesModal({
         {/* temporadas + episódios */}
         <div className="mt-4">
           <div className="mb-2 text-sm text-zinc-400">Temporadas e episódios</div>
+          {/* pastas da coleção que são esta série — inclusive as de outros
+              programas, achadas pelo nome */}
+          {owned && owned.folders.length > 0 && (
+            <div className="mb-2 flex flex-col gap-1">
+              {owned.folders.map((f) => (
+                <div
+                  key={`${f.destination_id}:${f.folder}`}
+                  className="flex items-center gap-2 rounded-lg border border-zinc-800 px-3 py-1.5 text-xs text-zinc-400"
+                >
+                  <Folder width={13} height={13} className="shrink-0 text-emerald-400" />
+                  <span className="min-w-0 flex-1 truncate" title={f.folder}>
+                    <span className="text-zinc-200">{f.folder}</span>
+                    {' · '}{f.destination_label} · {f.episodes} ep. · {MATCH_LABEL[f.match]}
+                  </span>
+                  {canStandardize(f) && (
+                    <button
+                      onClick={() => standardize(f)}
+                      title={`Renomear para "${owned.canonical_name}"`}
+                      className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-zinc-300 hover:border-blue-700 hover:text-blue-300"
+                    >
+                      Padronizar nome
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {busyJobs.count > 0 && (
+            <div className="mb-2 rounded-lg border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+              {busyJobs.count} episódio(s) desta série já estão em{' '}
+              {busyJobs.ids.length > 1 ? `${busyJobs.ids.length} jobs ativos` : 'um job ativo'} e
+              ficam bloqueados — pedir de novo duplicaria o download e o arquivo final.
+              Acompanhe em{' '}
+              {busyJobs.ids.map((id, i) => (
+                <span key={id}>
+                  {i > 0 && ', '}
+                  <Link to={`/jobs/${id}`} className="underline hover:text-amber-100">{id}</Link>
+                </span>
+              ))}.
+            </div>
+          )}
           {error && <Empty>Erro: {error}</Empty>}
           {!detail && !error && <Empty>Carregando...</Empty>}
           {detail && (
@@ -239,20 +473,25 @@ export default function SeriesModal({
               {detail.seasons.map((s) => {
                 const eps = episodes.get(s.season)
                 const isOpen = open.has(s.season)
-                const partial = (pickedEpisodes.get(s.season)?.size ?? 0) > 0
+                const ownedHere = ownedBySeason.get(s.season)
+                const busy = busyOf(s.season)
+                const full = seasonFullyPicked(s.season)
+                const partial = !full && (pickedEpisodes.get(s.season)?.size ?? 0) > 0
                 return (
                   <div key={s.season} className="rounded-lg border border-zinc-800">
                     <div className="flex items-center gap-2 px-3 py-2">
                       <input
                         type="checkbox"
-                        checked={pickedSeasons.has(s.season)}
+                        checked={full}
                         // seleção parcial: o estado visual fica no contador ao lado
-                        onChange={() => toggleSeason(s.season)}
-                        title="Temporada inteira"
+                        onChange={() => void toggleSeason(s.season)}
+                        title={busy.size > 0
+                          ? 'Temporada inteira, menos os episódios em jobs ativos'
+                          : 'Temporada inteira'}
                       />
                       <button
                         onClick={() => toggleOpen(s.season)}
-                        className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-sm text-zinc-200 hover:text-white"
+                        className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5 text-left text-sm text-zinc-200 hover:text-white"
                       >
                         {isOpen
                           ? <NavArrowDown width={14} height={14} className="shrink-0 text-zinc-500" />
@@ -261,12 +500,20 @@ export default function SeriesModal({
                         <span className="shrink-0 text-xs text-zinc-500">
                           · {s.episode_count ?? '?'} ep. {s.air_date ? `· ${s.air_date.slice(0, 4)}` : ''}
                         </span>
-                        {(owned[s.season]?.length ?? 0) > 0 && (
+                        {ownedHere && ownedHere.size > 0 && (
                           <span
                             className="shrink-0 rounded bg-emerald-950 px-1.5 py-0.5 text-xs font-medium text-emerald-300"
                             title="Episódios desta temporada já na coleção"
                           >
-                            {owned[s.season]!.length}/{s.episode_count ?? '?'} na coleção
+                            {ownedHere.size}/{s.episode_count ?? '?'} na coleção
+                          </span>
+                        )}
+                        {busy.size > 0 && (
+                          <span
+                            className="shrink-0 rounded bg-amber-950 px-1.5 py-0.5 text-xs font-medium text-amber-300"
+                            title="Episódios desta temporada em jobs ativos — ficam bloqueados"
+                          >
+                            {busySummary(busy)}
                           </span>
                         )}
                       </button>
@@ -284,18 +531,22 @@ export default function SeriesModal({
                           <ul className="flex flex-col gap-1">
                             {eps.map((e) => {
                               const future = isFutureEpisode(e.air_date)
+                              const job = busy.get(e.episode)
+                              const blocked = future || job !== undefined
                               return (
                                 <li key={e.episode}>
                                   <label
                                     className={`flex items-center gap-2 rounded px-1 py-0.5 text-sm ${
-                                      future ? 'opacity-50' : 'hover:bg-zinc-800/60'
+                                      future ? 'opacity-50' : job ? '' : 'hover:bg-zinc-800/60'
                                     }`}
-                                    title={future ? 'Ainda não lançado' : e.overview ?? undefined}
+                                    title={future ? 'Ainda não lançado'
+                                      : job ? 'Já está num job ativo — pedir de novo duplicaria o download'
+                                        : e.overview ?? undefined}
                                   >
                                     <input
                                       type="checkbox"
-                                      disabled={future}
-                                      checked={!future && isEpisodePicked(s.season, e.episode)}
+                                      disabled={blocked}
+                                      checked={!blocked && isEpisodePicked(s.season, e.episode)}
                                       onChange={() => toggleEpisode(s.season, e.episode)}
                                     />
                                     <span className="w-10 shrink-0 font-mono text-xs text-zinc-500">
@@ -303,13 +554,22 @@ export default function SeriesModal({
                                     </span>
                                     <span className="min-w-0 flex-1 truncate text-zinc-300">
                                       {e.name ?? '—'}
-                                      {owned[s.season]?.includes(e.episode) && (
+                                      {ownedHere?.has(e.episode) && (
                                         <span
                                           className="ml-1.5 inline-flex items-center gap-0.5 rounded bg-emerald-950 px-1 py-px text-[10px] font-medium text-emerald-300"
                                           title="Já existe na coleção"
                                         >
                                           <Check width={9} height={9} /> na coleção
                                         </span>
+                                      )}
+                                      {job && (
+                                        <Link
+                                          to={`/jobs/${job.job_id}`}
+                                          className="ml-1.5 inline-flex items-center gap-0.5 rounded bg-amber-950 px-1 py-px text-[10px] font-medium text-amber-300 hover:text-amber-100"
+                                          title={`Num job ativo (${job.job_id}) — abrir o job`}
+                                        >
+                                          <Hourglass width={9} height={9} /> {inFlightLabel(job)}
+                                        </Link>
                                       )}
                                     </span>
                                     <span className="flex shrink-0 items-center gap-1 text-xs text-zinc-500">
@@ -355,7 +615,10 @@ export default function SeriesModal({
             {destinations.length ? (
               <select
                 value={destId ?? ''}
-                onChange={(e) => setDestId(Number(e.target.value))}
+                onChange={(e) => {
+                  setDestTouched(true)
+                  setDestId(Number(e.target.value))
+                }}
                 className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm"
                 title={destinations.find((d) => d.id === destId)?.path}
               >

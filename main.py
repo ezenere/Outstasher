@@ -19,6 +19,7 @@ from pydantic import BaseModel
 import config
 from services import advanced_merge, auth, catalog, jackett, jobs, store, tmdb, transcode
 from services import browse
+from services.series import activity as series_activity
 from services.series import manual as series_manual
 from services.series import pipeline as series_pipeline
 
@@ -231,29 +232,68 @@ async def movies(q: str = "", page: int = 1):
 async def series(q: str = "", page: int = 1):
     """Busca/populares de séries — espelho de /api/movies (mesmo shape de card).
 
-    O selo de coleção usa o mesmo índice (título, ano) do scan de pastas: uma
-    pasta de série no destino conta como "na coleção" (granularidade por
-    episódio chega com o catálogo de séries)."""
+    O selo de coleção vem do índice de SÉRIES (pastas dos destinos de séries,
+    por [tmdbid-N] ou título original/localizado) — não do de filmes, que só
+    olha os destinos de filmes. `owned_episodes` = quantos episódios a
+    coleção já tem (o card diz "8 ep." em vez de um selo de tudo-ou-nada)."""
     if not config.TMDB_API_KEY:
         raise HTTPException(500, "TMDB_API_KEY não configurada no .env")
     page = max(1, min(page, 500))
     result = await (tmdb.search_tv(q.strip(), page) if q.strip()
                     else tmdb.popular_tv(page))
-    keys = await asyncio.to_thread(catalog.library_keys)
+    index = await asyncio.to_thread(catalog.series_index)
     for m in result.get("results", []):
-        m["in_catalog"] = catalog.in_library(m, keys)
+        lib = catalog.series_in_library(
+            m["id"], [m.get("original_title"), m.get("title")],
+            m.get("year") or None, index)
+        m["in_catalog"] = bool(lib["folders"])
+        m["owned_episodes"] = sum(len(eps) for eps in lib["seasons"].values())
     return result
 
 
 @app.get("/api/series/{tv_id}/owned")
-async def series_owned(tv_id: int, title: str = "", year: str = ""):
-    """Episódios da série já presentes na coleção: {temporada: [episódios]}.
+async def series_owned(tv_id: int, title: str = "", original_title: str = "",
+                       year: str = ""):
+    """O que a coleção já tem da série: {seasons: {temporada: [episódios]},
+    folders: [pastas que casaram, com o como], canonical_name}.
 
-    Casa por [tmdbid-N] na pasta; fallback por título/ano (a UI manda os dois
-    do card para evitar outra ida ao TMDB)."""
-    owned = await asyncio.to_thread(
-        catalog.owned_episodes, tv_id, title or None, year or None)
-    return {"seasons": owned}
+    Casa por [tmdbid-N] na pasta; sem a marca, pelos títulos que o TMDB dá à
+    série (original, localizado e inglês) — resolvidos AQUI em vez de
+    confiar no que a UI manda: o card traz o título localizado, e a pasta
+    baixada por outro programa costuma ter o original, sem ano. Os
+    title/original_title/year da UI somam como reforço (e são tudo o que há
+    se o TMDB não responder).
+
+    `canonical_name` é o nome que o Outstasher daria à pasta: a UI oferece
+    renomear (ação explícita) a pasta que casou por título, para os
+    episódios novos caírem nela e não numa segunda pasta da série."""
+    async def details():
+        try:
+            return await tmdb.tv_details(tv_id)
+        except Exception:  # noqa: BLE001 — sem TMDB, fica com o que a UI mandou
+            return None
+
+    d, index = await asyncio.gather(
+        details(), asyncio.to_thread(catalog.series_index))
+    titles = [title, original_title]
+    canonical = None
+    if d:
+        titles += [d.get("original_title"), d.get("localized_title"),
+                   d.get("english_title")]
+        year = d.get("year") or year
+        if d.get("original_title"):
+            canonical = catalog.folder_name(d["original_title"], year or None, tv_id)
+    lib = catalog.series_in_library(tv_id, titles, year or None, index)
+    return {**lib, "canonical_name": canonical}
+
+
+@app.get("/api/series/{tv_id}/in-progress")
+async def series_in_progress(tv_id: int):
+    """Episódios da série em jobs ATIVOS (baixando/convertendo/em revisão) e
+    os que esses jobs já entregaram — o modal deixa os primeiros desmarcados
+    e bloqueados (pedir de novo duplicaria o download e o arquivo de saída)
+    e soma os segundos ao "na coleção" (o scan só os vê no fim do job)."""
+    return series_activity.episodes_in_jobs(tv_id)
 
 
 @app.get("/api/series/{tv_id}/season/{season}")
@@ -605,6 +645,10 @@ class TagTmdbRequest(BaseModel):
     folder: str
     tmdb_id: int
     destination_id: int | None = None
+    # com título: a pasta vira o nome exato do Outstasher ('Título (Ano)
+    # [tmdbid-N]'); sem, mantém o título/ano da própria pasta
+    title: str | None = None
+    year: str | None = None
 
 
 @app.post("/api/catalog/item/tmdbid")
@@ -612,7 +656,8 @@ async def catalog_tag_tmdb(req: TagTmdbRequest):
     """Marca a pasta com [tmdbid-N] para o Jellyfin identificar o filme."""
     try:
         folder = await asyncio.to_thread(catalog.tag_folder_with_tmdb,
-                                         req.destination_id, req.folder, req.tmdb_id)
+                                         req.destination_id, req.folder, req.tmdb_id,
+                                         (req.title or "").strip() or None, req.year)
     except catalog.CatalogError as e:
         raise HTTPException(400, str(e))
     return {"ok": True, "folder": folder}
