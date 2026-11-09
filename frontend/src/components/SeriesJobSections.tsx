@@ -12,8 +12,8 @@ import {
 } from '../api'
 import AlignmentReview from './AlignmentReview'
 import { useDialog } from './Dialog'
-import StallSwitchControl from './StallSwitch'
-import { CandidatesTable, Collapsible, ProgressBar } from './ui'
+import StallSwitchControl, { StallClockLine } from './StallSwitch'
+import { CandidatesTable, Collapsible, ProgressBar, Toggle } from './ui'
 
 /** Candidato de série na CandidatesTable: a coluna "Corte" (sem sentido em
  *  série) exibe a COBERTURA do torrent (S01E02 / S01 completa / série
@@ -210,16 +210,7 @@ export function SeriesTorrents({ job, onChanged }: { job: Job; onChanged: () => 
               {/* troca manual: como nos filmes, por torrent do plano */}
               {job.status === 'downloading' && t.state === 'downloading' && (
                 <div className="mt-1.5">
-                  <StallSwitchControl
-                    jobId={job.id}
-                    target={{ n: t.n }}
-                    mode={t.stall_mode}
-                    minutes={t.stall_minutes}
-                    clock={job.stall?.torrents[String(t.n)]}
-                    global={job.stall?.global}
-                    onChanged={onChanged}
-                  />
-                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <button
                       onClick={() => trySwitch(t.n, null)}
                       disabled={switching}
@@ -234,7 +225,17 @@ export function SeriesTorrents({ job, onChanged }: { job: Job; onChanged: () => 
                     >
                       {pickN === t.n ? 'Fechar lista' : 'Escolher outro…'}
                     </button>
+                    {/* troca automática na mesma linha, encostada à direita */}
+                    <StallSwitchControl
+                      jobId={job.id}
+                      target={{ n: t.n }}
+                      mode={t.stall_mode}
+                      minutes={t.stall_minutes}
+                      global={job.stall?.global}
+                      onChanged={onChanged}
+                    />
                   </div>
+                  <StallClockLine clock={job.stall?.torrents[String(t.n)]} />
                   {pickN === t.n && (
                     <div className="mt-2">
                       <div className="mb-1 text-xs text-zinc-500">
@@ -409,9 +410,9 @@ function MismatchedGate({ job, onResolved }: { job: Job; onResolved: () => void 
                 <span className="font-mono text-xs font-semibold">{k}</span>
                 <span className="min-w-0 flex-1" />
                 <label className="flex items-center gap-1.5 text-xs text-zinc-400">
-                  <input type="checkbox" checked={off}
+                  <Toggle size="sm" checked={off}
                     onChange={() => toggleIgnore(k)}
-                    className="h-3.5 w-3.5 accent-amber-500" />
+                    tone="amber" />
                   ignorar
                 </label>
               </div>

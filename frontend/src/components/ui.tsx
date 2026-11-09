@@ -196,6 +196,46 @@ export function Elapsed({ since, running, title }: {
   )
 }
 
+const TOGGLE_SIZE = {
+  // trilho, bolinha, deslocamento da bolinha ligada (trilho - bolinha - folga)
+  md: { track: 'h-5 w-9', knob: 'h-4 w-4', on: 'translate-x-[1.125rem]' },
+  sm: { track: 'h-4 w-7', knob: 'h-3 w-3', on: 'translate-x-[0.875rem]' },
+}
+
+/** Interruptor liga/desliga — o controle das OPÇÕES do app (o checkbox
+ *  ficou só para marcar itens numa lista: episódios, torrents...).
+ *
+ *  É um <button role="switch">: dentro de um <label>, clicar no texto do
+ *  label também alterna (button é controle "rotulável"). Não é um checkbox
+ *  escondido porque o index.css estiliza todo input[type=checkbox]. */
+export function Toggle({ checked, onChange, disabled, title, size = 'md', tone = 'blue', className = '' }: {
+  checked: boolean
+  onChange: (next: boolean) => void
+  disabled?: boolean
+  title?: string
+  size?: 'sm' | 'md'
+  tone?: 'blue' | 'amber'
+  className?: string
+}) {
+  const s = TOGGLE_SIZE[size]
+  const on = tone === 'amber' ? 'bg-amber-600' : 'bg-blue-600'
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      title={title}
+      onClick={() => onChange(!checked)}
+      className={`relative inline-flex shrink-0 cursor-pointer items-center rounded-full transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 disabled:cursor-not-allowed disabled:opacity-50 ${s.track} ${
+        checked ? on : 'bg-zinc-700 hover:bg-zinc-600'} ${className}`}
+    >
+      <span className={`inline-block rounded-full bg-white shadow transition-transform duration-150 ${s.knob} ${
+        checked ? s.on : 'translate-x-0.5'}`} />
+    </button>
+  )
+}
+
 export function Empty({ children }: { children: ReactNode }) {
   return <div className="py-3 text-zinc-500">{children}</div>
 }

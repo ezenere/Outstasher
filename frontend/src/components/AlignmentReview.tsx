@@ -5,7 +5,7 @@ import {
   type Edl, type EdlSegment, type Job, type ReviewAction, type ReviewRule,
 } from '../api'
 import { useDialog } from './Dialog'
-import { Collapsible } from './ui'
+import { Collapsible, Toggle } from './ui'
 
 /** Revisão de alinhamento: timeline de duas faixas por episódio, preview de
  *  frames nas fronteiras e decisão por segmento — com "aplicar como regra a
@@ -272,7 +272,7 @@ export default function AlignmentReview({ job, onResolved }: {
         Clique num trecho colorido para comparar os frames e decidir.
       </p>
       <label className="mt-2 flex items-center gap-1.5 text-sm text-zinc-300">
-        <input type="checkbox" checked={asRule} onChange={(e) => setAsRule(e.target.checked)} />
+        <Toggle checked={asRule} onChange={(v) => setAsRule(v)} />
         Aplicar as próximas decisões como REGRA a todos os episódios
         (mesmo tipo, mesma região, duração parecida)
       </label>
@@ -404,12 +404,11 @@ export default function AlignmentReview({ job, onResolved }: {
                 })()}
 
                 <label className="mt-1 flex items-center gap-1.5 text-xs text-zinc-400">
-                  <input
-                    type="checkbox"
+                  <Toggle size="sm"
                     checked={skip.has(key)}
-                    onChange={(e) => setSkip((cur) => {
+                    onChange={(v) => setSkip((cur) => {
                       const next = new Set(cur)
-                      if (e.target.checked) next.add(key)
+                      if (v) next.add(key)
                       else next.delete(key)
                       return next
                     })}
