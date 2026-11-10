@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Check, Download, EditPencil, FastArrowRight, MediaVideo, Refresh,
-  SkipNext, SoundHigh, WarningTriangle,
+  SkipNext, SoundHigh, Trash, WarningTriangle,
 } from 'iconoir-react'
 import {
   EPISODE_STATE_LABEL, fmtSize, post, prog, researchJob, resolveGate,
@@ -91,7 +91,8 @@ export function SeriesEpisodes({ job }: { job: Job }) {
 }
 
 /** Torrents do plano (as duas línguas), com barra de progresso, troca manual
- *  ("tentar próximo(s)" / escolher outro) e o botão de forçar a próxima etapa
+ *  ("tentar próximo(s)" / escolher outro), remover qualquer um, editar os
+ *  torrents (adicionar qualquer resultado/magnet) e forçar a próxima etapa
  *  durante o download. */
 export function SeriesTorrents({ job, onChanged }: { job: Job; onChanged: () => void }) {
   const dialog = useDialog()
@@ -100,8 +101,47 @@ export function SeriesTorrents({ job, onChanged }: { job: Job; onChanged: () => 
   // lista "Escolher outro…" aberta para qual torrent (+ candidatos buscados)
   const [pickN, setPickN] = useState<number | null>(null)
   const [pickList, setPickList] = useState<SeriesCandidate[] | null>(null)
+  // remoções pedidas: o watchdog atende no próximo ciclo (alguns segundos)
+  const [removing, setRemoving] = useState<Set<number>>(new Set())
+  const [editing, setEditing] = useState(false)
   const torrents = job.torrents ?? []
   if (!torrents.length) return null
+
+  async function removeTorrent(n: number) {
+    const t = torrents.find((x) => x.n === n)
+    if (!t || removing.has(n)) return
+    if (!(await dialog.confirm({
+      title: 'Remover torrent',
+      message: `Remover "${t.title}" do job? Ele sai do qBittorrent com o que já baixou `
+        + `(a menos que outro torrent do job use o mesmo). Episódio que só ele cobre `
+        + `(${t.coverage.join(', ')}) vira lacuna — aí você decide no aviso de lacunas.`,
+      confirmText: 'Remover', tone: 'danger',
+    }))) return
+    setRemoving((cur) => new Set(cur).add(n))
+    try {
+      await resolveGate(job.id, 'remove_torrent', { torrent_n: n })
+      if (pickN === n) {
+        setPickN(null)
+        setPickList(null)
+      }
+      onChanged()
+    } catch (e) {
+      setRemoving((cur) => { const s = new Set(cur); s.delete(n); return s })
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
+    }
+  }
+
+  async function editTorrents() {
+    if (editing) return
+    setEditing(true)
+    try {
+      await resolveGate(job.id, 'edit_torrents')
+      onChanged()
+    } catch (e) {
+      setEditing(false)
+      await dialog.alert({ title: 'Erro', message: (e as Error).message })
+    }
+  }
 
   async function trySwitch(n: number, candidateId: string | null) {
     if (switching) return
@@ -142,6 +182,20 @@ export function SeriesTorrents({ job, onChanged }: { job: Job; onChanged: () => 
     }
   }
 
+  function removeButton(n: number) {
+    const pedido = removing.has(n)
+    return (
+      <button
+        onClick={() => void removeTorrent(n)}
+        disabled={pedido}
+        title="Tira este torrent do job (e do qBittorrent). Episódio que só ele cobre vira lacuna."
+        className="inline-flex items-center gap-1 rounded-lg border border-red-900/60 px-2.5 py-1 text-xs text-red-300 hover:bg-red-950/40 disabled:opacity-50"
+      >
+        <Trash width={13} height={13} /> {pedido ? 'Removendo…' : 'Remover'}
+      </button>
+    )
+  }
+
   async function forceNext() {
     if (forcing) return
     if (!(await dialog.confirm({
@@ -166,6 +220,16 @@ export function SeriesTorrents({ job, onChanged }: { job: Job; onChanged: () => 
         <h2 className="text-sm font-semibold text-zinc-400">
           Torrents ({torrents.filter((t) => t.state === 'done').length}/{torrents.length} concluídos)
         </h2>
+        {job.status === 'downloading' && (
+          <button
+            onClick={editTorrents}
+            disabled={editing}
+            title="Abre a escolha com os torrents atuais marcados: desmarque para remover, marque qualquer resultado (original ou dublado) ou cole um magnet próprio. Os downloads seguem no qBittorrent enquanto você edita."
+            className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+          >
+            <EditPencil width={13} height={13} /> {editing ? 'Abrindo…' : 'Editar torrents'}
+          </button>
+        )}
         {job.status === 'downloading' && (
           <button
             onClick={forceNext}
@@ -208,6 +272,11 @@ export function SeriesTorrents({ job, onChanged }: { job: Job; onChanged: () => 
               </div>
               {t.state !== 'done' && p && <ProgressBar label="Download" p={p} />}
               {/* troca manual: como nos filmes, por torrent do plano */}
+              {job.status === 'downloading' && t.state === 'done' && (
+                <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                  {removeButton(t.n)}
+                </div>
+              )}
               {job.status === 'downloading' && t.state === 'downloading' && (
                 <div className="mt-1.5">
                   <div className="flex flex-wrap items-center gap-2">
@@ -225,6 +294,7 @@ export function SeriesTorrents({ job, onChanged }: { job: Job; onChanged: () => 
                     >
                       {pickN === t.n ? 'Fechar lista' : 'Escolher outro…'}
                     </button>
+                    {removeButton(t.n)}
                     {/* troca automática na mesma linha, encostada à direita */}
                     <StallSwitchControl
                       jobId={job.id}
@@ -240,7 +310,7 @@ export function SeriesTorrents({ job, onChanged }: { job: Job; onChanged: () => 
                     <div className="mt-2">
                       <div className="mb-1 text-xs text-zinc-500">
                         Candidatos que cobrem {t.coverage.join(', ')} (a coluna
-                        Corte mostra a cobertura). Clique para trocar.
+                        Corte mostra a cobertura). A linha marcada é a que está baixando; clique em outra para trocar.
                       </div>
                       {pickList === null ? (
                         <div className="text-xs text-zinc-500">Carregando…</div>
@@ -248,7 +318,13 @@ export function SeriesTorrents({ job, onChanged }: { job: Job; onChanged: () => 
                         <CandidatesTable
                           candidates={asTableRows(pickList)}
                           selectable
-                          onSelect={(cid) => trySwitch(t.n, cid)}
+                          current={{ title: t.title, tracker: t.tracker }}
+                          // a linha marcada é o torrent em uso: não há o que trocar
+                          onSelect={(cid) => {
+                            const c = pickList.find((x) => x.id === cid)
+                            if (c && c.title === t.title && (c.tracker ?? null) === (t.tracker ?? null)) return
+                            void trySwitch(t.n, cid)
+                          }}
                         />
                       )}
                     </div>

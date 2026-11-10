@@ -811,6 +811,14 @@ async def resolve(job_id: str, reason: str, decision: dict) -> dict | None:
                              {action: "manual", pairs: {orig: dub}, ignore: [...]}
                              {action: "finish", ignore: [...]}
     - force_continue:        {} (aceito com o job em downloading)
+    - edit_torrents:         {} (downloading) — reabre a escolha manual com o
+                             plano atual marcado: remover, adicionar qualquer
+                             resultado de qualquer papel, magnet próprio
+    - remove_torrent:        {torrent_n} (downloading) — tira o torrent do
+                             plano e do qBittorrent
+    Os dois pedidos de download são atendidos pelo watchdog no próximo tick
+    (_wait_downloads): ele é quem itera a lista de torrents, e mexer nela de
+    fora no meio de um tick poderia reinserir um torrent recém-removido.
     """
     job = jobs._jobs.get(job_id)
     if not job or job.get("media_type") != "tv":
@@ -823,6 +831,28 @@ async def resolve(job_id: str, reason: str, decision: dict) -> dict | None:
         jobs._event(job, "chosen",
                     "Usuário forçou a próxima etapa — episódios não baixados "
                     "serão pulados")
+        return jobs._public(job)
+
+    if reason in ("edit_torrents", "remove_torrent"):
+        if job["status"] != "downloading":
+            raise ValueError("Só dá para editar os torrents durante o download "
+                             "(na escolha manual e no aviso de lacunas, edite por lá)")
+        if reason == "edit_torrents":
+            job["_edit_torrents"] = True
+            jobs._event(job, "chosen", "Usuário pediu para editar os torrents — "
+                                       "abrindo a escolha (os downloads seguem)")
+            return jobs._public(job)
+        try:
+            n = int(decision.get("torrent_n"))
+        except (TypeError, ValueError):
+            raise ValueError("torrent_n: informe o número do torrent")
+        alvo = next((t for t in job["torrents"] if t["n"] == n), None)
+        if alvo is None:
+            raise ValueError(f"t{n} não está no plano")
+        pedidos = job.setdefault("_remove_torrents", [])
+        if n not in pedidos:
+            pedidos.append(n)
+        jobs._event(job, "chosen", f"Usuário pediu para remover t{n}: {alvo['title']}")
         return jobs._public(job)
 
     gate = job.get("awaiting")
@@ -1497,6 +1527,21 @@ async def _wait_downloads(job: dict):
         if job.get("force_continue"):
             _apply_force_continue(job)
             break
+        if job.get("_remove_torrents"):
+            await _apply_removals(job)
+        if job.pop("_edit_torrents", False):
+            # para o watchdog (os torrents seguem baixando no qBittorrent) e
+            # reabre a escolha com o plano atual marcado — o mesmo caminho do
+            # "Editar seleção" das lacunas; ao confirmar, replace_plan remove o
+            # que saiu, envia o que entrou e o watchdog recomeça
+            jobs.runtime.stall_forget(job)
+            job["mode"] = "manual"
+            job.pop("_manual_done", None)
+            _gate(job, "manual_pick", None,
+                  "Editando os torrents — os downloads seguem no qBittorrent")
+            return
+        if not pending():
+            break
         policy = stall_switch.get()
         try:
             infos = await jobs._qbit.info_by_tag(shared_tag(job))
@@ -1600,6 +1645,33 @@ async def _wait_downloads(job: dict):
 def _download_detail(job: dict) -> str:
     done = sum(1 for t in job["torrents"] if t["state"] == "done")
     return f"Baixando torrents ({done}/{len(job['torrents'])} concluídos)..."
+
+
+async def _apply_removals(job: dict):
+    """Remove do plano (e do qBittorrent) os torrents pedidos pelo usuário.
+
+    Mesma regra de remoção da edição de plano (_drop_sent): apagado com os
+    dados só se nenhum outro torrent do plano nem de outro job usa o mesmo.
+    Falha do qBittorrent não aplica nada (o plano fica como estava). Episódio
+    que só o removido cobria vira lacuna — o gate de lacunas de sempre decide
+    (editar, buscar de novo, seguir sem)."""
+    ns = set(job.pop("_remove_torrents", None) or [])
+    removed = [t for t in job["torrents"] if t["n"] in ns]
+    if not removed:
+        return
+    plan = [t for t in job["torrents"] if t["n"] not in ns]
+    try:
+        await _drop_sent(job, removed, plan)
+    except ValueError as e:
+        jobs._event(job, "qbit", f"⚠️ {e}")
+        return
+    job["torrents"] = plan
+    for t in removed:
+        jobs.runtime.stall_forget(job, t["n"])
+        jobs._event(job, "chosen", f"t{t['n']} removido do plano: {t['title']}")
+    # lacunas que a remoção abriu são outra decisão
+    job.pop("_gaps_accepted", None)
+    jobs._persist(job)
 
 
 def _apply_force_continue(job: dict):
@@ -1838,7 +1910,13 @@ def torrent_alternatives(job_id: str, torrent_n: int) -> list[dict]:
     t = next((x for x in job["torrents"] if x["n"] == torrent_n), None)
     if t is None:
         raise ValueError(f"Torrent t{torrent_n} não existe neste job")
-    return _alternatives_for(job, t)
+    # o torrent EM USO vem no topo (a UI o marca e não troca por ele): sem
+    # ele a lista não dizia qual era o atual. _alternatives_for segue sem —
+    # a troca automática usa a mesma lista e não pode "trocar" por ele mesmo
+    atual = next((candidates.series_view(c) for c in
+                  candidates.for_episode(job, t["role"], t["coverage"][0])
+                  if c["title"] == t["title"]), None) if t["coverage"] else None
+    return ([atual] if atual else []) + _alternatives_for(job, t)
 
 
 def _can_research(job: dict) -> bool:

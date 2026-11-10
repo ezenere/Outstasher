@@ -932,7 +932,7 @@ async def create_series_manual(req: SeriesManualRequest):
 
 
 class ResolveRequest(BaseModel):
-    reason: str      # manual_pick | gaps_confirm | incompatible_torrents | force_continue
+    reason: str      # manual_pick | gaps_confirm | incompatible_torrents | force_continue | edit_torrents | remove_torrent
     decision: dict = {}
 
 

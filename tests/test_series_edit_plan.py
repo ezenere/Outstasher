@@ -460,3 +460,95 @@ def test_pack_baixando_que_perde_episodio_desliga_o_arquivo(temp_db, monkeypatch
     assert asyncio.run(pipeline._ensure_file_selection(job, t)) is False
     assert ("b" * 40, [1], 0) in qbit.prio          # o E02 do pack desligado
     _cobertura_unica(job)
+
+
+# -------------------- editar/remover DURANTE o download --------------------
+# Pedido do usuário: em série, "trocar" não faz sentido (uns vêm por
+# episódio, outros em pack). Durante o download: remover qualquer torrent e
+# abrir a escolha para adicionar qualquer resultado (de qualquer papel) ou
+# magnet próprio. Os pedidos são atendidos pelo watchdog no tick seguinte.
+
+@pytest.fixture
+def baixando(temp_db, monkeypatch):
+    qbit = FakeQbit(files={
+        "a" * 40: _files("Pack/Serie.Exemplo.S01E01.1080p.mkv",
+                         "Pack/Serie.Exemplo.S01E02.1080p.mkv"),
+        "b" * 40: _files("Pack/Serie.Exemplo.S01E01.720p.Dublado.mkv",
+                         "Pack/Serie.Exemplo.S01E02.720p.Dublado.mkv"),
+    })
+    monkeypatch.setattr(jobs, "_qbit", qbit)
+    monkeypatch.setattr(jobs, "poll_interval", lambda: 0.01)
+    job = _job()
+    candidates.set_series(job, "original", {"S01E01": [_cand(None, *ORIG)],
+                                            "S01E02": [_cand(None, *ORIG)]})
+    candidates.set_series(job, "dubbed", {
+        "S01E01": [_cand(None, *DUB), _cand(None, *DUB_NOVO)],
+        "S01E02": [_cand(None, *DUB), _cand(None, *DUB_NOVO), _cand(None, *DUB_E02)],
+    })
+    job["torrents"] = [_torrent(0, "original", *ORIG, ["S01E01", "S01E02"]),
+                       _torrent(1, "dubbed", *DUB, ["S01E01", "S01E02"])]
+    jobs._jobs[JOB] = job
+    yield job, qbit
+    jobs._jobs.pop(JOB, None)
+    pipeline._pools.pop(JOB, None)
+
+
+def _durante_o_download(job, reason, decision):
+    """Envia, espera o watchdog entrar, faz o pedido e espera ele atender."""
+    async def go():
+        task = asyncio.create_task(pipeline._start_downloads(job))
+        for _ in range(500):
+            await asyncio.sleep(0.01)
+            if job["status"] == "downloading":
+                break
+        assert job["status"] == "downloading"
+        await pipeline.resolve(job["id"], reason, decision)
+        await asyncio.wait_for(task, 5)
+    asyncio.run(go())
+
+
+def test_remover_um_torrent_durante_o_download(baixando):
+    job, qbit = baixando
+    _durante_o_download(job, "remove_torrent", {"torrent_n": 1})
+    # saiu do qBittorrent (com os dados: nenhum outro torrent o usa) e do plano
+    assert qbit.deleted == [("b" * 40, True)]
+    assert [t["n"] for t in job["torrents"]] == [0]
+    # o dublado ficou sem cobertura: o aviso de lacunas de sempre decide
+    assert job["status"] == "awaiting"
+    assert job["awaiting"]["reason"] == "gaps_confirm"
+    msgs = [e["message"] for e in _eventos(job)]
+    assert any("t1 removido do plano" in m for m in msgs)
+
+
+def test_editar_torrents_reabre_a_escolha_com_o_plano(baixando):
+    job, qbit = baixando
+    _durante_o_download(job, "edit_torrents", {})
+    assert job["status"] == "awaiting"
+    assert job["awaiting"]["reason"] == "manual_pick"
+    assert job["mode"] == "manual"
+    payload = jobs._public(job)["awaiting"]["payload"]
+    assert {p["n"] for p in payload["preselected"]} == {0, 1}
+    # nada foi removido nem reenviado só por abrir a edição
+    assert qbit.deleted == [] and len(qbit.added) == 2
+
+
+def test_pedidos_de_download_validam(baixando):
+    job, _ = baixando
+    job["status"] = "awaiting"
+    with pytest.raises(ValueError, match="durante o download"):
+        asyncio.run(pipeline.resolve(job["id"], "edit_torrents", {}))
+    job["status"] = "downloading"
+    with pytest.raises(ValueError, match="não está no plano"):
+        asyncio.run(pipeline.resolve(job["id"], "remove_torrent", {"torrent_n": 9}))
+    with pytest.raises(ValueError, match="torrent_n"):
+        asyncio.run(pipeline.resolve(job["id"], "remove_torrent", {}))
+
+
+def test_lista_de_troca_mostra_o_torrent_em_uso_no_topo(baixando):
+    """Sem o atual na lista, a tela não dizia qual era o torrent em uso."""
+    job, _ = baixando
+    lista = pipeline.torrent_alternatives(JOB, 1)
+    assert lista[0]["title"] == DUB[0]
+    assert [c["title"] for c in lista[1:]] == [DUB_NOVO[0]]
+    # a troca automática segue sem ele (não troca um torrent por ele mesmo)
+    assert DUB[0] not in [c["title"] for c in pipeline._alternatives_for(job, job["torrents"][1])]
