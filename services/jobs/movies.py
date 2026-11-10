@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from services import merger, store, tmdb, transcode
+from services import candidates, merger, store, tmdb, transcode
 from services.jobs import advanced, delivery, downloads, schedule, search
 from services.jobs.runtime import (
     KINDS, _TERMINAL_STATUSES, _delete_job, _event, _fail, _get_merge_lock,
@@ -316,6 +316,10 @@ async def _run(job: dict):
     except asyncio.CancelledError:
         raise
     except Exception as e:  # noqa: BLE001 - job nunca deve derrubar o servidor
+        # Jackett/TMDB fora do ar antes de qualquer torrent ir: tenta de novo
+        if (not any(candidates.active(job, k) for k in ("audio", "video"))
+                and schedule.retry_after_error(job, e)):
+            return
         _fail(job, f"{type(e).__name__}: {e}")
         return
     await _run_from_download(job)

@@ -17,6 +17,8 @@ pelo mesmo caminho.
 import asyncio
 from datetime import datetime
 
+import httpx
+
 from services import search_retry
 from services.jobs.runtime import (
     _event, _has_torrents, _jobs, _persist, _public, _set, _spawn, _tasks)
@@ -55,6 +57,29 @@ def miss(job: dict, reason: str, hint: str) -> bool:
     when = search_retry.next_retry()
     wait_until(job, when, f"{reason} — nova busca {search_retry.human(search_retry.fmt(when))}"
                           f" (ou escolha/cole um magnet)")
+    return True
+
+
+# falha de rede na busca (Jackett/TMDB fora do ar, timeout): passa — não é
+# motivo para matar o job, é para tentar de novo
+TRANSIENT_ERRORS = (httpx.HTTPError, asyncio.TimeoutError, ConnectionError)
+
+
+def can_retry_after(job: dict, e: BaseException) -> bool:
+    return isinstance(e, TRANSIENT_ERRORS) and search_retry.enabled_for(job)
+
+
+def retry_after_error(job: dict, e: BaseException) -> bool:
+    """A busca caiu por falha passageira e nada foi para o qBittorrent: com
+    a busca contínua, agenda a próxima tentativa (True). Senão, quem chamou
+    falha o job como sempre."""
+    if not can_retry_after(job, e):
+        return False
+    when = search_retry.next_retry()
+    msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+    _event(job, "search", f"⚠️ Busca falhou ({msg})")
+    wait_until(job, when, f"Busca falhou ({type(e).__name__}) — nova tentativa "
+                          f"{search_retry.human(search_retry.fmt(when))}")
     return True
 
 

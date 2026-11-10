@@ -36,6 +36,9 @@ export default function ProcessMenu({
   const active = items.filter(
     (x) => media === 'all' || (x.media_type ?? 'movie') === media)
   const pending = items.some((x) => x.state === 'awaiting')
+  // o número conta o que está rodando; os programados ficam na lista (no
+  // fim) mas não estão fazendo nada agora
+  const running = active.filter((x) => x.state !== 'scheduled').length
 
   useEffect(() => {
     onPending?.(pending)
@@ -49,8 +52,8 @@ export default function ProcessMenu({
         className="relative flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-zinc-400 transition-colors hover:text-zinc-200"
       >
         Processos
-        {active.length > 0 && (
-          <span className="rounded-full bg-zinc-700 px-1.5 text-xs text-zinc-200">{active.length}</span>
+        {running > 0 && (
+          <span className="rounded-full bg-zinc-700 px-1.5 text-xs text-zinc-200">{running}</span>
         )}
         <NavArrowDown width={14} height={14} />
         {pending && (

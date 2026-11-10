@@ -228,6 +228,12 @@ async def _run(job: dict):
     except asyncio.CancelledError:
         raise
     except Exception as e:  # noqa: BLE001 — job nunca derruba o servidor
+        # TMDB/Jackett fora do ar antes de qualquer torrent ir: tenta de novo
+        if (not any(_sent(t) for t in job["torrents"])
+                and schedule.can_retry_after(job, e)):
+            _reset_plan(job)
+            schedule.retry_after_error(job, e)
+            return
         jobs._fail(job, f"{type(e).__name__}: {e}")
 
 

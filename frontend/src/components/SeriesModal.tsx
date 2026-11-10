@@ -9,11 +9,16 @@ import {
   type ConvertOptions, type Destination, type EpisodeInfo, type InFlightEpisode, type Job,
   type Language, type Movie, type OwnedFolder, type SeasonDetail, type SeriesDetail,
   type SeriesInProgress, type SeriesOwned, type TorrentTarget,
+  type MinQualityByRole, type RetryMode,
 } from '../api'
 import AdvancedOptions from './AdvancedOptions'
 import AdvancedMergePolicy from './AdvancedMergePolicy'
 import { useDialog } from './Dialog'
 import { DiskFree, Empty, useScrollLock, Toggle } from './ui'
+import {
+  MinQualityFields, minQualityBody, RetryToggle, ScheduleField, scheduleBody,
+  useSearchRetryGlobal,
+} from './SearchOptions'
 
 /** Seleção do modal: temporadas inteiras + episódios avulsos por temporada.
  *  É o shape que o job de série recebe (request.seasons / request.episodes). */
@@ -45,6 +50,7 @@ const MATCH_LABEL: Record<OwnedFolder['match'], string> = {
 /** Rótulo do episódio num job ativo: o subestado, ou "aguardando você" quando
  *  o job parou num gate antes de baixar. */
 function inFlightLabel(x: InFlightEpisode): string {
+  if (x.job_status === 'scheduled') return 'Programado'
   if (x.job_status === 'awaiting' && x.state === 'pending') return 'Aguardando você'
   return EPISODE_STATE_LABEL[x.state] ?? x.state
 }
@@ -53,6 +59,7 @@ function inFlightLabel(x: InFlightEpisode): string {
  *  depois "em andamento" (convertendo, em revisão...). */
 function busySummary(busy: Map<number, InFlightEpisode>): string {
   const all = [...busy.values()]
+  if (all.every((x) => x.job_status === 'scheduled')) return `${all.length} programado(s)`
   const downloading = all.every((x) => x.state === 'pending' || x.state === 'downloading')
   return `${all.length} ${downloading ? 'baixando' : 'em andamento'}`
 }
@@ -93,6 +100,16 @@ export default function SeriesModal({
   const [skipSearch, setSkipSearch] = useState(false)
   const [advanced, setAdvanced] = useState<ConvertOptions | null>(null)
   const [starting, setStarting] = useState(false)
+  // programação dos já lançados (null = busca já), hora da estreia dos
+  // futuros (padrão: a global), busca contínua e qualidade mínima
+  const [schedAt, setSchedAt] = useState<string | null>(null)
+  const [retryMode, setRetryMode] = useState<RetryMode | null>(null)
+  const [minQ, setMinQ] = useState<MinQualityByRole>({})
+  const retryGlobal = useSearchRetryGlobal()
+  const [releaseTime, setReleaseTime] = useState('')
+  useEffect(() => {
+    if (retryGlobal && !releaseTime) setReleaseTime(retryGlobal.release_time)
+  }, [retryGlobal, releaseTime])
   // o que a coleção já tem (scan dos destinos de séries: episódios + pastas
   // que casaram) — badge informativo; baixar de novo continua permitido (o
   // usuário pode querer trocar a versão)
@@ -213,11 +230,11 @@ export default function SeriesModal({
     if (!episodes.has(season)) void loadEpisodes(season)
   }
 
-  /** O que dá para pedir na temporada: já lançado e fora de jobs ativos. */
+  /** O que dá para pedir na temporada: fora de jobs ativos. O que ainda
+   *  não estreou vira job programado para o dia do lançamento (um por data). */
   function selectableOf(season: number, eps: EpisodeInfo[]): number[] {
     const busy = busyOf(season)
-    return eps.filter((e) => !isFutureEpisode(e.air_date) && !busy.has(e.episode))
-      .map((e) => e.episode)
+    return eps.filter((e) => !busy.has(e.episode)).map((e) => e.episode)
   }
 
   /** Temporada toda marcada: inteira, ou todos os pedíveis um a um (a que
@@ -382,6 +399,13 @@ export default function SeriesModal({
         destination_id: destId,
         torrent_target_id: targetId,
         convert: advanced,
+        scheduled_at: scheduleBody(schedAt),
+        retry_mode: retryMode,
+        min_quality: manual ? null : minQualityBody(minQ,
+          kind === 'both' ? ['video', 'audio'] : kind === 'original' ? ['video'] : ['audio']),
+        // episódio futuro vira job programado para o dia do lançamento
+        schedule_future: true,
+        release_time: releaseTime || null,
       })
       onClose()
       navigate(`/jobs/${job.id}`)
@@ -533,14 +557,14 @@ export default function SeriesModal({
                             {eps.map((e) => {
                               const future = isFutureEpisode(e.air_date)
                               const job = busy.get(e.episode)
-                              const blocked = future || job !== undefined
+                              const blocked = job !== undefined
                               return (
                                 <li key={e.episode}>
                                   <label
                                     className={`flex items-center gap-2 rounded px-1 py-0.5 text-sm ${
-                                      future ? 'opacity-50' : job ? '' : 'hover:bg-zinc-800/60'
+                                      job ? '' : 'hover:bg-zinc-800/60'
                                     }`}
-                                    title={future ? 'Ainda não lançado'
+                                    title={future && !job ? 'Ainda não lançado — vira um job programado que busca no dia da estreia'
                                       : job ? 'Já está num job ativo — pedir de novo duplicaria o download'
                                         : e.overview ?? undefined}
                                   >
@@ -566,16 +590,21 @@ export default function SeriesModal({
                                       {job && (
                                         <Link
                                           to={`/jobs/${job.job_id}`}
-                                          className="ml-1.5 inline-flex items-center gap-0.5 rounded bg-amber-950 px-1 py-px text-[10px] font-medium text-amber-300 hover:text-amber-100"
+                                          className={`ml-1.5 inline-flex items-center gap-0.5 rounded px-1 py-px text-[10px] font-medium ${
+                                            job.job_status === 'scheduled'
+                                              ? 'bg-teal-950 text-teal-300 hover:text-teal-100'
+                                              : 'bg-amber-950 text-amber-300 hover:text-amber-100'}`}
                                           title={`Num job ativo (${job.job_id}) — abrir o job`}
                                         >
-                                          <Hourglass width={9} height={9} /> {inFlightLabel(job)}
+                                          {job.job_status === 'scheduled'
+                                            ? <Calendar width={9} height={9} />
+                                            : <Hourglass width={9} height={9} />} {inFlightLabel(job)}
                                         </Link>
                                       )}
                                     </span>
-                                    <span className="flex shrink-0 items-center gap-1 text-xs text-zinc-500">
+                                    <span className={`flex shrink-0 items-center gap-1 text-xs ${future ? 'text-teal-400' : 'text-zinc-500'}`}>
                                       {future && <Calendar width={11} height={11} />}
-                                      {future ? `estreia em ${fmtAirDate(e.air_date)}` : fmtAirDate(e.air_date)}
+                                      {future ? (e.air_date ? `estreia em ${fmtAirDate(e.air_date)}` : 'sem data de estreia') : fmtAirDate(e.air_date)}
                                       {e.runtime ? ` · ${e.runtime}min` : ''}
                                     </span>
                                   </label>
@@ -683,6 +712,22 @@ export default function SeriesModal({
               O job abre direto na escolha, com a lista vazia — informe lá o
               magnet ou link .torrent de cada torrent e a que episódios ele serve.
             </p>
+          )}
+          <ScheduleField value={schedAt} onChange={setSchedAt}
+            label="Agendar download (episódios já lançados)" />
+          <label className="flex flex-wrap items-center gap-1.5 text-sm text-zinc-300"
+            title="Cada data de estreia vira um job programado; ele começa a procurar nesse dia, a partir desta hora">
+            <Calendar width={14} height={14} className="text-teal-400" />
+            Episódios futuros: buscar no dia da estreia a partir das
+            <input type="time" value={releaseTime}
+              onChange={(e) => setReleaseTime(e.target.value)}
+              className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-0.5 text-sm" />
+          </label>
+          <RetryToggle mode={retryMode} onChange={setRetryMode} global={retryGlobal} />
+          {!manual && (
+            <div className="mt-1 rounded-lg border border-zinc-800 p-2.5">
+              <MinQualityFields value={minQ} onChange={setMinQ} />
+            </div>
           )}
         </div>
 

@@ -4,11 +4,15 @@ import { Check, Download, MediaVideo, Search, SoundHigh, Xmark } from 'iconoir-r
 import {
   api, MOVIE_STATE_LABEL, post,
   type AdvancedMergeConfig, type ConvertOptions, type Destination, type Job, type Language, type Movie,
-  type MovieState, type MoviePage, type TorrentTarget,
+  type MovieState, type MoviePage, type TorrentTarget, type MinQualityByRole, type RetryMode,
 } from '../api'
 import { useJobsSummary } from '../jobsSummary'
 import AdvancedOptions from '../components/AdvancedOptions'
 import AdvancedMergePolicy from '../components/AdvancedMergePolicy'
+import {
+  MinQualityFields, minQualityBody, RetryToggle, ScheduleField, scheduleBody,
+  useSearchRetryGlobal,
+} from '../components/SearchOptions'
 import { useDialog } from '../components/Dialog'
 import SeriesModal from '../components/SeriesModal'
 import { InfiniteScrollFooter, useInfiniteScroll } from '../components/InfiniteScroll'
@@ -33,6 +37,12 @@ export default function Movies() {
   // política do merge avançado só para este job (null = global)
   const [advMerge, setAdvMerge] = useState<AdvancedMergeConfig | null>(null)
   const [downloadOnly, setDownloadOnly] = useState(false)
+  // programação (null = busca já), busca contínua (null = herda a global) e
+  // qualidade mínima da escolha automática
+  const [schedAt, setSchedAt] = useState<string | null>(null)
+  const [retryMode, setRetryMode] = useState<RetryMode | null>(null)
+  const [minQ, setMinQ] = useState<MinQualityByRole>({})
+  const retryGlobal = useSearchRetryGlobal()
   const [advanced, setAdvanced] = useState<ConvertOptions | null>(null)
   const [destinations, setDestinations] = useState<Destination[]>([])
   const [destId, setDestId] = useState<number | null>(null)
@@ -153,6 +163,10 @@ export default function Movies() {
         download_only: downloadOnly,
         // apenas baixar: nada é convertido, então as opções avançadas não valem
         convert: downloadOnly ? null : advanced,
+        scheduled_at: scheduleBody(schedAt),
+        retry_mode: retryMode,
+        min_quality: manual ? null : minQualityBody(minQ,
+          kind === 'both' ? ['video', 'audio'] : kind === 'original' ? ['video'] : ['audio']),
       })
       // some com a seleção e sinaliza que começou (sem trocar de tela). O
       // estado real chega no próximo tick do summary (≤5s); até lá o overlay
@@ -414,6 +428,13 @@ export default function Movies() {
                 <p className="text-xs text-zinc-500">
                   Os arquivos ficam onde o qBittorrent baixar — sem merge, hardlink ou cópia para o destino.
                 </p>
+              )}
+              <ScheduleField value={schedAt} onChange={setSchedAt} />
+              <RetryToggle mode={retryMode} onChange={setRetryMode} global={retryGlobal} />
+              {!manual && (
+                <div className="mt-1 rounded-lg border border-zinc-800 p-2.5">
+                  <MinQualityFields value={minQ} onChange={setMinQ} />
+                </div>
               )}
             </div>
 

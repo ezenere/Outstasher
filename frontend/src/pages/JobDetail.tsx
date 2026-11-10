@@ -10,6 +10,7 @@ import { Badge, CandidatesTable, ClampText, Collapsible, Elapsed, Empty, KindTag
 import { useDialog } from '../components/Dialog'
 import AdvancedMergePolicy from '../components/AdvancedMergePolicy'
 import { SeriesEpisodes, SeriesGate, SeriesReport, SeriesTorrents } from '../components/SeriesJobSections'
+import { SchedulePanel, useSearchRetryGlobal } from '../components/SearchOptions'
 import AlignmentReview from '../components/AlignmentReview'
 import StallSwitchControl, { StallClockLine } from '../components/StallSwitch'
 import { jobTitle, removeJob } from './Jobs'
@@ -17,6 +18,7 @@ import { jobTitle, removeJob } from './Jobs'
 export default function JobDetail() {
   const { id } = useParams<{ id: string }>()
   const dialog = useDialog()
+  const retryGlobal = useSearchRetryGlobal()
   const [job, setJob] = useState<Job | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [selAudio, setSelAudio] = useState<string | undefined>()
@@ -84,7 +86,7 @@ export default function JobDetail() {
 
   // pre-seleciona os melhores quando o job esta aguardando escolha
   useEffect(() => {
-    if (job?.status === 'awaiting' && job.search) {
+    if ((job?.status === 'awaiting' || job?.status === 'scheduled') && job.search) {
       setSelAudio((cur) => cur ?? job.search!.audio[0]?.id)
       setSelVideo((cur) => cur ?? job.search!.video[0]?.id)
     }
@@ -123,7 +125,9 @@ export default function JobDetail() {
        needVideo && !job.search.video.length ? 'o original' : null].filter(Boolean)
     : []
   // nova busca só na escolha "limpa" (sem torrent no ar nem pausa de conversão)
-  const canResearch = job.status === 'awaiting' && !job.skip_search
+  // programado depois de uma busca sem resultado: a escolha segue aberta
+  const choosing = job.status === 'awaiting' || job.status === 'scheduled'
+  const canResearch = choosing && !job.skip_search
     && !job.drift_confirm && !job.awaiting && !job.current
 
   async function submitSelection() {
@@ -449,6 +453,11 @@ export default function JobDetail() {
 
       {/* ---- ações pendentes (o mais urgente vem primeiro) ---- */}
       {/* gates de série (lacunas / incompatibilidade / escolha manual) */}
+      {/* programado (hora marcada / próxima tentativa) ou parado na escolha
+          por falta de resultado: quando busca e a busca contínua do job */}
+      {(job.status === 'scheduled' || (job.status === 'awaiting' && job.search_miss)) && (
+        <SchedulePanel job={job} global={retryGlobal} onChanged={reload} />
+      )}
       {job.media_type === 'tv' && <SeriesGate job={job} onResolved={reload} />}
       {/* relatório final da série (com recriação das falhas) */}
       {job.media_type === 'tv' && <SeriesReport job={job} />}
@@ -529,7 +538,7 @@ export default function JobDetail() {
         </section>
       )}
 
-      {job.status === 'awaiting' && job.search && (
+      {choosing && job.search && (
         <section className="mt-6 rounded-xl border border-purple-900/60 bg-purple-950/20 p-4">
           <h2 className="mb-3 font-semibold text-purple-300">
             {needAudio && needVideo ? 'Escolha os torrents' : 'Escolha o torrent'}

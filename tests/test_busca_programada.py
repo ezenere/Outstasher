@@ -166,7 +166,8 @@ def _criar_filme(**kw):
     async def go():
         out = await movies.create(7, "pt", **kw)
         await _drain()
-        return jobs._jobs.get(out["id"]) or out
+        # terminal sai da memória: o banco tem o estado final
+        return jobs._jobs.get(out["id"]) or jobs.get_job(out["id"])
     return asyncio.run(go())
 
 
@@ -470,3 +471,47 @@ def test_episodio_futuro_programado_aparece_como_pedido(serie_tmdb, indexador):
     _criar_serie(episodes={1: [4]}, schedule_future=True)
     eps = activity.episodes_in_jobs(4242)["seasons"][1]
     assert [(e["episode"], e["job_status"]) for e in eps] == [(4, "scheduled")]
+
+
+# ============================== falha passageira ==============================
+
+def test_jackett_fora_do_ar_tenta_de_novo(filme_tmdb, relogio, monkeypatch):
+    import httpx
+
+    async def fora(query, indexer="all", categories=None):
+        raise httpx.ConnectError("connection refused")
+    monkeypatch.setattr(jackett, "search", fora)
+    job = _criar_filme()
+    assert job["status"] == "scheduled"
+    assert job["detail"].startswith("Busca falhou (ConnectError) — nova tentativa 10/11 às 18:00")
+    # com a busca contínua desligada, segue falhando como antes
+    job2 = _criar_filme(retry_mode="off")
+    assert job2["status"] == "error"
+
+
+def test_serie_tmdb_fora_do_ar_tenta_de_novo(serie_tmdb, relogio, monkeypatch):
+    import httpx
+
+    async def fora(tv_id, lang):
+        raise httpx.ReadTimeout("")
+    monkeypatch.setattr(tmdb, "tv_details", fora)
+    job = jobs._jobs[_criar_serie(episodes={1: [1]})]
+    assert job["status"] == "scheduled"
+    assert job["detail"].startswith("Busca falhou (ReadTimeout)")
+
+
+def test_programacao_sobrevive_ao_banco(filme_tmdb, relogio):
+    """Os campos da programação voltam iguais do banco (restart)."""
+    from services import store
+    job = _criar_filme(scheduled_at="2026-11-20T08:00", retry_mode="on",
+                       min_quality={"audio": {"res": "1080p", "source": "webdl"}})
+    jobs.runtime.flush_dirty(force=True)
+    store.upsert_job(job)
+    lido = store.get_job(job["id"])
+    for k in ("status", "scheduled_at", "next_search_at", "retry_mode", "min_quality"):
+        assert lido[k] == job[k], k
+    assert lido["status"] == "scheduled"
+    # e o load() do startup traz o programado para a memória (o relógio o vê)
+    jobs._jobs.clear()
+    jobs.load()
+    assert jobs._jobs[job["id"]]["next_search_at"] == "2026-11-20T08:00:00"

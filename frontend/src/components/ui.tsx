@@ -4,7 +4,7 @@ import {
   convertSummary, fmtDisk, fmtEta, fmtSize, fmtSpeed, fmtTime, langName,
   MOVIE_STATE_LABEL, STATUS_LABEL, mergePhase, qbitIsComplete, qbitState,
 } from '../api'
-import { BookmarkSolid, Check, MediaVideoList, Download, Search, Timer, WarningTriangle, CheckCircle, XmarkCircle } from 'iconoir-react'
+import { BookmarkSolid, Calendar, Check, MediaVideoList, Download, Search, Timer, WarningTriangle, CheckCircle, XmarkCircle } from 'iconoir-react'
 
 /** Trava o scroll do body enquanto um modal está aberto.
  *
@@ -35,6 +35,7 @@ export function useScrollLock(active = true) {
 const BADGE_STYLES: Record<string, string> = {
   searching: 'bg-blue-950 text-blue-400',
   awaiting: 'bg-purple-950 text-purple-400',
+  scheduled: 'bg-teal-950 text-teal-400',
   downloading: 'bg-yellow-950 text-yellow-400',
   merging: 'bg-blue-950 text-blue-400',
   done: 'bg-emerald-950 text-emerald-400',
@@ -399,6 +400,7 @@ const STATE_STYLE: Record<MovieState, { icon: typeof Download; cls: string; badg
   downloading: { icon: Download, cls: 'text-yellow-300', badge: 'bg-yellow-950/80 text-yellow-300' },
   searching: { icon: Search, cls: 'text-sky-300', badge: 'bg-sky-950/80 text-sky-300' },
   awaiting: { icon: WarningTriangle, cls: 'text-purple-300', badge: 'bg-purple-950/80 text-purple-300' },
+  scheduled: { icon: Calendar, cls: 'text-teal-300', badge: 'bg-teal-950/80 text-teal-300' },
   done: { icon: CheckCircle, cls: 'text-emerald-300', badge: 'bg-emerald-950/80 text-emerald-300' },
   error: { icon: XmarkCircle, cls: 'text-red-300', badge: 'bg-red-950/80 text-red-300' },
 }

@@ -79,6 +79,18 @@ Busque, clique, escolha idioma e destino. Modos: **Baixar e fazer merge**,
   (o alinhador das séries, com EDL e revisão — resolve cena/junção diferente
   no mesmo corte), continuar com o offset do início, trocar de torrent ou
   cancelar.
+- **Agendar download**: o job nasce **Programado** e só começa a procurar na
+  data/hora escolhida (dá para mudar a data ou *Buscar agora* antes disso).
+- **Qualidade mínima** (modo automático): piso de resolução e de fonte para o
+  original e para o dublado — o do dublado mede o vídeo do release dublado, que
+  diz muito do áudio dele. A lista de escolha continua mostrando tudo.
+- **Busca contínua**: a busca que não acha nada que sirva (nada, nada na
+  qualidade mínima, nenhum par do mesmo corte, Jackett/TMDB fora do ar) deixa o
+  job **Programado** para tentar de novo depois do intervalo das Configurações
+  (padrão 6 h), até achar ou o job ser excluído — com a escolha aberta
+  enquanto isso (lista + magnet próprio). A nova busca é **incremental**: o que
+  a anterior achou fica, a menos que o tracker tenha respondido sem ele (saiu
+  do tracker) ou com zero seeders. Liga/desliga global e por job.
 - **Limpeza** (`QBIT_CLEANUP`): `keep` | `remove` | `remove_data`.
 - **Cancelar / repetir** em cada card; detalhes ao vivo (downloads, candidatos,
   eventos, progresso do ffmpeg) na lupa.
@@ -107,8 +119,11 @@ série** (ver *Merge manual de série*).
 ## Séries
 
 O toggle **Filmes/Séries** na aba Buscar alterna para a base de TV do TMDB. O
-modal da série lista temporadas e episódios (futuros ficam desabilitados e são
-pulados). O job baixa as duas versões de cada episódio.
+modal da série lista temporadas e episódios. O job baixa as duas versões de
+cada episódio. Episódio que ainda não estreou vira um job **Programado** — um
+por data de estreia — que começa a procurar no dia do lançamento, a partir da
+hora escolhida (padrão nas Configurações); se o TMDB mudar a data, o job
+acompanha. Agendar, qualidade mínima e busca contínua valem como nos filmes.
 
 ### Busca e seleção
 
@@ -228,6 +243,9 @@ com **Adicionar episódios** e **recompressão** por episódio, temporada ou sé
   no próprio qBittorrent, basta que o novo caminho seja o de algum destino —
   ganha o primeiro que existe em disco; sem nenhum, o job falha listando os
   caminhos tentados.
+- **Busca programada**: busca contínua ligada por padrão, intervalo entre as
+  tentativas (dias/horas/minutos) e a hora do dia da estreia em que episódio
+  futuro começa a ser procurado. A lista de Jobs tem o filtro **Programado**.
 - **Catálogo**: ffprobe parseado por arquivo, renomear/remover, **Recomprimir**,
   **Marcar ID do TMDB** (renomeia a pasta para `[tmdbid-N]`).
 

@@ -8,6 +8,7 @@ import Jobs from './pages/Jobs'
 import JobDetail from './pages/JobDetail'
 import Settings, {
   ConvertPresetsSection, DestinationsSection, TorrentTargetsSection, ExtraSearchSection,
+  SearchRetrySection,
   LanguagesSection, SecuritySection, AdvancedMergeSection,
 } from './pages/Settings'
 import Catalog from './pages/Catalog'
@@ -138,6 +139,7 @@ export default function App() {
               <Route path="presets" element={<ConvertPresetsSection />} />
               <Route path="languages" element={<LanguagesSection />} />
               <Route path="searches" element={<ExtraSearchSection />} />
+              <Route path="schedule" element={<SearchRetrySection />} />
               <Route path="merge" element={<AdvancedMergeSection />} />
               <Route path="security" element={<SecuritySection />} />
             </Route>

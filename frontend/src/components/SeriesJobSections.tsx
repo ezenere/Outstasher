@@ -612,7 +612,9 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
   // reload de 5s não desfazer o que o usuário mexeu
   const [seeded, setSeeded] = useState(false)
   const gate = job.awaiting
-  const pickOpen = job.status === 'awaiting' && gate?.reason === 'manual_pick'
+  // programado depois de uma busca sem resultado: a escolha segue aberta
+  const waiting = job.status === 'awaiting' || job.status === 'scheduled'
+  const pickOpen = waiting && gate?.reason === 'manual_pick'
   const preselected = pickOpen ? gate?.payload?.preselected : undefined
   useEffect(() => {
     if (!pickOpen) {
@@ -632,7 +634,7 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
     setMagnetForm(null)
     setSeeded(true)
   }, [pickOpen, preselected, seeded])
-  if (job.status !== 'awaiting' || !gate) return null
+  if (!waiting || !gate) return null
 
   if (gate.reason === 'alignment_review') {
     return <AlignmentReview job={job} onResolved={onResolved} />

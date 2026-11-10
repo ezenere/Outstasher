@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import {
-  Check, ControlSlider, EditPencil, Folder, HardDrive, Language, Lock, NavArrowDown,
+  Calendar, Check, ControlSlider, EditPencil, Folder, HardDrive, Language, Lock, NavArrowDown,
   NavArrowRight, Plus, Refresh, Search, Star, StarSolid, Trash, WarningTriangle, Xmark,
 } from 'iconoir-react'
 import {
@@ -9,7 +9,7 @@ import {
   api, changePassword, convertSummary, del, post, put, VARIANT_LABEL,
   type ConvertOptions, type ConvertPreset, type Destination, type ExtraSearchConfig,
   type ExtraSearchRules, type JackettIndexer, type LanguageConfig, type LanguageEntry,
-  type StallSwitchConfig, type TorrentTarget,
+  type SearchRetryConfig, type StallSwitchConfig, type TorrentTarget,
 } from '../api'
 import { DiskBar, Empty, Toggle } from '../components/ui'
 import { useDialog } from '../components/Dialog'
@@ -23,6 +23,7 @@ const SETTINGS_TABS: { to: string; label: string; icon: typeof Folder }[] = [
   { to: 'presets', label: 'Presets', icon: ControlSlider },
   { to: 'languages', label: 'Idiomas', icon: Language },
   { to: 'searches', label: 'Buscas extras', icon: Search },
+  { to: 'schedule', label: 'Busca programada', icon: Calendar },
   { to: 'merge', label: 'Merge avançado', icon: ControlSlider },
   { to: 'security', label: 'Senha', icon: Lock },
 ]
@@ -1318,6 +1319,118 @@ function StallSwitchSection() {
         </>
       )}
     </div>
+  )
+}
+
+// ---------------- busca programada / contínua ----------------
+
+const UNITS: { key: 'days' | 'hours' | 'minutes'; label: string; min: number }[] = [
+  { key: 'days', label: 'dias', min: 1440 },
+  { key: 'hours', label: 'horas', min: 60 },
+  { key: 'minutes', label: 'minutos', min: 1 },
+]
+
+/** 360 -> [6, 'hours']: a maior unidade que divide o valor. */
+function splitMinutes(m: number): [number, 'days' | 'hours' | 'minutes'] {
+  const u = UNITS.find((x) => m % x.min === 0) ?? UNITS[2]
+  return [m / u.min, u.key]
+}
+
+export function SearchRetrySection() {
+  const [cfg, setCfg] = useState<SearchRetryConfig | null>(null)
+  const [amount, setAmount] = useState('6')
+  const [unit, setUnit] = useState<'days' | 'hours' | 'minutes'>('hours')
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  useEffect(() => {
+    api<{ config: SearchRetryConfig }>('/api/search-retry')
+      .then((r) => {
+        setCfg(r.config)
+        const [a, u] = splitMinutes(r.config.minutes)
+        setAmount(String(a))
+        setUnit(u)
+      })
+      .catch((e) => setMsg({ ok: false, text: (e as Error).message }))
+  }, [])
+
+  async function save() {
+    if (!cfg) return
+    const n = Number(amount)
+    if (!Number.isInteger(n) || n < 1) {
+      setMsg({ ok: false, text: 'Intervalo: informe um número inteiro maior que zero' })
+      return
+    }
+    setSaving(true)
+    setMsg(null)
+    try {
+      const minutes = n * UNITS.find((u) => u.key === unit)!.min
+      const r = await put<{ ok: boolean; config: SearchRetryConfig }>('/api/search-retry',
+        { config: { ...cfg, minutes } })
+      setCfg(r.config)
+      setMsg({ ok: true, text: 'Salvo. Vale para as próximas tentativas.' })
+    } catch (e) {
+      setMsg({ ok: false, text: (e as Error).message })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <section className="max-w-2xl">
+      <h2 className="mb-1 font-semibold">Busca contínua</h2>
+      <p className="mb-3 text-sm text-zinc-500">
+        Quando a busca não acha nada que sirva (nada encontrado, nada na qualidade mínima, nenhum
+        par do mesmo corte), o job fica <b>Programado</b> e tenta de novo depois deste intervalo,
+        até achar ou ser excluído. Enquanto isso, a lista do que apareceu continua aberta para
+        escolher à mão ou colar um magnet — e a nova busca não apaga o que um tracker fora do ar
+        deixou de devolver. Cada job pode herdar, ligar ou desligar.
+      </p>
+      {!cfg ? (
+        <div className="text-sm text-zinc-500">{msg?.text ?? 'Carregando…'}</div>
+      ) : (
+        <>
+          <label className="flex items-center gap-2 text-sm text-zinc-300">
+            <Toggle checked={cfg.enabled} onChange={(v) => setCfg({ ...cfg, enabled: v })} />
+            Busca contínua ligada por padrão
+          </label>
+          <div className={`mt-3 flex flex-wrap items-center gap-2 text-sm text-zinc-300 ${cfg.enabled ? '' : 'opacity-50'}`}>
+            Tentar busca novamente após
+            <input type="number" min={1} value={amount} disabled={!cfg.enabled}
+              onChange={(e) => setAmount(e.target.value)}
+              className="w-20 rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm tabular-nums outline-none focus:border-blue-500" />
+            <select value={unit} disabled={!cfg.enabled}
+              onChange={(e) => setUnit(e.target.value as typeof unit)}
+              className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm">
+              {UNITS.map((u) => <option key={u.key} value={u.key}>{u.label}</option>)}
+            </select>
+          </div>
+
+          <h2 className="mt-8 mb-1 font-semibold">Episódios futuros</h2>
+          <p className="mb-3 text-sm text-zinc-500">
+            Episódio que ainda não estreou vira um job programado (um por data de estreia) que
+            começa a procurar no dia do lançamento, a partir desta hora. O TMDB só dá o dia —
+            e no fuso de lá; a busca contínua cobre o atraso dos releases. Dá para mudar a hora
+            ao pedir os episódios.
+          </p>
+          <label className="flex items-center gap-2 text-sm text-zinc-300">
+            Buscar a partir das
+            <input type="time" value={cfg.release_time}
+              onChange={(e) => setCfg({ ...cfg, release_time: e.target.value })}
+              className="rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-sm" />
+            do dia da estreia
+          </label>
+
+          <div className="mt-4 flex items-center gap-3">
+            <button onClick={save} disabled={saving}
+              className="rounded-lg bg-blue-600 px-4 py-1.5 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50">
+              {saving ? 'Salvando…' : 'Salvar'}
+            </button>
+            {msg && <span className={`text-sm ${msg.ok ? 'text-emerald-400' : 'text-red-400'}`}>{msg.text}</span>}
+          </div>
+        </>
+      )}
+    </section>
   )
 }
 
