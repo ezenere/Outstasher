@@ -287,7 +287,8 @@ export interface SeriesSummary {
 }
 
 /** Resolve o gate ativo de um job de série. */
-export function resolveGate(jobId: string, reason: GateReason | 'force_continue',
+export function resolveGate(jobId: string,
+                            reason: GateReason | 'force_continue' | 'edit_torrents' | 'remove_torrent',
                             decision: object = {}) {
   return post<Job>(`/api/jobs/${jobId}/resolve`, { reason, decision })
 }

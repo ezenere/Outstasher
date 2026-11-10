@@ -355,9 +355,10 @@ def test_watchdog_de_serie_acha_reserva_depois_do_restart(temp_db, monkeypatch):
     assert asyncio.run(pipeline._switch_stalled(job, t, 30))
     assert t["title"] == "Serie Exemplo S01 720p"     # pulou o avulso parcial
     assert qbit.added[-1][0] == reserva["magnet"]
-    # a lista do "Escolher outro…" também sai dos candidatos persistidos
+    # a lista do "Escolher outro…" também sai dos candidatos persistidos,
+    # com o torrent em uso no topo (a UI o marca)
     alts = pipeline.torrent_alternatives("tv2", 0)
-    assert [a["title"] for a in alts] == ["Serie Exemplo S01 1080p"]
+    assert [a["title"] for a in alts] == ["Serie Exemplo S01 720p", "Serie Exemplo S01 1080p"]
     jobs._jobs.clear()
 
 
