@@ -960,6 +960,65 @@ def has_mkvmerge() -> bool:
     return shutil.which("mkvmerge") is not None
 
 
+# quanto uma faixa de áudio pode estar gravada longe do vídeo do mesmo
+# instante (no arquivo, não no tempo) antes de o arquivo precisar ser
+# reintercalado — o piso de intercalação do próprio ffmpeg
+INTERLEAVE_CHECK_TOL_S = INTERLEAVE_MIN_S
+INTERLEAVE_CHECK_POINTS = (0.1, 0.35, 0.6, 0.85)
+# janela por TEMPO, não por pacotes: TrueHD manda ~1.200 pacotes/s e 4.000
+# pacotes cobriam só 3 s — uma faixa poucos segundos fora caía da janela
+INTERLEAVE_CHECK_WINDOW_S = 20
+
+
+def interleave_lag(path: str) -> float | None:
+    """Quanto a faixa de áudio mais desgarrada está gravada longe do vídeo,
+    em segundos, medido NO ARQUIVO: em alguns pontos, lê pacotes na ordem em
+    que estão gravados e compara o tempo de cada áudio com o do vídeo ali.
+    Faixa que nem aparece no trecho conta como infinita. None = não deu para
+    medir (o chamador não mexe no arquivo).
+
+    O aviso "forcing output" do ffmpeg não basta: num caso real a dublagem
+    saiu inteira gravada nos primeiros minutos do arquivo (8 min adiantada
+    aos 5 min, ausente dali em diante) e o Jellyfin cortava o áudio aos ~6
+    min — com o aviso escondido pelo -loglevel error do comando."""
+    try:
+        pr = ffprobe_json(path)
+        dur = float((pr.get("format") or {}).get("duration") or 0)
+    except (MergeError, ValueError, TypeError):
+        return None
+    streams = pr.get("streams") or []
+    video = next((s["index"] for s in streams if s.get("codec_type") == "video"
+                  and (s.get("disposition") or {}).get("attached_pic") != 1), None)
+    audios = [s["index"] for s in streams if s.get("codec_type") == "audio"]
+    if video is None or not audios or dur <= 0:
+        return None
+    pior = 0.0
+    for frac in INTERLEAVE_CHECK_POINTS:
+        p = subprocess.run(
+            ["ffprobe", "-v", "error", "-read_intervals",
+             f"{dur * frac:.1f}%+{INTERLEAVE_CHECK_WINDOW_S}",
+             "-show_entries", "packet=stream_index,pts_time", "-of", "csv=p=0", path],
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if p.returncode != 0:
+            return None
+        pts: dict[int, list[float]] = defaultdict(list)
+        for line in p.stdout.split():
+            idx, _, t = line.partition(",")
+            try:
+                pts[int(idx)].append(float(t.split(",")[0]))
+            except ValueError:
+                continue
+        if not pts.get(video):
+            continue
+        v = sorted(pts[video])[len(pts[video]) // 2]
+        for a in audios:
+            if not pts.get(a):
+                return float("inf")
+            mediana = sorted(pts[a])[len(pts[a]) // 2]
+            pior = max(pior, abs(mediana - v))
+    return pior
+
+
 def fix_interleaving(output: str, stderr: str, log=lambda _m: None) -> str | None:
     """Conserta a intercalação frouxa do arquivo recém-muxado, se houve.
 
@@ -969,10 +1028,21 @@ def fix_interleaving(output: str, stderr: str, log=lambda _m: None) -> str | Non
     inteiro). O mkvmerge reintercala e reescreve os indices em stream copy;
     so entao o aviso vira desnecessario.
 
+    Além do aviso do ffmpeg, MEDE o arquivo (interleave_lag): o aviso pode
+    não chegar (loglevel) e não é a única forma de sair desgarrado.
+
     Devolve a nota para o usuario (None se o mux ja saiu limpo)."""
     warn = interleave_warning(stderr)
     if not warn:
-        return None
+        lag = interleave_lag(output)
+        if lag is None or lag <= INTERLEAVE_CHECK_TOL_S:
+            return None
+        quanto = "ausente de trechos do arquivo" if lag == float("inf") \
+            else f"gravada {lag:.0f} s longe do vídeo"
+        warn = (f"⚠️ INTERCALAÇÃO FROUXA neste arquivo: uma faixa de áudio "
+                f"saiu {quanto} — players que leem em sequência (Jellyfin) "
+                f"perdem o áudio dela")
+        log(warn)
     if Path(output).suffix.lower() != ".mkv" or not has_mkvmerge():
         return warn
     tmp = Path(output).with_name(Path(output).stem + ".reinterleave.mkv")
@@ -1282,7 +1352,10 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
 
     # ---- comando ffmpeg ----
     # -progress pipe:1: stream chave=valor no stdout para a barra de progresso
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats",
+    # loglevel WARNING (não error): é nesse nível que o ffmpeg diz "forcing
+    # output" — o sinal de intercalação frouxa que fix_interleaving conserta.
+    # Com error ele nunca chegava (caso real: dublagem sumindo aos 6 min)
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostats",
            "-progress", "pipe:1", "-y",
            *(vplan.input_args if vplan else []),
            "-fflags", "+genpts", *in_ref, *in_oth]

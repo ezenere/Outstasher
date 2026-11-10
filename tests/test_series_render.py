@@ -531,10 +531,76 @@ def test_mux_limpo_nao_mexe_no_arquivo(tmp_path, monkeypatch):
     out = tmp_path / "e.mkv"
     out.write_bytes(b"ok")
     monkeypatch.setattr(m, "has_mkvmerge", lambda: True)
+    monkeypatch.setattr(m, "interleave_lag", lambda path: 0.4)   # medido: limpo
     monkeypatch.setattr(m.subprocess, "run",
                         lambda *a, **k: pytest.fail("não devia remuxar"))
     assert m.fix_interleaving(str(out), "tudo certo") is None
     assert out.read_bytes() == b"ok"
+
+
+def test_faixa_desgarrada_sem_aviso_tambem_e_reintercalada(tmp_path, monkeypatch):
+    """Caso real: a dublagem saiu toda gravada no começo do arquivo e o
+    Jellyfin cortava o áudio aos ~6 min — sem "forcing output" nenhum no que
+    o comando mostrava. A medição no arquivo pega o caso."""
+    from services import merger as m
+    out = tmp_path / "e.mkv"
+    out.write_bytes(b"mux frouxo")
+    chamados = []
+
+    def falso_mkvmerge(cmd, **kw):
+        chamados.append(cmd)
+        Path(cmd[cmd.index("-o") + 1]).write_bytes(b"reintercalado")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(m, "has_mkvmerge", lambda: True)
+    monkeypatch.setattr(m, "interleave_lag", lambda path: float("inf"))
+    monkeypatch.setattr(m.subprocess, "run", falso_mkvmerge)
+    logs = []
+    nota = m.fix_interleaving(str(out), "tudo certo", logs.append)
+    assert chamados and chamados[0][0] == "mkvmerge"
+    assert out.read_bytes() == b"reintercalado"
+    assert nota and "mkvmerge" in nota
+    assert any("ausente de trechos" in x for x in logs)
+
+
+def test_sem_medicao_nao_mexe(tmp_path, monkeypatch):
+    from services import merger as m
+    out = tmp_path / "e.mkv"
+    out.write_bytes(b"ok")
+    monkeypatch.setattr(m, "interleave_lag", lambda path: None)
+    monkeypatch.setattr(m.subprocess, "run",
+                        lambda *a, **k: pytest.fail("não devia remuxar"))
+    assert m.fix_interleaving(str(out), "") is None
+
+
+def test_interleave_lag_le_a_ordem_do_arquivo(monkeypatch):
+    """Vídeo (0) aos 300 s; dublagem (1) gravada ali com tempos de 13 min;
+    outro áudio (2) junto do vídeo."""
+    from services import merger as m
+    monkeypatch.setattr(m, "ffprobe_json", lambda p: {
+        "format": {"duration": "1000"},
+        "streams": [{"index": 0, "codec_type": "video"},
+                    {"index": 1, "codec_type": "audio"},
+                    {"index": 2, "codec_type": "audio"},
+                    {"index": 3, "codec_type": "subtitle"}]})
+    def falso(cmd, **kw):
+        linhas = ["0,300.0", "0,301.0", "1,780.0", "1,781.0", "2,300.5", "2,301.5"]
+        return subprocess.CompletedProcess(cmd, 0, "\n".join(linhas), "")
+    monkeypatch.setattr(m.subprocess, "run", falso)
+    assert m.interleave_lag("x.mkv") == pytest.approx(480.0)
+
+    def sumida(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 0, "0,400.0\n2,400.2\n", "")
+    monkeypatch.setattr(m.subprocess, "run", sumida)
+    assert m.interleave_lag("x.mkv") == float("inf")
+
+
+@pytest.mark.ffmpeg
+def test_interleave_lag_de_arquivo_bem_intercalado(tmp_path):
+    from services import merger as m
+    f = _media(tmp_path / "ok.mkv", 30, seed=1)
+    lag = m.interleave_lag(str(f))
+    assert lag is not None and lag < m.INTERLEAVE_CHECK_TOL_S
 
 
 def test_mkvmerge_cmd_marca_dublagem_como_padrao():
