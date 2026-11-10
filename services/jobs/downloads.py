@@ -126,17 +126,25 @@ async def _start_download(job: dict, a: dict | None, v: dict | None):
     url_video = (v.get("magnet") or v["link"]) if v else None
     url_audio = (a.get("magnet") or a["link"]) if a else None
 
+    async def enviar(url: str, tags: str, ok: str, papel: str):
+        # sem ir depois das tentativas: o watchdog não o acha no qBittorrent e
+        # reinsere depois da carência — um link lento não derruba o job
+        erro = await runtime.send_torrent(runtime._qbit, url, tags, save_path)
+        _event(job, "qbit", ok if not erro else
+               f"⚠️ Torrent de {papel} não foi enviado ({erro}) — o "
+               f"acompanhamento tenta de novo em alguns minutos")
+
     if v and a and url_video == url_audio:
         # mesmo torrent serve para os dois (ex.: release dual audio)
-        await runtime._qbit.add(url_video, f"{_tag(job, 'video')},{_tag(job, 'audio')}", save_path)
-        _event(job, "qbit", "Mesmo torrent para vídeo e áudio — adicionado uma vez")
+        await enviar(url_video, f"{_tag(job, 'video')},{_tag(job, 'audio')}",
+                     "Mesmo torrent para vídeo e áudio — adicionado uma vez", "vídeo e áudio")
     else:
         if v:
-            await runtime._qbit.add(url_video, _tag(job, "video"), save_path)
-            _event(job, "qbit", "Torrent de vídeo enviado ao qBittorrent")
+            await enviar(url_video, _tag(job, "video"),
+                         "Torrent de vídeo enviado ao qBittorrent", "vídeo")
         if a:
-            await runtime._qbit.add(url_audio, _tag(job, "audio"), save_path)
-            _event(job, "qbit", "Torrent de áudio enviado ao qBittorrent")
+            await enviar(url_audio, _tag(job, "audio"),
+                         "Torrent de áudio enviado ao qBittorrent", "áudio")
     _set(job, "downloading", "Baixando torrent..." if len(_needed_torrents(job)) == 1
          else "Baixando torrents...")
 
@@ -309,7 +317,13 @@ async def _readd_torrent(job: dict, kind: str):
                f"reinserir — continuando a esperar")
         return
     save_path = job.get("torrent_save_path") or config.QBIT_SAVE_PATH or None
-    await runtime._qbit.add(cand.get("magnet") or cand["link"], _tag(job, kind), save_path)
+    erro = await runtime.send_torrent(runtime._qbit, cand.get("magnet") or cand["link"],
+                                      _tag(job, kind), save_path)
+    if erro:
+        # link da busca lento (Jackett/tracker): tenta de novo na próxima carência
+        _event(job, "qbit", f"⚠️ Torrent de {kind} ainda não foi para o "
+                            f"qBittorrent ({erro}) — tento de novo depois: {cand['title']}")
+        return
     _event(job, "qbit",
            f"🔁 Torrent de {kind} não está mais no qBittorrent — reinserido: {cand['title']}")
 

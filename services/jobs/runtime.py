@@ -69,6 +69,29 @@ _ffmpeg_procs: dict[str, "subprocess.Popen"] = {}
 _cancelling: set[str] = set()
 _qbit = QbitClient()
 
+# envio de torrent ao qBittorrent: tentativas antes de desistir DESTE envio.
+# Link da busca é resolvido no Jackett (/dl/...), que vai ao tracker — e um
+# tracker lento estourava o timeout de 60 s e derrubava o job INTEIRO no meio
+# do envio de 42 torrents (caso real). Esgotadas as tentativas, o torrent
+# fica como "baixando" sem estar no qBittorrent: o watchdog vê que ele não
+# aparece e o reinsere depois da carência, como faz com torrent que sumiu.
+SEND_RETRY_DELAYS_S = (5.0, 20.0)
+
+
+async def send_torrent(qbit, url: str, tags: str, save_path: str | None) -> str | None:
+    """Envia um torrent com algumas tentativas. Devolve None se foi, ou o
+    motivo da última falha (o chamador segue; o watchdog tenta de novo)."""
+    erro = None
+    for espera in (*SEND_RETRY_DELAYS_S, None):
+        try:
+            await qbit.add(url, tags, save_path)
+            return None
+        except (asyncio.TimeoutError, *_CONN_ERRORS) as e:
+            erro = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+        if espera is not None:
+            await asyncio.sleep(espera)
+    return erro
+
 # quando a UI pediu progresso pela última vez (time.monotonic()); None = nunca.
 # O watchdog só corre rápido enquanto a UI acompanha; sem ninguém lendo, o poll
 # rápido é só carga no qBittorrent. None (e não 0.0) porque monotonic() pode
