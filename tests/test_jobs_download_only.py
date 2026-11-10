@@ -90,7 +90,7 @@ def test_retry_preserves_download_only(temp_db, monkeypatch):
 
     async def fake_create(tmdb_id, language, mode="auto", destination_id=None,
                           torrent_target_id=None, kind="both", download_only=False,
-                          convert=None):
+                          convert=None, **_):
         captured.update(kind=kind, download_only=download_only)
         return {"id": "novo"}
     monkeypatch.setattr(jobs.movies, "create", fake_create)

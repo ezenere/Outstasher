@@ -26,6 +26,7 @@ from pathlib import Path
 import config
 from services import candidates, jackett, jobs, stall_switch, store, tmdb, transcode
 from services import selector
+from services.jobs import schedule
 from services.series import parse, selector_tv, subs
 
 ROLES = ("original", "dubbed")
@@ -97,7 +98,13 @@ async def create_series(tmdb_id: int, language: str,
                         convert: dict | None = None,
                         skip_search: bool = False,
                         advanced_merge: dict | None = None,
-                        kind: str = "both") -> dict:
+                        kind: str = "both",
+                        scheduled_at: str | None = None,
+                        retry_mode: str | None = None,
+                        min_quality: dict | None = None,
+                        schedule_future: bool = False,
+                        wait_release: bool = False,
+                        release_time: str | None = None) -> dict:
     """Cria um job de série cobrindo temporadas inteiras e/ou episódios
     avulsos ({"3": [1, 5]}). `kind` como nos filmes: "both" baixa os dois
     lados de cada episódio e faz o merge; "original"/"dubbed" baixa um lado
@@ -121,6 +128,16 @@ async def create_series(tmdb_id: int, language: str,
         raise ValueError(f"Modo inválido: {mode!r}")
     if convert is not None:
         convert = transcode.validate(convert).to_dict()
+    from services import search_retry
+    from services.jobs.movies import _schedule_options
+    schedule_opts = _schedule_options(mode, scheduled_at, retry_mode, min_quality)
+    if schedule_future:
+        # episódio futuro vira job programado para o dia do lançamento
+        schedule_opts["schedule_future"] = True
+    if wait_release:
+        schedule_opts["wait_release"] = True
+    if release_time:
+        schedule_opts["release_time"] = search_retry.validate_release_time(release_time)
 
     dest = store.get_destination(destination_id) if destination_id else None
     if dest is not None and dest.get("media", "movie") != "tv":
@@ -168,6 +185,7 @@ async def create_series(tmdb_id: int, language: str,
         "torrent_save_path": (target["save_path"] if target else "") or "",
         "torrent_local_path": (target["local_path"] if target else "") or "",
         "created_at": datetime.now().isoformat(timespec="seconds"),
+        **schedule_opts,
     }
     jobs._jobs[job["id"]] = job
     scope = []
@@ -188,8 +206,22 @@ async def create_series(tmdb_id: int, language: str,
 # -------------------- pipeline --------------------
 
 async def _run(job: dict):
+    from services import search_retry
     try:
-        await _prepare(job)
+        # "Buscar agora" ou a data marcada pelo usuário chegou: procura também
+        # o episódio que o TMDB ainda dá como não lançado (uma vez — sem
+        # resultado, o job volta a esperar o lançamento)
+        forced = bool(job.pop("search_now", False))
+        at = job.get("scheduled_at")
+        if (at and not job.get("searched_at")
+                and search_retry.parse_when(at) <= search_retry.now()):
+            forced = True
+        await _prepare(job, include_future=forced)
+        if job.get("schedule_future"):
+            await _split_future(job)
+        if not forced and _hold(job):
+            return
+        job["searched_at"] = search_retry.fmt(search_retry.now())
         if not job.get("skip_search"):
             await _search_series(job)
         await _plan_and_gate(job)
@@ -199,8 +231,161 @@ async def _run(job: dict):
         jobs._fail(job, f"{type(e).__name__}: {e}")
 
 
-async def _prepare(job: dict):
-    """Metadados TMDB + mapa de episódios pedidos (com skipped_future)."""
+def _release_wait(job: dict):
+    """(quando, texto) para um job cujos episódios ainda não estrearam:
+    a hora do lançamento do último deles, ou None se o TMDB não tem a data
+    de algum (aí o job confere de novo depois do intervalo da busca
+    contínua — a data costuma aparecer perto da estreia)."""
+    from services import search_retry
+    futuros = [(k, ep) for k, ep in sorted(job["episodes"].items())
+               if ep["state"] == "skipped_future"]
+    nomes = ", ".join(k for k, _ in futuros[:4]) + ("…" if len(futuros) > 4 else "")
+    datas = [ep.get("air_date") for _, ep in futuros]
+    if not datas or any(not d for d in datas):
+        when = search_retry.next_retry()
+        return when, (f"Aguardando o lançamento de {nomes} — sem data no TMDB; "
+                      f"confere de novo {search_retry.human(search_retry.fmt(when))}")
+    when = search_retry.release_at(max(datas), job.get("release_time"))
+    return when, (f"Aguardando o lançamento de {nomes} — busca a partir de "
+                  f"{search_retry.human(search_retry.fmt(when))}")
+
+
+def _hold(job: dict) -> bool:
+    """Ainda não é hora de buscar? Programa o job e devolve True.
+
+    - data/hora marcada pelo usuário e nenhuma busca ainda;
+    - todos os episódios do job ainda sem estreia (episódio futuro), ou a
+      estreia é hoje mas antes da hora do lançamento escolhida."""
+    from services import search_retry
+    now = search_retry.now()
+    at = job.get("scheduled_at")
+    if at and not job.get("searched_at"):
+        when = search_retry.parse_when(at)
+        if when > now:
+            schedule.wait_until(job, when, f"Programado para {search_retry.human(at)}")
+            return True
+    ativos = _active_refs(job)
+    if not ativos and any(ep["state"] == "skipped_future"
+                          for ep in job["episodes"].values()):
+        when, detail = _release_wait(job)
+        schedule.wait_until(job, when, detail)
+        return True
+    if job.get("wait_release") and not job.get("searched_at"):
+        datas = [job["episodes"][ep_key(s, e)].get("air_date") for s, e in ativos]
+        if datas and all(datas):
+            when = search_retry.release_at(max(datas), job.get("release_time"))
+            if when and when > now:
+                schedule.wait_until(
+                    job, when, f"Estreia hoje — busca a partir de "
+                               f"{search_retry.human(search_retry.fmt(when))}")
+                return True
+    return False
+
+
+async def _split_future(job: dict):
+    """Episódios futuros do pedido viram jobs programados — um por data de
+    estreia, que começam a procurar no dia do lançamento. O fluxo de série é
+    em lote (busca, plano, download, merge de tudo junto): um job esperando o
+    episódio 8 seguraria o 1 já pronto.
+
+    Este job fica com os já lançados; sem nenhum, fica com a PRIMEIRA data
+    (e passa a esperar por ela). O pedido de cada um é estreitado para os
+    episódios dele — sem isso, reler o TMDB na hora da busca traria de volta
+    a temporada inteira."""
+    job.pop("schedule_future", None)
+    hoje = date.today().isoformat()
+    ativos = [job["episodes"][ep_key(s, e)] for s, e in _active_refs(job)]
+    if ativos and all(ep.get("air_date") == hoje for ep in ativos):
+        # estreia hoje: espera a hora do lançamento como os futuros
+        job["wait_release"] = True
+    futuros = {k: ep for k, ep in job["episodes"].items()
+               if ep["state"] == "skipped_future"}
+    if not futuros:
+        return
+    grupos: dict[str | None, list[str]] = {}
+    for k in sorted(futuros):
+        grupos.setdefault(futuros[k].get("air_date"), []).append(k)
+    # sem data no TMDB por último (date ISO ordena como string)
+    ordem = sorted(grupos, key=lambda d: (d is None, d or ""))
+    if not _active_refs(job):
+        proprio = ordem.pop(0)
+        job["wait_release"] = True
+    else:
+        proprio = None
+    criados = []
+    for d in ordem:
+        keys = grupos[d]
+        eps: dict[int, list[int]] = {}
+        for k in keys:
+            ss, ee = parse_ep_key(k)
+            eps.setdefault(ss, []).append(ee)
+            job["episodes"].pop(k, None)
+        novo = await create_series(
+            job["tmdb_id"], job["language"], episodes=eps, mode=job["mode"],
+            destination_id=job.get("destination_id"),
+            torrent_target_id=job.get("torrent_target_id"),
+            convert=job.get("convert"),
+            advanced_merge=job.get("advanced_merge"),
+            kind=job.get("kind") or "both",
+            retry_mode=job.get("retry_mode"),
+            min_quality=job.get("min_quality"),
+            wait_release=True, release_time=job.get("release_time"))
+        criados.append(f"{', '.join(keys)} ({_fmt_date(d)}) → job {novo['id']}")
+    # o pedido deste job: só os episódios que ficaram nele
+    restantes: dict[int, list[int]] = {}
+    for k, ep in job["episodes"].items():
+        restantes.setdefault(ep["season"], []).append(ep["episode"])
+    job["request"] = {"seasons": [], "episodes": {s: sorted(v) for s, v in
+                                                  sorted(restantes.items())}}
+    if criados:
+        jobs._event(job, "info", "Episódios futuros programados em jobs próprios: "
+                                 + "; ".join(criados))
+    if proprio is not None or criados:
+        jobs._event(job, "info",
+                    f"Este job fica com {len(job['episodes'])} episódio(s)"
+                    + (f" — estreia {_fmt_date(proprio)}" if proprio is not None else ""))
+    jobs._persist(job)
+
+
+def _fmt_date(d: str | None) -> str:
+    if not d:
+        return "sem data"
+    try:
+        return date.fromisoformat(d).strftime("%d/%m/%Y")
+    except ValueError:
+        return d
+
+
+def start_search(job: dict):
+    """Hora da busca de um programado (services/jobs/schedule): a primeira
+    (reler o TMDB e procurar) ou mais uma tentativa da busca contínua — que
+    refaz a busca do zero como o "buscar de novo", mas incremental (o pool
+    anterior que a busca nova não desmente continua)."""
+    if any(_sent(t) for t in job["torrents"]):
+        # não acontece (programado não tem torrent enviado); por garantia
+        jobs._set(job, "awaiting", job.get("detail") or "")
+        return
+    _reset_plan(job)
+    jobs._set(job, "searching", "Buscando no Jackett...")
+    jobs._spawn(job["id"], _run(job))
+
+
+def _reset_plan(job: dict):
+    job["awaiting"] = None
+    job["torrents"] = []
+    _pools.pop(job["id"], None)
+    # decisões tomadas sobre o plano antigo não valem para o novo
+    for flag in ("_phase2_done", "_gaps_accepted", "_signals_accepted",
+                 "_manual_done"):
+        job.pop(flag, None)
+
+
+async def _prepare(job: dict, include_future: bool = False):
+    """Metadados TMDB + mapa de episódios pedidos (com skipped_future).
+
+    include_future: procura também o que ainda não estreou (busca forçada).
+    Job que espera lançamento não falha por só ter episódio futuro — é o que
+    ele espera (_hold)."""
     lang = job["language"]
     info = await tmdb.tv_details(job["tmdb_id"], lang)
     job["movie"] = {k: info[k] for k in
@@ -232,7 +417,7 @@ async def _prepare(job: dict):
             if only is not None and e not in only:
                 continue
             key = ep_key(season, e)
-            future = _is_future(ep["air_date"])
+            future = _is_future(ep["air_date"]) and not include_future
             n_future += 1 if future else 0
             job["episodes"][key] = {
                 "season": season, "episode": e,
@@ -243,9 +428,11 @@ async def _prepare(job: dict):
             }
     if not job["episodes"]:
         raise ValueError("Nenhum episódio encontrado para a seleção pedida")
-    if all(v["state"] == "skipped_future" for v in job["episodes"].values()):
+    espera = job.get("wait_release") or job.get("schedule_future")
+    if (all(v["state"] == "skipped_future" for v in job["episodes"].values())
+            and not espera):
         raise ValueError("Todos os episódios pedidos ainda não foram lançados")
-    if n_future:
+    if n_future and not espera:
         jobs._event(job, "info",
                     f"{n_future} episódio(s) ainda sem data de lançamento "
                     f"passada — ficam de fora desta execução (skipped_future)")
@@ -302,6 +489,10 @@ async def _search_series(job: dict):
     original, localized = m["original_title"], m["localized_title"]
     english = m.get("english_title")
     has_localized = bool(localized and localized.lower() != (original or "").lower())
+    # busca repetida (nova tentativa / buscar de novo) é incremental: o que a
+    # anterior achou e esta não desmentir volta ao pool (carry_over)
+    previous = {r: [dict(c) for c in candidates.of_role(job, r) if c["rank"] is not None]
+                for r in ROLES}
 
     titles_original = [t for t in (original, english) if t]
     loc_spellings = ([localized] + selector.title_variants(localized, include_and=False)
@@ -352,10 +543,19 @@ async def _search_series(job: dict):
             return []
 
     all_res = await asyncio.gather(*(run(q) for q in q_original + q_dubbed))
+    raw = [r for res in all_res for r in res]
+    carried = {}
+    for role in ROLES:
+        carried[role] = [_raw_from_candidate(c)
+                         for c in jobs.search.carry_over(previous[role], raw)]
+        if carried[role]:
+            jobs._event(job, "search",
+                        f"{len(carried[role])} torrent(s) ({ROLE_LABEL[role]}) da busca "
+                        f"anterior mantido(s) — o tracker deles não respondeu agora")
     pool_original = jobs._dedup_results(
-        [r for res in all_res[:len(q_original)] for r in res])
+        [r for res in all_res[:len(q_original)] for r in res] + carried["original"])
     pool_dubbed = jobs._dedup_results(
-        [r for res in all_res[len(q_original):] for r in res])
+        [r for res in all_res[len(q_original):] for r in res] + carried["dubbed"])
     _pools[job["id"]] = {"original": pool_original, "dubbed": pool_dubbed}
     partes = []
     if "original" in roles:
@@ -363,6 +563,43 @@ async def _search_series(job: dict):
     if "dubbed" in roles:
         partes.append(f"{len(pool_dubbed)} ({label})")
     jobs._event(job, "search", "Pool: " + ", ".join(partes))
+
+
+def _raw_from_candidate(c: dict) -> dict:
+    """Candidato gravado -> resultado do Jackett (o que o pool e o ranking
+    esperam), para a busca incremental."""
+    return {"title": c["title"], "seeders": c["seeders"] or 0,
+            "size": c["size"] or 0, "magnet": c["magnet"], "link": c["link"],
+            "tracker": c["tracker"], "tracker_id": None, "publish_date": None,
+            "files": c["files"], "infohash": c["infohash"]}
+
+
+def _min_quality_filter(job: dict, ranked_all: dict) -> tuple[dict, list[str]]:
+    """Ranking só com o que atinge a qualidade mínima de cada papel (escolha
+    automática; a escolha à mão vê tudo). Devolve (ranking filtrado, papéis
+    em que havia candidato e NENHUM atingiu)."""
+    if job.get("mode") == "manual":
+        return ranked_all, []
+    pisos = job.get("min_quality") or {}
+    out, abaixo = {}, []
+    for role, per_ep in ranked_all.items():
+        piso = pisos.get(ROLE_MODE[role])
+        if not piso:
+            out[role] = per_ep
+            continue
+        out[role] = {ref: [c for c in cands if selector.meets_minimum(c["title"], piso)]
+                     for ref, cands in per_ep.items()}
+        tinha = any(per_ep.values())
+        sobrou = any(out[role].values())
+        if tinha:
+            n = len({c["title"] for cs in per_ep.values() for c in cs})
+            ok = len({c["title"] for cs in out[role].values() for c in cs})
+            jobs._event(job, "info",
+                        f"Qualidade mínima do {ROLE_LABEL[role]} "
+                        f"({selector.describe_minimum(piso)}): {ok} de {n} torrent(s) atingem")
+        if tinha and not sobrou:
+            abaixo.append(role)
+    return out, abaixo
 
 
 def _rank_all(job: dict) -> dict[str, dict[tuple[int, int], list[dict]]]:
@@ -440,9 +677,10 @@ async def _plan_and_gate(job: dict):
             await _phase2_search(job, missing)
             ranked_all = _rank_all(job)
 
+        ranked_plan, abaixo = _min_quality_filter(job, ranked_all)
         plans = {role: selector_tv.build_plan(
             [_search_ref(job, ep_key(s, e)) for s, e in _active_refs(job)],
-            {(_search_ref(job, ep_key(s, e))): ranked_all[role][(s, e)]
+            {(_search_ref(job, ep_key(s, e))): ranked_plan[role][(s, e)]
              for s, e in _active_refs(job)},
             known_seasons=set(job.get("known_seasons") or []))
             for role in roles_of(job)}
@@ -456,12 +694,20 @@ async def _plan_and_gate(job: dict):
             # não teria o que baixar — antes o job acabava em "Plano vazio".
             # Abre a escolha manual (que aceita magnet/link próprio por papel
             # e buscar de novo) SEM trocar o modo do job: um job auto que
-            # depois acha tudo na nova busca segue sozinho, como os filmes
-            detail = (f"Nenhum torrent encontrado para "
-                      f"{_roles_phrase(vazios)} — cole um magnet/link ou "
-                      f"tente buscar de novo")
-            jobs._event(job, "search", f"⚠️ {detail}")
-            _gate(job, "manual_pick", None, detail)
+            # depois acha tudo na nova busca segue sozinho, como os filmes.
+            # Com a busca contínua, a escolha fica aberta E a próxima busca
+            # é agendada
+            nada = [r for r in vazios if r not in abaixo]
+            partes = []
+            if nada:
+                partes.append(f"Nenhum torrent encontrado para {_roles_phrase(nada)}")
+            if len(nada) < len(vazios):
+                partes.append(f"Nenhum torrent na qualidade mínima para "
+                              f"{_roles_phrase([r for r in vazios if r in abaixo])}")
+            reason = "; ".join(partes)
+            jobs._event(job, "search", f"⚠️ {reason}")
+            job["awaiting"] = {"reason": "manual_pick", "payload": None}
+            schedule.miss(job, reason, "cole um magnet/link ou tente buscar de novo")
             return
 
     if job["mode"] == "manual" and not job.get("_manual_done"):
@@ -856,6 +1102,9 @@ async def resolve(job_id: str, reason: str, decision: dict) -> dict | None:
         return jobs._public(job)
 
     gate = job.get("awaiting")
+    if job["status"] == schedule.SCHEDULED and gate and gate["reason"] == reason:
+        # programado depois de uma busca sem resultado: a escolha segue aberta
+        schedule.leave(job)
     if job["status"] != "awaiting" or not gate or gate["reason"] != reason:
         raise ValueError(
             f"O job não está aguardando '{reason}'"
@@ -1936,7 +2185,7 @@ async def research(job_id: str) -> dict:
     if not job or job.get("media_type") != "tv":
         raise ValueError("Job de série não encontrado")
     gate = job.get("awaiting")
-    if (job["status"] != "awaiting" or not gate
+    if (job["status"] not in ("awaiting", schedule.SCHEDULED) or not gate
             or gate["reason"] not in ("manual_pick", "gaps_confirm")):
         raise ValueError("Só dá para buscar de novo na escolha dos torrents "
                          "ou no aviso de lacunas")
@@ -1946,13 +2195,7 @@ async def research(job_id: str) -> dict:
     if not _can_research(job):
         raise ValueError("Já há torrent deste job no qBittorrent — use "
                          "\"Editar seleção\" para trocar o plano")
-    job["awaiting"] = None
-    job["torrents"] = []
-    _pools.pop(job_id, None)
-    # decisões tomadas sobre o plano antigo não valem para o novo
-    for flag in ("_phase2_done", "_gaps_accepted", "_signals_accepted",
-                 "_manual_done"):
-        job.pop(flag, None)
+    _reset_plan(job)
     jobs._event(job, "chosen", "Usuário pediu uma nova busca de torrents")
     jobs._set(job, "searching", "Buscando de novo no Jackett...")
     jobs._spawn(job_id, _continue_after_gate(job))
@@ -2060,8 +2303,16 @@ def resume(job: dict):
         jobs._spawn(job["id"], recompress._run(job))
         return
     if status == "searching":
-        jobs._set(job, "error",
-                  "Servidor reiniciado durante a busca — use ↻ para repetir")
+        from services import search_retry
+        if (search_retry.enabled_for(job) and not job.get("skip_search")
+                and not any(_sent(t) for t in job["torrents"])):
+            # nada foi para o qBittorrent: a busca recomeça sozinha
+            _reset_plan(job)
+            schedule.wait_until(job, search_retry.now(),
+                                "Servidor reiniciado durante a busca — buscando de novo")
+        else:
+            jobs._set(job, "error",
+                      "Servidor reiniciado durante a busca — use ↻ para repetir")
     elif status == "downloading":
         jobs._spawn(job["id"], _resume_download(job))
     elif status == "merging":
@@ -2110,7 +2361,10 @@ async def retry(old: dict) -> dict:
         convert=old.get("convert"),
         advanced_merge=old.get("advanced_merge"),
         # job anterior à opção carrega kind "series": os dois lados
-        kind=old.get("kind") if old.get("kind") in jobs.KINDS else "both")
+        kind=old.get("kind") if old.get("kind") in jobs.KINDS else "both",
+        retry_mode=old.get("retry_mode"), min_quality=old.get("min_quality"),
+        wait_release=bool(old.get("wait_release")),
+        release_time=old.get("release_time"))
 
 
 def forget(job_id: str):

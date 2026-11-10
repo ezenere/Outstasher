@@ -35,7 +35,10 @@ MAX_SELECTABLE = 60  # candidatos guardados por papel para selecao manual/fallba
 # banco; não ocupam memória. ACTIVE: em andamento — precisam de polling de
 # progresso e ações rápidas, então vivem em _jobs (espelhados no banco).
 _TERMINAL_STATUSES = ("done", "error", "cancelled")
-_ACTIVE_STATUSES = ("searching", "awaiting", "downloading", "merging")
+# scheduled: programado — sem nada rodando, esperando a hora da busca
+# (services/jobs/schedule). Vive em memória como os outros ativos: o laço do
+# relógio olha _jobs
+_ACTIVE_STATUSES = ("scheduled", "searching", "awaiting", "downloading", "merging")
 # _jobs guarda APENAS os jobs ativos. Terminais são lidos do banco sob demanda.
 _jobs: dict[str, dict] = {}
 
@@ -455,6 +458,12 @@ def _event(job: dict, kind: str, message: str, data=None):
 def _set(job: dict, status: str, detail: str = ""):
     job["status"] = status
     job["detail"] = detail
+    # a hora marcada só existe no programado; o motivo da busca sem resultado
+    # só vale enquanto o job espera (programado ou na escolha)
+    if status != "scheduled":
+        job.pop("next_search_at", None)
+    if status not in ("scheduled", "awaiting"):
+        job.pop("search_miss", None)
     _add_event(job, "status", detail or status)
     # transição de status é durável na hora (não espera a janela do _event)
     _persist(job)

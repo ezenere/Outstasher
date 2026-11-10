@@ -140,6 +140,71 @@ def quality_tier(title: str) -> tuple[int, str]:
     return UNKNOWN_TIER, "Desconhecida" + ai_tag
 
 
+# -------------------- qualidade mínima (busca automática) --------------------
+# O usuário escolhe um piso de resolução e um de fonte para cada lado: o
+# original (de onde sai o vídeo) e o dublado (de onde sai o áudio — o nome do
+# release raramente diz o áudio, mas a qualidade do VÍDEO dele diz muito: um
+# 1080p WEB-DL carrega o áudio do stream, um 480p rip não). Só a escolha
+# automática obedece; a lista de escolha mostra tudo o que a busca achou.
+MIN_RESOLUTIONS = ("480p", "720p", "1080p", "2160p")
+# fontes do piso, da pior para a melhor; HDTV conta como um WEB genérico e
+# DVD/CAM/sem fonte reprovam qualquer piso de fonte
+MIN_SOURCES = ("webrip", "webdl", "bluray", "remux")
+_MIN_SOURCE_RANK = {"bdrip": 0, "web": 0, "hdtv": 0, "webrip": 1, "webdl": 2,
+                    "bluray": 3, "remux": 4}
+
+
+def validate_min_quality(v) -> dict | None:
+    """{"res": "1080p"|None, "source": "webdl"|None} -> o mesmo limpo, ou
+    None quando nada foi pedido."""
+    if v is None:
+        return None
+    if not isinstance(v, dict):
+        raise ValueError("qualidade mínima: objeto esperado")
+    res, src = v.get("res") or None, v.get("source") or None
+    if res is not None and res not in MIN_RESOLUTIONS:
+        raise ValueError(f"resolução mínima inválida: {res!r}")
+    if src is not None and src not in MIN_SOURCES:
+        raise ValueError(f"fonte mínima inválida: {src!r}")
+    if res is None and src is None:
+        return None
+    return {"res": res, "source": src}
+
+
+def meets_minimum(title: str, minimum: dict | None) -> bool:
+    """O release atinge o piso? Resolução desconhecida (ou de upscale de IA,
+    que conta como 720p) não passa num piso de resolução; fonte desconhecida
+    não passa num piso de fonte."""
+    if not minimum:
+        return True
+    if minimum.get("res"):
+        res = resolution_of(title)
+        rank_ = _RES_RANK[res]
+        if is_ai_upscale(title) and rank_ > _AI_UPSCALE_RES_RANK:
+            rank_ = _AI_UPSCALE_RES_RANK
+        if res is None or rank_ < _RES_RANK[minimum["res"]]:
+            return False
+    if minimum.get("source"):
+        got = _MIN_SOURCE_RANK.get(source_of(title))
+        if got is None or got < _MIN_SOURCE_RANK[minimum["source"]]:
+            return False
+    return True
+
+
+def describe_minimum(minimum: dict | None) -> str:
+    """"1080p+ WEB-DL+" — para os eventos do job."""
+    if not minimum:
+        return "qualquer"
+    src = {"webrip": "WEBRip", "webdl": "WEB-DL", "bluray": "BluRay",
+           "remux": "Remux"}
+    parts = []
+    if minimum.get("res"):
+        parts.append(("4K" if minimum["res"] == "2160p" else minimum["res"]) + "+")
+    if minimum.get("source"):
+        parts.append(src[minimum["source"]] + "+")
+    return " ".join(parts)
+
+
 AUDIO_SCORES = {
     "truehd": 30, "true-hd": 30, "atmos": 30,
     "dts-hd": 28, "dtshd": 28, "dts-x": 28,

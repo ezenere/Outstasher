@@ -82,9 +82,9 @@ def _slim_progress(p) -> dict | None:
 # cancelled não vira estado (some da UI). done/error contam como histórico.
 _STATE_OF = {"merging": "converting", "downloading": "downloading",
              "searching": "searching", "awaiting": "awaiting",
-             "done": "done", "error": "error"}
+             "scheduled": "scheduled", "done": "done", "error": "error"}
 _STATE_RANK = {"converting": 0, "downloading": 1, "searching": 2,
-               "awaiting": 3, "done": 4, "error": 5}
+               "awaiting": 3, "scheduled": 4, "done": 5, "error": 6}
 
 
 def _media_type(job: dict) -> str:
@@ -210,6 +210,8 @@ def summary() -> list[dict]:
 # grupos de status expostos no filtro da tela de Downloads
 _GROUPS = {
     "active": ("searching", "awaiting", "downloading", "merging"),
+    # programados ficam fora de "Em andamento": não estão fazendo nada agora
+    "scheduled": ("scheduled",),
     "error": ("error", "cancelled"),
     "done": ("done",),
 }
@@ -224,7 +226,8 @@ def counts(media: str | None = None) -> dict[str, int]:
     `media` ("movie"/"tv") restringe à dimensão de mídia.
     """
     by_status = store.count_jobs_by_status(media)
-    c = {"all": sum(by_status.values()), "active": 0, "error": 0, "done": 0}
+    c = {"all": sum(by_status.values()), "active": 0, "scheduled": 0,
+         "error": 0, "done": 0}
     for group, statuses in _GROUPS.items():
         c[group] = sum(by_status.get(s, 0) for s in statuses)
     return c
@@ -256,6 +259,9 @@ def _slim_job(job: dict) -> dict:
         "video_torrent": candidates.torrent_view(candidates.active(job, "video")),
         "audio_torrent": candidates.torrent_view(candidates.active(job, "audio")),
         "output": job.get("output"),
+        # programação (busca na hora marcada / busca contínua)
+        "next_search_at": job.get("next_search_at"),
+        "searched_at": job.get("searched_at"),
         "progress": {
             "video": _slim_progress(job["progress"].get("video")),
             "audio": _slim_progress(job["progress"].get("audio")),
@@ -299,8 +305,9 @@ def list_group(group: str = "active", page: int = 1,
     lista — 'active' é curto por natureza, então o custo é irrelevante.
     `media` ("movie"/"tv") filtra pela dimensão de mídia, combinável com o grupo.
     """
-    if group == "active":
-        jobs_ = [j for j in _jobs.values() if j["status"] in _GROUPS["active"]
+    if group in ("active", "scheduled"):
+        # os dois vivem em memória (ativos): progresso/hora marcada ao vivo
+        jobs_ = [j for j in _jobs.values() if j["status"] in _GROUPS[group]
                  and (media is None or _media_type(j) == media)]
     elif group == "all":
         if per_page is not None:
@@ -321,7 +328,11 @@ def list_group(group: str = "active", page: int = 1,
                                              sections=store.LIST_SECTIONS)
         return _page(rows, page, per_page, total)
 
-    jobs_.sort(key=lambda j: j["created_at"], reverse=True)
+    if group == "scheduled":
+        # o próximo a buscar primeiro
+        jobs_.sort(key=lambda j: j.get("next_search_at") or "")
+    else:
+        jobs_.sort(key=lambda j: j["created_at"], reverse=True)
     return _page(jobs_, page, per_page, len(jobs_), slice_it=True)
 
 
