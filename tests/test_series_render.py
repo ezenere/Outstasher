@@ -507,7 +507,7 @@ def test_intercalacao_frouxa_e_consertada_pelo_mkvmerge(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "has_mkvmerge", lambda: True)
     monkeypatch.setattr(m.subprocess, "run", falso_mkvmerge)
     nota = m.fix_interleaving(str(out), err)
-    assert chamados and chamados[0][0] == "mkvmerge"
+    assert chamados and chamados[-1][0] == "mkvmerge"   # (antes, a medição)
     assert out.read_bytes() == b"reintercalado", "o conserto entra no lugar"
     assert nota and "mkvmerge" in nota
     assert not list(tmp_path.glob("*.reinterleave.mkv")), "sem sobra no destino"
@@ -531,7 +531,7 @@ def test_mux_limpo_nao_mexe_no_arquivo(tmp_path, monkeypatch):
     out = tmp_path / "e.mkv"
     out.write_bytes(b"ok")
     monkeypatch.setattr(m, "has_mkvmerge", lambda: True)
-    monkeypatch.setattr(m, "interleave_lag", lambda path: 0.4)   # medido: limpo
+    monkeypatch.setattr(m, "interleave_lags", lambda path: {0: 0.4})   # medido: limpo
     monkeypatch.setattr(m.subprocess, "run",
                         lambda *a, **k: pytest.fail("não devia remuxar"))
     assert m.fix_interleaving(str(out), "tudo certo") is None
@@ -541,25 +541,37 @@ def test_mux_limpo_nao_mexe_no_arquivo(tmp_path, monkeypatch):
 def test_faixa_desgarrada_sem_aviso_tambem_e_reintercalada(tmp_path, monkeypatch):
     """Caso real: a dublagem saiu toda gravada no começo do arquivo e o
     Jellyfin cortava o áudio aos ~6 min — sem "forcing output" nenhum no que
-    o comando mostrava. A medição no arquivo pega o caso."""
+    o comando mostrava. A medição pega o caso, e a faixa desgarrada vem de
+    uma ENTRADA PRÓPRIA do mkvmerge: com um leitor só, ele segue a ordem
+    gravada e a faixa adiantada continuava adiantada."""
+    import json as _json
     from services import merger as m
     out = tmp_path / "e.mkv"
     out.write_bytes(b"mux frouxo")
     chamados = []
+    faixas = {"tracks": [{"id": 0, "type": "video"}, {"id": 1, "type": "audio"},
+                         {"id": 2, "type": "audio"}, {"id": 3, "type": "subtitles"}]}
 
     def falso_mkvmerge(cmd, **kw):
         chamados.append(cmd)
+        if "-J" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, _json.dumps(faixas), "")
         Path(cmd[cmd.index("-o") + 1]).write_bytes(b"reintercalado")
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(m, "has_mkvmerge", lambda: True)
-    monkeypatch.setattr(m, "interleave_lag", lambda path: float("inf"))
+    monkeypatch.setattr(m, "interleave_lags", lambda path: {0: float("inf"), 1: 0.2})
     monkeypatch.setattr(m.subprocess, "run", falso_mkvmerge)
     logs = []
     nota = m.fix_interleaving(str(out), "tudo certo", logs.append)
-    assert chamados and chamados[0][0] == "mkvmerge"
+    mux = chamados[-1]
+    assert mux[0] == "mkvmerge" and "-J" not in mux
+    # 1ª entrada: tudo menos a dublagem; 2ª: só ela; ordem original mantida
+    assert mux[mux.index("-a") + 1] == "2"
+    assert mux.count(str(out)) == 2
+    assert mux[-2:] == ["--track-order", "0:0,1:1,0:2,0:3"]
     assert out.read_bytes() == b"reintercalado"
-    assert nota and "mkvmerge" in nota
+    assert nota and "à parte" in nota
     assert any("ausente de trechos" in x for x in logs)
 
 
@@ -567,7 +579,7 @@ def test_sem_medicao_nao_mexe(tmp_path, monkeypatch):
     from services import merger as m
     out = tmp_path / "e.mkv"
     out.write_bytes(b"ok")
-    monkeypatch.setattr(m, "interleave_lag", lambda path: None)
+    monkeypatch.setattr(m, "interleave_lags", lambda path: None)
     monkeypatch.setattr(m.subprocess, "run",
                         lambda *a, **k: pytest.fail("não devia remuxar"))
     assert m.fix_interleaving(str(out), "") is None
@@ -587,6 +599,7 @@ def test_interleave_lag_le_a_ordem_do_arquivo(monkeypatch):
         linhas = ["0,300.0", "0,301.0", "1,780.0", "1,781.0", "2,300.5", "2,301.5"]
         return subprocess.CompletedProcess(cmd, 0, "\n".join(linhas), "")
     monkeypatch.setattr(m.subprocess, "run", falso)
+    assert m.interleave_lags("x.mkv") == {0: pytest.approx(480.0), 1: pytest.approx(0.5)}
     assert m.interleave_lag("x.mkv") == pytest.approx(480.0)
 
     def sumida(cmd, **kw):

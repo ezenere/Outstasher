@@ -970,12 +970,13 @@ INTERLEAVE_CHECK_POINTS = (0.1, 0.35, 0.6, 0.85)
 INTERLEAVE_CHECK_WINDOW_S = 20
 
 
-def interleave_lag(path: str) -> float | None:
-    """Quanto a faixa de áudio mais desgarrada está gravada longe do vídeo,
-    em segundos, medido NO ARQUIVO: em alguns pontos, lê pacotes na ordem em
-    que estão gravados e compara o tempo de cada áudio com o do vídeo ali.
-    Faixa que nem aparece no trecho conta como infinita. None = não deu para
-    medir (o chamador não mexe no arquivo).
+def interleave_lags(path: str) -> dict[int, float] | None:
+    """Quanto cada faixa de áudio está gravada longe do vídeo, em segundos,
+    medido NO ARQUIVO: em alguns pontos, lê pacotes na ordem em que estão
+    gravados e compara o tempo de cada áudio com o do vídeo ali. Faixa que
+    nem aparece no trecho conta como infinita. Chave = posição da faixa entre
+    os ÁUDIOS (0 = primeiro áudio). None = não deu para medir (o chamador não
+    mexe no arquivo).
 
     O aviso "forcing output" do ffmpeg não basta: num caso real a dublagem
     saiu inteira gravada nos primeiros minutos do arquivo (8 min adiantada
@@ -992,7 +993,7 @@ def interleave_lag(path: str) -> float | None:
     audios = [s["index"] for s in streams if s.get("codec_type") == "audio"]
     if video is None or not audios or dur <= 0:
         return None
-    pior = 0.0
+    lags = {k: 0.0 for k in range(len(audios))}
     for frac in INTERLEAVE_CHECK_POINTS:
         p = subprocess.run(
             ["ffprobe", "-v", "error", "-read_intervals",
@@ -1011,12 +1012,49 @@ def interleave_lag(path: str) -> float | None:
         if not pts.get(video):
             continue
         v = sorted(pts[video])[len(pts[video]) // 2]
-        for a in audios:
+        for k, a in enumerate(audios):
             if not pts.get(a):
-                return float("inf")
+                lags[k] = float("inf")
+                continue
             mediana = sorted(pts[a])[len(pts[a]) // 2]
-            pior = max(pior, abs(mediana - v))
-    return pior
+            lags[k] = max(lags[k], abs(mediana - v))
+    return lags
+
+
+def interleave_lag(path: str) -> float | None:
+    """A faixa de áudio mais desgarrada (interleave_lags), em segundos."""
+    lags = interleave_lags(path)
+    return max(lags.values()) if lags else (None if lags is None else 0.0)
+
+
+def _reinterleave_cmd(output: str, tmp: str, audio_pos: list[int]) -> list[str] | None:
+    """mkvmerge que reintercala as faixas de áudio desgarradas (posição entre
+    os áudios). Cada uma vem de uma ENTRADA PRÓPRIA (o mesmo arquivo aberto de
+    novo, só com ela): com um leitor só, o mkvmerge segue a ordem gravada e
+    uma faixa ADIANTADA continua adiantada (caso real — reescrever o arquivo
+    inteiro não mudou nada); com leitores separados ele intercala pelo
+    tempo. Cada faixa a mais custa uma leitura a mais do arquivo."""
+    p = subprocess.run(["mkvmerge", "-J", output], capture_output=True,
+                       text=True, encoding="utf-8", errors="replace")
+    if p.returncode >= 2:
+        return None
+    try:
+        tracks = json.loads(p.stdout).get("tracks") or []
+    except ValueError:
+        return None
+    audios = [t["id"] for t in tracks if t.get("type") == "audio"]
+    soltos = [audios[k] for k in audio_pos if k < len(audios)]
+    if not soltos:
+        return None
+    resto = [a for a in audios if a not in soltos]
+    cmd = ["mkvmerge", "-q", "-o", tmp]
+    cmd += (["-a", ",".join(map(str, resto))] if resto else ["-A"]) + [output]
+    for t in soltos:
+        cmd += ["-D", "-S", "-B", "-T", "-M", "--no-chapters", "--no-global-tags",
+                "-a", str(t), output]
+    ordem = [f"{soltos.index(t['id']) + 1}:{t['id']}" if t["id"] in soltos
+             else f"0:{t['id']}" for t in tracks]
+    return cmd + ["--track-order", ",".join(ordem)]
 
 
 def fix_interleaving(output: str, stderr: str, log=lambda _m: None) -> str | None:
@@ -1025,31 +1063,40 @@ def fix_interleaving(output: str, stderr: str, log=lambda _m: None) -> str | Non
     "Frouxa" nao e cosmetico: uma faixa que ficou atrasada demais fica
     INALCANCAVEL POR SEEK — o player abre o arquivo, ve a faixa na lista e nao
     toca nada nos primeiros minutos (caso real: a dublagem de parte de um lote
-    inteiro). O mkvmerge reintercala e reescreve os indices em stream copy;
-    so entao o aviso vira desnecessario.
+    inteiro); uma ADIANTADA demais estoura o buffer de quem lê em sequência
+    (caso real: o Jellyfin perdia a dublagem aos 6 min). O mkvmerge
+    reintercala e reescreve os indices em stream copy.
 
-    Além do aviso do ffmpeg, MEDE o arquivo (interleave_lag): o aviso pode
-    não chegar (loglevel) e não é a única forma de sair desgarrado.
+    Além do aviso do ffmpeg, MEDE o arquivo (interleave_lags): o aviso pode
+    não chegar (loglevel) e não é a única forma de sair desgarrado. Faixa de
+    áudio medida fora do lugar ganha leitor próprio no mkvmerge
+    (_reinterleave_cmd); sem nenhuma medida fora, só o aviso, vale o
+    mkvmerge simples de sempre (faixa esparsa atrasada).
 
     Devolve a nota para o usuario (None se o mux ja saiu limpo)."""
     warn = interleave_warning(stderr)
-    if not warn:
-        lag = interleave_lag(output)
-        if lag is None or lag <= INTERLEAVE_CHECK_TOL_S:
-            return None
-        quanto = "ausente de trechos do arquivo" if lag == float("inf") \
-            else f"gravada {lag:.0f} s longe do vídeo"
-        warn = (f"⚠️ INTERCALAÇÃO FROUXA neste arquivo: uma faixa de áudio "
-                f"saiu {quanto} — players que leem em sequência (Jellyfin) "
-                f"perdem o áudio dela")
+    lags = interleave_lags(output) if Path(output).suffix.lower() == ".mkv" else None
+    soltas = sorted(k for k, v in (lags or {}).items() if v > INTERLEAVE_CHECK_TOL_S)
+    if soltas:
+        pior = max(lags[k] for k in soltas)
+        quanto = "ausente de trechos do arquivo" if pior == float("inf") \
+            else f"gravada {pior:.0f} s longe do vídeo"
+        warn = (f"⚠️ INTERCALAÇÃO FROUXA neste arquivo: {len(soltas)} faixa(s) de "
+                f"áudio saíram {quanto} — players que leem em sequência "
+                f"(Jellyfin) perdem o áudio delas")
         log(warn)
+    if not warn:
+        return None
     if Path(output).suffix.lower() != ".mkv" or not has_mkvmerge():
         return warn
     tmp = Path(output).with_name(Path(output).stem + ".reinterleave.mkv")
+    cmd = (_reinterleave_cmd(output, str(tmp), soltas) if soltas
+           else ["mkvmerge", "-q", "-o", str(tmp), output])
+    if cmd is None:
+        return warn
     log("Intercalação frouxa: reescrevendo o arquivo pelo mkvmerge...")
     try:
-        p = subprocess.run(["mkvmerge", "-q", "-o", str(tmp), output],
-                           capture_output=True, text=True,
+        p = subprocess.run(cmd, capture_output=True, text=True,
                            encoding="utf-8", errors="replace")
         if p.returncode >= 2 or not tmp.exists() or tmp.stat().st_size <= 0:
             tmp.unlink(missing_ok=True)
@@ -1058,6 +1105,10 @@ def fix_interleaving(output: str, stderr: str, log=lambda _m: None) -> str | Non
     except OSError:
         tmp.unlink(missing_ok=True)
         return warn
+    if soltas:
+        return (f"intercalação frouxa no mux ({len(soltas)} faixa(s) de áudio "
+                f"fora do lugar) — arquivo reescrito pelo mkvmerge, com a(s) "
+                f"faixa(s) lida(s) à parte para voltarem ao lugar")
     return ("intercalação frouxa no mux (faixa esparsa) — arquivo reescrito "
             "pelo mkvmerge, que reintercala e refaz os índices")
 
