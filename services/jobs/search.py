@@ -121,6 +121,30 @@ def _dedup_results(results: list[dict]) -> list[dict]:
     return out
 
 
+def carry_over(old: list[dict], new_results: list[dict]) -> list[dict]:
+    """Candidatos da busca anterior que a busca nova NÃO desmentiu — a busca
+    é substitutiva, mas incremental: tracker às vezes falha e não devolve
+    nada, e a lista não pode encolher por isso.
+
+    - torrent que veio de novo segue pelo caminho normal (dados novos; morto
+      = sem seeders é rejeitado no rank) — não é carregado daqui;
+    - tracker que respondeu algo nesta rodada e não trouxe o torrent: saiu do
+      tracker (morreu) — não é carregado;
+    - tracker que não respondeu nada: falhou — o candidato fica como estava.
+    Magnet/link colado pelo usuário (tracker "manual") fica sempre."""
+    responding = {r.get("tracker") for r in new_results if r.get("tracker")}
+    seen = {(_torrent_identity(r), r.get("tracker")) for r in new_results}
+    out = []
+    for c in old:
+        if c.get("tracker") != "manual":
+            if c.get("tracker") in responding:
+                continue
+            if (_torrent_identity(c), c.get("tracker")) in seen:
+                continue
+        out.append(c)
+    return out
+
+
 def _extra_searches(spellings: list[str], year: str, lang: str) -> list[dict]:
     """Buscas extras direcionadas conforme as regras (idioma x variante x indexers).
 
@@ -242,7 +266,12 @@ async def _load_movie(job: dict) -> dict:
 
 async def _search(job: dict):
     """Busca no Jackett e grava no job as consultas, o rastro de cada uma e a
-    lista escolhível por papel (ver services/candidates.py)."""
+    lista escolhível por papel (ver services/candidates.py).
+
+    Busca repetida (nova tentativa, "buscar de novo") é incremental: o que a
+    anterior achou e esta não desmentiu continua na lista (carry_over)."""
+    previous = {r: [dict(c) for c in candidates.selectable(job, r)]
+                for r in ("audio", "video")}
     candidates.reset(job)
     lang = job["language"]
     label = config.LANGUAGES[lang]["label"]
@@ -418,6 +447,18 @@ async def _search(job: dict):
     if want_video and not video_viable:
         _event(job, "search", f"⚠️ Nenhum torrent de vídeo viável para '{original}'")
 
+    raw = [r for res in all_results for r in res]
+    for role, viable in (("audio", audio_viable), ("video", video_viable)):
+        found = {(_torrent_identity(c), c.get("tracker")) for c in viable}
+        kept = [c for c in carry_over(previous[role], raw)
+                if (_torrent_identity(c), c.get("tracker")) not in found]
+        if kept:
+            viable.extend(kept)
+            rotulo = "áudio" if role == "audio" else "vídeo"
+            _event(job, "search",
+                   f"{len(kept)} candidato(s) de {rotulo} da busca anterior "
+                   f"mantido(s) — o tracker deles não respondeu agora")
+
     _store_selectable(job, "audio", audio_viable[:MAX_SELECTABLE])
     _store_selectable(job, "video", video_viable[:MAX_SELECTABLE])
     _persist(job)
@@ -430,17 +471,32 @@ class NoCompatibleCut(RuntimeError):
     """Há dublado e há original, mas nenhum par do mesmo corte."""
 
 
+class BelowMinimum(RuntimeError):
+    """Há candidatos, mas nenhum na qualidade mínima pedida para o papel."""
+
+
+def min_quality(job: dict, role: str) -> dict | None:
+    """Piso de qualidade do papel (audio/video) — só na escolha automática."""
+    if job.get("mode") == "manual":
+        return None
+    return (job.get("min_quality") or {}).get(role)
+
+
 def missing_roles(job: dict) -> list[str]:
     """Papéis que o job baixa e para os quais a busca não trouxe nenhum
     candidato escolhível."""
     return [k for k in _needed_torrents(job) if not candidates.selectable(job, k)]
 
 
+def nothing_found_reason(missing: list[str]) -> str:
+    quais = " e ".join(_ROLE_PHRASE[k] for k in ("audio", "video") if k in missing)
+    return f"Nenhum torrent encontrado para {quais}"
+
+
 def nothing_found_detail(missing: list[str]) -> str:
     """O detail do job que ficou aguardando por falta de torrent (a UI da
     escolha explica de novo, ao lado do campo do magnet)."""
-    quais = " e ".join(_ROLE_PHRASE[k] for k in ("audio", "video") if k in missing)
-    return (f"Nenhum torrent encontrado para {quais} — cole um magnet/link "
+    return (f"{nothing_found_reason(missing)} — cole um magnet/link "
             f"ou tente buscar de novo")
 
 
@@ -454,6 +510,23 @@ def _auto_pick(job: dict) -> tuple[dict | None, dict | None]:
     audio = candidates.selectable(job, "audio")
     video = candidates.selectable(job, "video")
     needed = _needed_torrents(job)
+    abaixo = []
+    for role, lista in (("audio", audio), ("video", video)):
+        piso = min_quality(job, role)
+        if not piso or role not in needed:
+            continue
+        ok = [c for c in lista if selector.meets_minimum(c["title"], piso)]
+        if lista and len(ok) < len(lista):
+            _event(job, "info",
+                   f"Qualidade mínima de {_ROLE_PHRASE[role]} "
+                   f"({selector.describe_minimum(piso)}): {len(ok)} de "
+                   f"{len(lista)} candidato(s) atingem")
+        if not ok:
+            abaixo.append(role)
+        lista[:] = ok
+    if abaixo:
+        quais = " e ".join(_ROLE_PHRASE[k] for k in ("audio", "video") if k in abaixo)
+        raise BelowMinimum(f"Nenhum torrent na qualidade mínima para {quais}")
     if needed == ("audio",):
         return audio[0], None
     if needed == ("video",):

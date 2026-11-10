@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { MediaVideo, Movie, Refresh, Search, SoundHigh, Trash, Xmark } from 'iconoir-react'
+import { Calendar, MediaVideo, Movie, Refresh, Search, SoundHigh, Trash, Xmark } from 'iconoir-react'
 import {
-  api, fmtSize, mergePhase, post,
+  api, fmtSize, fmtWhen, mergePhase, post,
   type JobCounts, type JobListItem, type JobListPage, type SlimProgress,
 } from '../api'
 import { Badge, ClampText, Empty, KindTags, Tag, torrentComplete, torrentSize } from '../components/ui'
@@ -20,10 +20,12 @@ export function jobTitle(j: JobLike): string {
 }
 
 // grupos do filtro; o backend filtra por grupo (não trazemos a lista toda)
-type Filter = 'all' | 'active' | 'error' | 'done'
+type Filter = 'all' | 'active' | 'scheduled' | 'error' | 'done'
 
 const FILTERS: { key: Filter; label: string }[] = [
   { key: 'active', label: 'Em andamento' },
+  // sem nada rodando agora: esperando a hora marcada ou a próxima tentativa
+  { key: 'scheduled', label: 'Programado' },
   { key: 'error', label: 'Erro' },
   { key: 'done', label: 'Finalizado' },
   { key: 'all', label: 'Todos' },
@@ -63,7 +65,7 @@ export async function removeJob(dialog: DialogApi, id: string, reload: () => voi
   }
 }
 
-const EMPTY_COUNTS: JobCounts = { all: 0, active: 0, error: 0, done: 0 }
+const EMPTY_COUNTS: JobCounts = { all: 0, active: 0, scheduled: 0, error: 0, done: 0 }
 
 const PER_PAGE = 20
 
@@ -123,7 +125,7 @@ export default function Jobs() {
         const mq = mediaQs(media)
         const c = await api<JobCounts>(`/api/jobs/counts${mq ? `?${mq.slice(1)}` : ''}`)
         setCounts(c)
-        const liveGroup = filter === 'active' || filter === 'all'
+        const liveGroup = filter === 'active' || filter === 'scheduled' || filter === 'all'
         const changed = lastGroupCount.current !== null && c[filter] !== lastGroupCount.current
         if (liveGroup || changed) void reload(filter, page, searching, media)
       } catch {
@@ -268,6 +270,12 @@ export default function Jobs() {
               )}
             </div>
             <ClampText className="mt-1.5 text-sm text-zinc-400">{j.detail}</ClampText>
+            {j.status === 'scheduled' && j.next_search_at && (
+              <div className="mt-1 flex items-center gap-1 text-xs text-teal-400">
+                <Calendar width={12} height={12} />
+                {j.searched_at ? 'Próxima tentativa' : 'Busca'} em {fmtWhen(j.next_search_at)}
+              </div>
+            )}
             {(j.video_torrent || j.audio_torrent) && (
               <div className="mt-2 space-y-0.5 text-xs text-zinc-500">
                 {j.video_torrent && (

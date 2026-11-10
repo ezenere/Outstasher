@@ -45,7 +45,10 @@ def episodes_in_jobs(tmdb_id: int) -> dict:
             state = ep.get("state")
             if state == "done":
                 done.setdefault(season, set()).add(episode)
-            elif state in IN_FLIGHT:
+            elif state in IN_FLIGHT or (state == "skipped_future"
+                                        and job.get("wait_release")):
+                # episódio futuro num job programado para o lançamento: já
+                # está pedido (pedir de novo criaria um segundo job)
                 active.setdefault(season, {}).setdefault(episode, {
                     "episode": episode,
                     "state": state,

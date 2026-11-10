@@ -28,7 +28,7 @@ do pacote continua enxergando a original.
 """
 from services.jobs import (
     actions, advanced, delivery, downloads, movies, recompress, runtime,
-    search, views,
+    schedule, search, views,
 )
 # ---- estado e infraestrutura ----
 from services.jobs.runtime import (
@@ -59,7 +59,7 @@ from services.jobs.actions import (
 __all__ = [
     # submódulos (alvo de monkeypatch e uso direto)
     "actions", "advanced", "delivery", "downloads", "movies", "recompress",
-    "runtime", "search", "views",
+    "runtime", "schedule", "search", "views",
     # API usada por main.py
     "KINDS", "VIDEO_EXTENSIONS", "cancel", "counts", "create", "create_manual",
     "create_recompress", "flush_dirty", "get_job", "list_group", "list_jobs",

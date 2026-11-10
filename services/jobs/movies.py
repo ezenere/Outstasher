@@ -9,11 +9,11 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from services import merger, store, tmdb, transcode
-from services.jobs import advanced, delivery, downloads, search
+from services import candidates, merger, store, tmdb, transcode
+from services.jobs import advanced, delivery, downloads, schedule, search
 from services.jobs.runtime import (
     KINDS, _TERMINAL_STATUSES, _delete_job, _event, _fail, _get_merge_lock,
-    _jobs, _needed_torrents, _public, _set, _spawn)
+    _jobs, _needed_torrents, _persist, _public, _set, _spawn)
 
 
 async def create(tmdb_id: int, language: str, mode: str = "auto",
@@ -22,10 +22,14 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
                  kind: str = "both", download_only: bool = False,
                  convert: dict | None = None,
                  skip_search: bool = False,
-                 advanced_merge: dict | None = None) -> dict:
+                 advanced_merge: dict | None = None,
+                 scheduled_at: str | None = None,
+                 retry_mode: str | None = None,
+                 min_quality: dict | None = None) -> dict:
     from services import advanced_merge as adv_merge
     if kind not in KINDS:
         raise ValueError(f"kind inválido: {kind!r}")
+    schedule_opts = _schedule_options(mode, scheduled_at, retry_mode, min_quality)
     advanced_merge = adv_merge.validate_override(advanced_merge)
     if skip_search and mode != "manual":
         raise ValueError("Pular a busca só faz sentido no modo manual")
@@ -86,6 +90,7 @@ async def create(tmdb_id: int, language: str, mode: str = "auto",
         # services/candidates.py)
         "search_queries": [],
         "search_candidates": [],
+        **schedule_opts,
     }
     _jobs[job["id"]] = job
     tinfo = f" — torrents: {target['label']}" if target else ""
@@ -221,8 +226,55 @@ async def _run_manual(job: dict, video_file: Path, audio_file: Path):
 
 # -------------------- pipeline --------------------
 
+def _schedule_options(mode: str, scheduled_at, retry_mode, min_quality) -> dict:
+    """Opções de programação/busca contínua/qualidade mínima validadas, como
+    entram no job (chave ausente = não pedida). Compartilhado com as séries."""
+    from services import search_retry, selector
+    out: dict = {}
+    if scheduled_at:
+        out["scheduled_at"] = search_retry.fmt(search_retry.parse_when(scheduled_at))
+    retry_mode = search_retry.validate_mode(retry_mode)
+    if retry_mode:
+        out["retry_mode"] = retry_mode
+    if min_quality and mode != "manual":
+        if not isinstance(min_quality, dict):
+            raise ValueError("qualidade mínima: objeto esperado")
+        clean = {}
+        for role in ("video", "audio"):
+            v = selector.validate_min_quality(min_quality.get(role))
+            if v:
+                clean[role] = v
+        if clean:
+            out["min_quality"] = clean
+    return out
+
+
+def _hold(job: dict) -> bool:
+    """Programado para depois e ainda sem nenhuma busca: espera a hora."""
+    from services import search_retry
+    at = job.get("scheduled_at")
+    if not at or job.get("searched_at"):
+        return False
+    when = search_retry.parse_when(at)
+    if when <= search_retry.now():
+        return False
+    schedule.wait_until(job, when, f"Programado para {search_retry.human(at)}")
+    return True
+
+
 async def _run(job: dict):
+    from services import search_retry
     try:
+        if _hold(job):
+            # título/pôster já na lista dos programados (a busca recarrega)
+            try:
+                await search._load_movie(job)
+                _persist(job)
+            except Exception as e:  # noqa: BLE001 — carrega na hora da busca
+                _event(job, "info", f"TMDB indisponível agora ({type(e).__name__}) "
+                                    f"— os dados do filme vêm na hora da busca")
+            return
+        job.pop("search_now", None)
         if job.get("skip_search"):
             # o usuário já sabe qual torrent quer: o indexador não é consultado
             # (só o TMDB, que dá título/ano ao job) e o gate abre com a lista
@@ -230,13 +282,16 @@ async def _run(job: dict):
             await search._load_movie(job)
             _set(job, "awaiting", "Informe o magnet/link de cada torrent")
             return
+        job["searched_at"] = search_retry.fmt(search_retry.now())
         await search._search(job)
         missing = search.missing_roles(job)
         if missing:
             # nada no indexador para um papel (ou os dois): o job NÃO falha —
             # fica na escolha (a mesma do modo manual), que aceita magnet/link
-            # próprio por papel e oferece buscar de novo
-            _set(job, "awaiting", search.nothing_found_detail(missing))
+            # próprio por papel e oferece buscar de novo. Com a busca
+            # contínua, a escolha fica aberta E a próxima busca é agendada
+            schedule.miss(job, search.nothing_found_reason(missing),
+                          "cole um magnet/link ou tente buscar de novo")
             return
         if job["mode"] == "manual":
             _set(job, "awaiting", "Escolha os torrents para baixar")
@@ -248,14 +303,23 @@ async def _run(job: dict):
             # à mão (com o aviso de cortes diferentes) ou um magnet próprio
             # resolvem — falhar jogava fora a busca
             _event(job, "info", f"⚠️ {e}")
-            _set(job, "awaiting",
-                 "Nenhum vídeo do mesmo corte do dublado — escolha o par à "
-                 "mão, cole um magnet/link ou tente buscar de novo")
+            schedule.miss(job, "Nenhum vídeo do mesmo corte do dublado",
+                          "escolha o par à mão, cole um magnet/link ou tente "
+                          "buscar de novo")
+            return
+        except search.BelowMinimum as e:
+            _event(job, "info", f"⚠️ {e}")
+            schedule.miss(job, str(e), "escolha à mão, cole um magnet/link ou "
+                                       "tente buscar de novo")
             return
         await downloads._start_download(job, a, v)
     except asyncio.CancelledError:
         raise
     except Exception as e:  # noqa: BLE001 - job nunca deve derrubar o servidor
+        # Jackett/TMDB fora do ar antes de qualquer torrent ir: tenta de novo
+        if (not any(candidates.active(job, k) for k in ("audio", "video"))
+                and schedule.retry_after_error(job, e)):
+            return
         _fail(job, f"{type(e).__name__}: {e}")
         return
     await _run_from_download(job)

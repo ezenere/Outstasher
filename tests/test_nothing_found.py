@@ -14,9 +14,17 @@ import asyncio
 
 import pytest
 
-from services import candidates, jackett, jobs, tmdb
+from services import candidates, jackett, jobs, search_retry, tmdb
 from services.jobs import actions, movies
 from services.series import pipeline
+
+
+@pytest.fixture(autouse=True)
+def sem_busca_continua(temp_db):
+    """Este arquivo cobre a escolha que abre quando a busca não acha nada —
+    com a busca contínua desligada. Ligada (o padrão), o job fica programado
+    para a próxima tentativa com a mesma escolha aberta (test_busca_programada)."""
+    search_retry.set({"enabled": False})
 
 
 def _hit(title, seeders=10, size=2000):

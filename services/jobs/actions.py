@@ -7,8 +7,8 @@ locais, recompressão) e por mídia (filme x série).
 import asyncio
 from pathlib import Path
 
-from services import candidates, catalog, stall_switch
-from services.jobs import downloads, movies, recompress, runtime, search
+from services import candidates, catalog, search_retry, stall_switch
+from services.jobs import downloads, movies, recompress, runtime, schedule, search
 from services.jobs.runtime import (
     _TERMINAL_STATUSES, _cancelling, _delete_output, _event, _has_torrents,
     _is_local_files, _is_recompress, _jobs, _kill_ffmpeg, _lookup,
@@ -31,7 +31,13 @@ def resume_pending():
             job["status"] = "downloading"
             _spawn(job["id"], movies._run_from_download(job))
         elif job["status"] == "searching":
-            _set(job, "error", "Servidor reiniciado durante a busca — use ↻ para repetir")
+            if (search_retry.enabled_for(job)
+                    and not any(candidates.active(job, k) for k in ("audio", "video"))):
+                # nada foi para o qBittorrent: a busca recomeça sozinha
+                schedule.wait_until(job, search_retry.now(),
+                                    "Servidor reiniciado durante a busca — buscando de novo")
+            else:
+                _set(job, "error", "Servidor reiniciado durante a busca — use ↻ para repetir")
         # awaiting: candidatos estao persistidos; segue esperando a escolha
 
 
@@ -75,7 +81,8 @@ async def select(job_id: str, audio_id: str | None, video_id: str | None,
     "pular busca de torrents", em que a lista de candidatos nasce vazia.
     """
     job = _jobs.get(job_id)
-    if not job or job["status"] != "awaiting":
+    # programado depois de uma busca sem resultado: a escolha segue aberta
+    if not job or job["status"] not in ("awaiting", schedule.SCHEDULED):
         return None
     needed = _needed_torrents(job)
     custom = custom or {}
@@ -100,6 +107,7 @@ async def select(job_id: str, audio_id: str | None, video_id: str | None,
                     f"sido refeita)")
         escolhidos[kind] = cand
     a, v = escolhidos.get("audio"), escolhidos.get("video")
+    schedule.leave(job)
     # awaiting também acontece na pausa de drift (possível versão diferente);
     # se o usuário preferiu outro torrent em vez de Continuar, a pausa caduca
     job.pop("drift_confirm", None)
@@ -121,7 +129,8 @@ async def research(job_id: str) -> dict | None:
     if job.get("media_type") == "tv":
         from services.series import pipeline as series_pipeline
         return await series_pipeline.research(job_id)
-    if (job["status"] != "awaiting" or job.get("drift_confirm")
+    if (job["status"] not in ("awaiting", schedule.SCHEDULED)
+            or job.get("drift_confirm")
             or job.get("awaiting") or not _has_torrents(job)):
         raise ValueError("Só dá para buscar de novo enquanto o job aguarda a "
                          "escolha do torrent")
@@ -132,6 +141,7 @@ async def research(job_id: str) -> dict | None:
         raise ValueError("Este job já tem torrent no qBittorrent — escolha "
                          "outro na lista em vez de buscar de novo")
     _event(job, "chosen", "Usuário pediu uma nova busca de torrents")
+    job.pop("scheduled_at", None)   # buscar de novo vale como "agora"
     _set(job, "searching", "Buscando de novo no Jackett...")
     _spawn(job["id"], movies._run(job))
     return _public(job)
@@ -299,4 +309,6 @@ async def retry(job_id: str) -> dict | None:
     return await movies.create(old["tmdb_id"], old["language"], old.get("mode", "auto"),
                         old.get("destination_id"), old.get("torrent_target_id"),
                         old.get("kind", "both"), old.get("download_only", False),
-                        old.get("convert"))
+                        old.get("convert"),
+                        retry_mode=old.get("retry_mode"),
+                        min_quality=old.get("min_quality"))

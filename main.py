@@ -19,7 +19,7 @@ from pydantic import BaseModel
 import config
 from services import advanced_merge, auth, catalog, jackett, jobs, store, tmdb, transcode
 from services import browse
-from services import stall_switch
+from services import search_retry, stall_switch
 from services.series import activity as series_activity
 from services.series import manual as series_manual
 from services.series import pipeline as series_pipeline
@@ -56,9 +56,12 @@ async def lifespan(app: FastAPI):
     # _event só marca o job como sujo; este loop grava os sujos quando a
     # janela fecha, e o flush final no desligamento grava o que sobrou
     flusher = asyncio.create_task(jobs.runtime.persist_loop())
+    # relógio dos jobs programados (busca na hora marcada / busca contínua)
+    clock = asyncio.create_task(jobs.schedule.loop())
     try:
         yield
     finally:
+        clock.cancel()
         flusher.cancel()
         jobs.runtime.flush_dirty(force=True)
 
@@ -338,6 +341,12 @@ class JobRequest(BaseModel):
     convert: dict | None = None  # opções avançadas de conversão (transcode.validate)
     skip_search: bool = False    # manual: nem consulta o indexador (magnet próprio)
     advanced_merge: dict | None = None  # override da política do merge avançado
+    # programação: começa a buscar nesta data/hora (ISO local); busca contínua
+    # do job (None herda a global, "on"/"off"); piso de qualidade da escolha
+    # automática {video: {res, source}, audio: {res, source}}
+    scheduled_at: str | None = None
+    retry_mode: str | None = None
+    min_quality: dict | None = None
 
 
 class SelectRequest(BaseModel):
@@ -578,6 +587,20 @@ async def put_stall_switch(req: StallSwitchRequest):
         raise HTTPException(400, str(e))
 
 
+@app.get("/api/search-retry")
+async def get_search_retry():
+    """Busca contínua (global): ligada, intervalo e hora do lançamento."""
+    return {"config": search_retry.get(), "defaults": search_retry.defaults()}
+
+
+@app.put("/api/search-retry")
+async def put_search_retry(req: StallSwitchRequest):
+    try:
+        return {"ok": True, "config": search_retry.set(req.config)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 # -------------------- catalogo --------------------
 
 @app.get("/api/catalog")
@@ -752,7 +775,8 @@ async def create_job(req: JobRequest):
         return await jobs.create(req.tmdb_id, req.language, req.mode,
                                  req.destination_id, req.torrent_target_id, req.kind,
                                  req.download_only, req.convert, req.skip_search,
-                                 req.advanced_merge)
+                                 req.advanced_merge, req.scheduled_at,
+                                 req.retry_mode, req.min_quality)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -790,6 +814,13 @@ class SeriesJobRequest(BaseModel):
     skip_search: bool = False          # manual: nem consulta o indexador
     advanced_merge: dict | None = None  # override da política do merge avançado
     kind: str = "both"                 # both | original | dubbed (como nos filmes)
+    scheduled_at: str | None = None    # como nos filmes
+    retry_mode: str | None = None
+    min_quality: dict | None = None
+    # episódios futuros do pedido viram jobs programados para o dia do
+    # lançamento (um por data), a partir de release_time (HH:MM; None = global)
+    schedule_future: bool = False
+    release_time: str | None = None
 
 
 @app.post("/api/jobs/series")
@@ -800,7 +831,10 @@ async def create_series_job(req: SeriesJobRequest):
         return await series_pipeline.create_series(
             req.tmdb_id, req.language, req.seasons, req.episodes, req.mode,
             req.destination_id, req.torrent_target_id, req.convert,
-            req.skip_search, req.advanced_merge, req.kind)
+            req.skip_search, req.advanced_merge, req.kind,
+            scheduled_at=req.scheduled_at, retry_mode=req.retry_mode,
+            min_quality=req.min_quality, schedule_future=req.schedule_future,
+            release_time=req.release_time)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -1136,6 +1170,41 @@ async def put_job_stall_switch(job_id: str, req: StallOverrideRequest):
     try:
         return jobs.set_stall_switch(job_id, req.mode, req.minutes,
                                      kind=req.kind, n=req.n)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class ScheduleRequest(BaseModel):
+    at: str      # nova data/hora (ISO local)
+
+
+class RetryModeRequest(BaseModel):
+    mode: str | None = None     # None/"inherit" = herda a global; "on" | "off"
+
+
+@app.post("/api/jobs/{job_id}/search-now")
+async def job_search_now(job_id: str):
+    """Programado: busca agora em vez de esperar a hora marcada."""
+    try:
+        return jobs.schedule.search_now(job_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.put("/api/jobs/{job_id}/schedule")
+async def job_reschedule(job_id: str, req: ScheduleRequest):
+    """Muda a data/hora de um programado que ainda não começou a procurar."""
+    try:
+        return jobs.schedule.reschedule(job_id, req.at)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.put("/api/jobs/{job_id}/search-retry")
+async def job_retry_mode(job_id: str, req: RetryModeRequest):
+    """Busca contínua deste job: herda / liga / desliga."""
+    try:
+        return jobs.schedule.set_retry_mode(job_id, req.mode)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

@@ -266,6 +266,62 @@ export function setStallSwitch(jobId: string, body: {
   return put<Job>(`/api/jobs/${jobId}/stall-switch`, body)
 }
 
+// ---------- busca programada / contínua ----------
+
+/** Política global (Configurações → Busca). */
+export interface SearchRetryConfig {
+  /** busca contínua: a busca sem resultado tenta de novo depois de `minutes` */
+  enabled: boolean
+  minutes: number
+  /** hora do dia do lançamento em que um episódio futuro começa a ser
+   *  procurado (HH:MM, horário do servidor) */
+  release_time: string
+}
+
+/** Override da busca contínua num job: 'on'/'off' vence a global. */
+export type RetryMode = 'on' | 'off'
+
+/** Piso de qualidade de um lado (só na escolha automática). */
+export interface MinQuality {
+  res: '480p' | '720p' | '1080p' | '2160p' | null
+  source: 'webrip' | 'webdl' | 'bluray' | 'remux' | null
+}
+
+/** Qualidade mínima por lado: video = original, audio = dublado (o vídeo do
+ *  release dublado diz muito da qualidade do áudio dele). */
+export interface MinQualityByRole {
+  video?: MinQuality | null
+  audio?: MinQuality | null
+}
+
+export const MIN_RES_OPTIONS: [MinQuality['res'], string][] = [
+  [null, 'Qualquer resolução'], ['480p', '480p+'], ['720p', '720p+'],
+  ['1080p', '1080p+'], ['2160p', '4K'],
+]
+export const MIN_SOURCE_OPTIONS: [MinQuality['source'], string][] = [
+  [null, 'Qualquer fonte'], ['webrip', 'WEBRip+'], ['webdl', 'WEB-DL+'],
+  ['bluray', 'BluRay+'], ['remux', 'Remux'],
+]
+
+export function searchNow(jobId: string) {
+  return post<Job>(`/api/jobs/${jobId}/search-now`)
+}
+
+export function rescheduleJob(jobId: string, at: string) {
+  return put<Job>(`/api/jobs/${jobId}/schedule`, { at })
+}
+
+export function setJobRetryMode(jobId: string, mode: RetryMode | 'inherit') {
+  return put<Job>(`/api/jobs/${jobId}/search-retry`, { mode })
+}
+
+/** "2026-11-10T20:00:00" -> "10/11 às 20:00" (horário do servidor = o local). */
+export function fmtWhen(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(iso)
+  return m ? `${m[3]}/${m[2]} às ${m[4]}:${m[5]}` : iso
+}
+
 /** Refaz a busca de torrents no MESMO job enquanto ele aguarda a escolha
  *  (filme ou série — ex.: a busca não achou nada para um papel). */
 export function researchJob(jobId: string) {
@@ -652,6 +708,20 @@ export interface Job {
   stall_mode_audio?: StallMode
   stall_minutes_video?: number
   stall_minutes_audio?: number
+  // ---- busca programada / contínua ----
+  /** data/hora escolhida para a primeira busca */
+  scheduled_at?: string | null
+  /** próxima busca (só com status 'scheduled') */
+  next_search_at?: string | null
+  /** última busca feita; ausente = ainda não começou a procurar */
+  searched_at?: string | null
+  retry_mode?: RetryMode
+  min_quality?: MinQualityByRole | null
+  /** série: episódio futuro esperando o dia do lançamento */
+  wait_release?: boolean
+  release_time?: string | null
+  /** por que a última busca não deu em nada */
+  search_miss?: string | null
 }
 
 // ---- shapes enxutos das rotas de polling granular ----
@@ -743,6 +813,7 @@ export interface JobSummary {
 export interface JobCounts {
   all: number
   active: number
+  scheduled: number
   error: number
   done: number
 }
@@ -777,6 +848,8 @@ export interface JobListItem {
   video_torrent: TorrentInfo | null
   audio_torrent: TorrentInfo | null
   output: string | null
+  next_search_at?: string | null
+  searched_at?: string | null
   progress: {
     video: SlimProgress | null
     audio: SlimProgress | null
@@ -1033,6 +1106,7 @@ export function prog(p: Progress | number | null | undefined): Progress | null {
 export const STATUS_LABEL: Record<string, string> = {
   searching: 'Buscando',
   awaiting: 'Aguardando escolha',
+  scheduled: 'Programado',
   downloading: 'Baixando',
   merging: 'Convertendo',
   done: 'Concluído',
@@ -1137,13 +1211,14 @@ export function convertSummary(c: ConvertOptions | null | undefined): string[] {
   return out
 }
 
-export type MovieState = 'converting' | 'downloading' | 'searching' | 'awaiting' | 'done' | 'error'
+export type MovieState = 'converting' | 'downloading' | 'searching' | 'awaiting' | 'scheduled' | 'done' | 'error'
 
 export const MOVIE_STATE_LABEL: Record<MovieState, string> = {
   converting: 'Convertendo',
   downloading: 'Baixando',
   searching: 'Procurando',
   awaiting: 'Aguardando escolha',
+  scheduled: 'Programado',
   done: 'Baixado',
   error: 'Com erro',
 }
