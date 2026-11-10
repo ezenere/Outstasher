@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
-  api, fmtWhen, MIN_RES_OPTIONS, MIN_SOURCE_OPTIONS, rescheduleJob, searchNow,
+  api, fmtWhen, MIN_AUDIO_OPTIONS, MIN_RES_OPTIONS, MIN_SOURCE_OPTIONS, rescheduleJob, searchNow,
   setJobRetryMode, type Job, type MinQuality, type MinQualityByRole, type RetryMode,
   type SearchRetryConfig,
 } from '../api'
@@ -84,18 +84,24 @@ function MinRow({ label, value, onChange }: {
 }) {
   const res = value?.res ?? null
   const source = value?.source ?? null
-  const set = (r: MinQuality['res'], s: MinQuality['source']) =>
-    onChange(r || s ? { res: r, source: s } : null)
+  const audio = value?.audio ?? null
+  const set = (r: MinQuality['res'], s: MinQuality['source'], a: MinQuality['audio']) =>
+    onChange(r || s || a ? { res: r, source: s, audio: a } : null)
   return (
     <div className="flex flex-wrap items-center gap-2 text-sm">
       <span className="w-20 text-zinc-400">{label}</span>
       <select value={res ?? ''} className={fieldCls}
-        onChange={(e) => set((e.target.value || null) as MinQuality['res'], source)}>
+        onChange={(e) => set((e.target.value || null) as MinQuality['res'], source, audio)}>
         {MIN_RES_OPTIONS.map(([v, l]) => <option key={l} value={v ?? ''}>{l}</option>)}
       </select>
       <select value={source ?? ''} className={fieldCls}
-        onChange={(e) => set(res, (e.target.value || null) as MinQuality['source'])}>
+        onChange={(e) => set(res, (e.target.value || null) as MinQuality['source'], audio)}>
         {MIN_SOURCE_OPTIONS.map(([v, l]) => <option key={l} value={v ?? ''}>{l}</option>)}
+      </select>
+      <select value={audio ?? ''} className={fieldCls}
+        title="Pelo nome do release: quem não informa o áudio não passa"
+        onChange={(e) => set(res, source, (e.target.value || null) as MinQuality['audio'])}>
+        {MIN_AUDIO_OPTIONS.map(([v, l]) => <option key={l} value={v ?? ''}>{l}</option>)}
       </select>
     </div>
   )
@@ -113,7 +119,8 @@ export function MinQualityFields({ value, onChange, roles = ['video', 'audio'] }
     <div className="flex flex-col gap-1.5">
       <div className="text-xs text-zinc-500">
         Qualidade mínima — a escolha automática ignora o que ficar abaixo
-        (com a busca contínua, espera aparecer)
+        (com a busca contínua, espera aparecer). O áudio é lido do nome do
+        release: quem não informa não passa.
       </div>
       {roles.includes('video') && (
         <MinRow label="Original" value={value.video}

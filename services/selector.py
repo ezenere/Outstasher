@@ -152,6 +152,39 @@ MIN_RESOLUTIONS = ("480p", "720p", "1080p", "2160p")
 MIN_SOURCES = ("webrip", "webdl", "bluray", "remux")
 _MIN_SOURCE_RANK = {"bdrip": 0, "web": 0, "hdtv": 0, "webrip": 1, "webdl": 2,
                     "bluray": 3, "remux": 4}
+# piso de áudio, lido do NOME do release (que muitas vezes não diz nada —
+# aí não passa): cada opção é um critério próprio, não uma escada (TrueHD 5.1
+# é sem perda e não é 7.1; DDP 7.1 é 7.1 e não é sem perda)
+MIN_AUDIO = ("51", "71", "lossless")
+# canais: "5.1", "DDP5.1", "7.1", "AAC2.0" (o dígito antes não pode ser parte
+# de outro número: "x265.1080p" não é 5.1)
+_CHANNELS_RE = re.compile(r"(?<![\d])([2-9])[ ._]?([01])(?![\d])")
+_SURROUND_CODEC_RE = re.compile(
+    r"\b(?:ac3|e-?ac-?3|ddp|dd\+|dts(?:-?hd|-?x|-?ma)?|truehd|true-hd|atmos)\b"
+    r"|\bdd(?=[ ._]?[5-7][ ._]?1)", re.I)
+_71_RE = re.compile(r"\batmos\b|\bdts[ ._-]?x\b", re.I)
+_LOSSLESS_RE = re.compile(
+    r"\b(?:truehd|true-hd|dts[ ._-]?hd|dtshd|dts[ ._-]?ma|flac|l?pcm)\b", re.I)
+
+
+def _channels(title: str) -> int | None:
+    """Maior configuração de canais anunciada (2, 5, 6, 7...) ou None."""
+    found = [int(m.group(1)) for m in _CHANNELS_RE.finditer(_clean(title))
+             if m.group(1) in "25678"]
+    return max(found) if found else None
+
+
+def meets_audio(title: str, level: str | None) -> bool:
+    """O NOME do release anuncia o áudio pedido? Sem informação, não passa."""
+    if not level:
+        return True
+    t = _clean(title)
+    ch = _channels(t)
+    if level == "51":
+        return (ch is not None and ch >= 5) or bool(_SURROUND_CODEC_RE.search(t))
+    if level == "71":
+        return (ch is not None and ch >= 7) or bool(_71_RE.search(t))
+    return bool(_LOSSLESS_RE.search(t))
 
 
 def validate_min_quality(v) -> dict | None:
@@ -162,13 +195,16 @@ def validate_min_quality(v) -> dict | None:
     if not isinstance(v, dict):
         raise ValueError("qualidade mínima: objeto esperado")
     res, src = v.get("res") or None, v.get("source") or None
+    aud = v.get("audio") or None
     if res is not None and res not in MIN_RESOLUTIONS:
         raise ValueError(f"resolução mínima inválida: {res!r}")
     if src is not None and src not in MIN_SOURCES:
         raise ValueError(f"fonte mínima inválida: {src!r}")
-    if res is None and src is None:
+    if aud is not None and aud not in MIN_AUDIO:
+        raise ValueError(f"áudio mínimo inválido: {aud!r}")
+    if res is None and src is None and aud is None:
         return None
-    return {"res": res, "source": src}
+    return {"res": res, "source": src, "audio": aud}
 
 
 def meets_minimum(title: str, minimum: dict | None) -> bool:
@@ -188,6 +224,8 @@ def meets_minimum(title: str, minimum: dict | None) -> bool:
         got = _MIN_SOURCE_RANK.get(source_of(title))
         if got is None or got < _MIN_SOURCE_RANK[minimum["source"]]:
             return False
+    if minimum.get("audio") and not meets_audio(title, minimum["audio"]):
+        return False
     return True
 
 
@@ -202,6 +240,9 @@ def describe_minimum(minimum: dict | None) -> str:
         parts.append(("4K" if minimum["res"] == "2160p" else minimum["res"]) + "+")
     if minimum.get("source"):
         parts.append(src[minimum["source"]] + "+")
+    if minimum.get("audio"):
+        parts.append({"51": "áudio 5.1+", "71": "áudio 7.1/Atmos",
+                      "lossless": "áudio sem perda"}[minimum["audio"]])
     return " ".join(parts)
 
 

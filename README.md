@@ -81,9 +81,11 @@ Busque, clique, escolha idioma e destino. Modos: **Baixar e fazer merge**,
   cancelar.
 - **Agendar download**: o job nasce **Programado** e só começa a procurar na
   data/hora escolhida (dá para mudar a data ou *Buscar agora* antes disso).
-- **Qualidade mínima** (modo automático): piso de resolução e de fonte para o
-  original e para o dublado — o do dublado mede o vídeo do release dublado, que
-  diz muito do áudio dele. A lista de escolha continua mostrando tudo.
+- **Qualidade mínima** (modo automático): piso de resolução, de fonte e de
+  áudio (5.1+, 7.1/Atmos, sem perda) para o original e para o dublado. O áudio
+  só é lido do nome do release (quem não informa não passa); por isso o piso
+  de vídeo do dublado ajuda — o vídeo do release dublado diz muito do áudio
+  dele. A lista de escolha continua mostrando tudo.
 - **Busca contínua**: a busca que não acha nada que sirva (nada, nada na
   qualidade mínima, nenhum par do mesmo corte, Jackett/TMDB fora do ar) deixa o
   job **Programado** para tentar de novo depois do intervalo das Configurações

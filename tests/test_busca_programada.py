@@ -109,9 +109,32 @@ def test_meets_minimum(title, piso, ok):
     assert selector.meets_minimum(title, piso) is ok
 
 
+@pytest.mark.parametrize("title,nivel,ok", [
+    ("Filme.2014.1080p.WEB-DL.DDP5.1.H264", "51", True),
+    ("Filme 2014 DUAL 5.1 1080p", "51", True),
+    ("Filme 2014 1080p AC3", "51", True),
+    ("Filme.2014.720p.AAC2.0", "51", False),
+    ("Filme 2014 1080p Dublado", "51", False),          # não informa: não passa
+    ("Filme.2014.x265.1080p", "51", False),             # 265.1080 não é 5.1
+    ("Filme.2014.2160p.TrueHD.Atmos.7.1", "71", True),
+    ("Filme.2014.1080p.DDP.Atmos", "71", True),
+    ("Filme.2014.1080p.WEB-DL.DDP5.1", "71", False),
+    ("Filme.2014.1080p.BluRay.DTS-HD.MA.5.1", "lossless", True),
+    ("Filme.2014.1080p.FLAC.2.0", "lossless", True),
+    ("Filme.2014.2160p.DDP.7.1", "lossless", False),
+])
+def test_audio_minimo_pelo_nome(title, nivel, ok):
+    assert selector.meets_minimum(title, {"res": None, "source": None, "audio": nivel}) is ok
+
+
 def test_validate_min_quality():
     assert selector.validate_min_quality({"res": None, "source": None}) is None
-    assert selector.validate_min_quality({"res": "720p"}) == {"res": "720p", "source": None}
+    assert selector.validate_min_quality({"res": "720p"}) == {
+        "res": "720p", "source": None, "audio": None}
+    assert selector.validate_min_quality({"audio": "71"}) == {
+        "res": None, "source": None, "audio": "71"}
+    with pytest.raises(ValueError):
+        selector.validate_min_quality({"audio": "9.1"})
     with pytest.raises(ValueError):
         selector.validate_min_quality({"res": "999p"})
     with pytest.raises(ValueError):

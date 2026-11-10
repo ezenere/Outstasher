@@ -285,6 +285,8 @@ export type RetryMode = 'on' | 'off'
 export interface MinQuality {
   res: '480p' | '720p' | '1080p' | '2160p' | null
   source: 'webrip' | 'webdl' | 'bluray' | 'remux' | null
+  /** lido do NOME do release — quem não informa o áudio não passa */
+  audio?: '51' | '71' | 'lossless' | null
 }
 
 /** Qualidade mínima por lado: video = original, audio = dublado (o vídeo do
@@ -297,6 +299,10 @@ export interface MinQualityByRole {
 export const MIN_RES_OPTIONS: [MinQuality['res'], string][] = [
   [null, 'Qualquer resolução'], ['480p', '480p+'], ['720p', '720p+'],
   ['1080p', '1080p+'], ['2160p', '4K'],
+]
+export const MIN_AUDIO_OPTIONS: [NonNullable<MinQuality['audio']> | null, string][] = [
+  [null, 'Qualquer áudio'], ['51', '5.1+'], ['71', '7.1/Atmos'],
+  ['lossless', 'Sem perda (TrueHD/DTS-HD/FLAC)'],
 ]
 export const MIN_SOURCE_OPTIONS: [MinQuality['source'], string][] = [
   [null, 'Qualquer fonte'], ['webrip', 'WEBRip+'], ['webdl', 'WEB-DL+'],
