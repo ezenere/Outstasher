@@ -1445,11 +1445,20 @@ async def _start_downloads(job: dict):
         if t["state"] != "pending":
             continue
         url = t.get("magnet") or t.get("link")
-        await jobs._qbit.add(url, f"{shared_tag(job)},{t['tag']}", save_path)
+        erro = await jobs.runtime.send_torrent(
+            jobs._qbit, url, f"{shared_tag(job)},{t['tag']}", save_path)
+        # mesmo sem ter ido, entra como baixando: o watchdog não o acha no
+        # qBittorrent e reinsere depois da carência — um link lento não
+        # derruba o job com os outros torrents na fila
         t["state"] = "downloading"
-        jobs._event(job, "qbit",
-                    f"Torrent enviado ({ROLE_LABEL[t['role']]}, "
-                    f"{len(t['coverage'])} ep.): {t['title']}")
+        if erro:
+            jobs._event(job, "qbit",
+                        f"⚠️ t{t['n']} não foi enviado ({erro}) — o "
+                        f"acompanhamento tenta de novo em alguns minutos: {t['title']}")
+        else:
+            jobs._event(job, "qbit",
+                        f"Torrent enviado ({ROLE_LABEL[t['role']]}, "
+                        f"{len(t['coverage'])} ep.): {t['title']}")
     jobs._set(job, "downloading",
               f"Baixando {len(job['torrents'])} torrent(s)...")
     await _wait_downloads(job)
@@ -1694,7 +1703,14 @@ async def _readd(job: dict, t: dict):
                     f"⚠️ t{t['n']} sumiu e não tenho link para reinserir")
         return
     save_path = job.get("torrent_save_path") or config.QBIT_SAVE_PATH or None
-    await jobs._qbit.add(url, f"{shared_tag(job)},{t['tag']}", save_path)
+    erro = await jobs.runtime.send_torrent(
+        jobs._qbit, url, f"{shared_tag(job)},{t['tag']}", save_path)
+    if erro:
+        # link da busca lento (Jackett/tracker): não é o qBittorrent fora do
+        # ar — tenta de novo na próxima carência
+        jobs._event(job, "qbit", f"⚠️ t{t['n']} ainda não foi para o "
+                                 f"qBittorrent ({erro}) — tento de novo depois: {t['title']}")
+        return
     t["selected_files"] = None  # reseleciona os arquivos quando reaparecer
     jobs._event(job, "qbit", f"🔁 t{t['n']} reinserido: {t['title']}")
 
