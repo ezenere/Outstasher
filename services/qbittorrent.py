@@ -194,6 +194,13 @@ class QbitClient:
         r.raise_for_status()
         return r.json()
 
+    async def info_by_hashes(self, hashes: list[str]) -> list[dict]:
+        if not hashes:
+            return []
+        r = await self._get("/api/v2/torrents/info", {"hashes": "|".join(hashes)})
+        r.raise_for_status()
+        return r.json()
+
     async def files(self, torrent_hash: str) -> list[dict]:
         """Arquivos de um torrent: [{index, name, size, priority, progress}].
 

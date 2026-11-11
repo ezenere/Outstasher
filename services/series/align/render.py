@@ -193,6 +193,19 @@ def _keyframe_at_or_after(path: str, t: float) -> float | None:
     return None
 
 
+def _map_sem_capa(probe: dict) -> list[str]:
+    """`-map 0` sem as capas: imagem embutida (attached_pic, ex. a capa JPEG
+    do release) aparece como faixa de VÍDEO, e o `-c:v` do re-encode valia
+    para ela também — o SVT-AV1 recusa a capa (90000 fps nominais > 240) e o
+    episódio inteiro falhava. A capa não faz falta na saída."""
+    out = ["-map", "0"]
+    for st in probe.get("streams") or []:
+        if (st.get("codec_type") == "video"
+                and (st.get("disposition") or {}).get("attached_pic")):
+            out += ["-map", f"-0:{int(st['index'])}"]
+    return out
+
+
 def _reencode_for_cuts(orig_path: str, tmp_dir: Path, times: list[float],
                        spec: dict, duration: float, log, on_progress=None,
                        on_start=None) -> str:
@@ -222,7 +235,7 @@ def _reencode_for_cuts(orig_path: str, tmp_dir: Path, times: list[float],
         def monta(in_args, args=None):
             return ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error",
                     "-y", "-progress", "pipe:1", *in_args, "-i", orig_path,
-                    "-map", "0", "-c", "copy", *(args or plan.args),
+                    *_map_sem_capa(probe), "-c", "copy", *(args or plan.args),
                     "-force_key_frames", kfs, str(out)]
 
         log(f"Re-encodando o vídeo ({plan.encoder}) com keyframe forçado em "
@@ -271,7 +284,7 @@ def _reencode_for_cuts(orig_path: str, tmp_dir: Path, times: list[float],
     out = tmp_dir / "orig_reenc.mkv"
     def monta(in_args, ar=None):
         return ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
-                "-progress", "pipe:1", *in_args, "-i", orig_path, "-map", "0",
+                "-progress", "pipe:1", *in_args, "-i", orig_path, *_map_sem_capa(probe),
                 "-c", "copy", *(ar or args), "-force_key_frames", kfs, str(out)]
 
     log(f"Re-encodando o vídeo em {codec.upper()} ({enc}, qualidade {crf}) com "

@@ -1085,6 +1085,26 @@ async def resolve(job_id: str, reason: str, decision: dict) -> dict | None:
                     "serão pulados")
         return jobs._public(job)
 
+    if reason == "remove_torrent" and _paused_at_gaps(job):
+        # aviso de lacunas no meio do download: o watchdog está parado, então
+        # a remoção é aplicada aqui mesmo (com ele rodando, quem aplica é ele
+        # — ver o pedido abaixo). O gate é derivado: as lacunas novas
+        # aparecem sozinhas no aviso
+        try:
+            n = int(decision.get("torrent_n"))
+        except (TypeError, ValueError):
+            raise ValueError("torrent_n: informe o número do torrent")
+        alvo = next((t for t in job["torrents"] if t["n"] == n), None)
+        if alvo is None:
+            raise ValueError(f"t{n} não está no plano")
+        jobs._event(job, "chosen", f"Usuário pediu para remover t{n}: {alvo['title']}")
+        job["_remove_torrents"] = [n]
+        await _apply_removals(job)
+        if any(t["n"] == n for t in job["torrents"]):
+            raise ValueError(f"O qBittorrent não respondeu — t{n} não foi removido; "
+                             f"tente de novo")
+        return jobs._public(job)
+
     if reason in ("edit_torrents", "remove_torrent"):
         if job["status"] != "downloading":
             raise ValueError("Só dá para editar os torrents durante o download "
@@ -1827,6 +1847,7 @@ async def _wait_downloads(job: dict):
                     continue
                 missing[t["n"]] = None
                 t["hash"] = info.get("hash")
+                _update_size(t, info)
                 if await _ensure_file_selection(job, t):
                     continue  # arquivos religados: o progresso deste tick é velho
                 pct = info.get("progress", 0)
@@ -1897,6 +1918,15 @@ async def _wait_downloads(job: dict):
     await _after_download(job)
 
 
+def _paused_at_gaps(job: dict) -> bool:
+    """Job parado no aviso de lacunas NO MEIO do download (pack sem os
+    arquivos esperados, torrent removido): os torrents seguem no
+    qBittorrent e dá para trocar/remover como durante o download."""
+    gate = job.get("awaiting") or {}
+    return (job.get("status") == "awaiting" and gate.get("reason") == "gaps_confirm"
+            and any(t.get("hash") for t in job["torrents"]))
+
+
 def _download_detail(job: dict) -> str:
     done = sum(1 for t in job["torrents"] if t["state"] == "done")
     return f"Baixando torrents ({done}/{len(job['torrents'])} concluídos)..."
@@ -1940,6 +1970,16 @@ def _apply_force_continue(job: dict):
                 "(continuam no qBittorrent)")
 
 
+def _single_season(t: dict) -> int | None:
+    """Temporada do torrent quando o NOME diz que é pack de UMA temporada só
+    ("2 Temporada", "Season 3") — único caso em que arquivo numerado só pela
+    posição ("1 - Nome.mp4") pode ser lido como episódio."""
+    cov = parse.parse_coverage(t.get("title") or "")
+    if cov.kind == "season_pack" and len(cov.seasons) == 1:
+        return next(iter(cov.seasons))
+    return None
+
+
 def _match_pack_files(job: dict, t: dict, files: list[dict]
                       ) -> tuple[list[dict], list[dict], set[str]]:
     """Cruza os arquivos REAIS do pack com a cobertura atribuída ao torrent.
@@ -1948,6 +1988,9 @@ def _match_pack_files(job: dict, t: dict, files: list[dict]
     arquivo é mantido se o nome traz SxxEyy de algum episódio atribuído
     (vídeo + legendas dele); só arquivo de VÍDEO conta como "presente"."""
     wanted = {_search_ref(job, k): k for k in t["coverage"]}
+    season = _single_season(t)
+    pos = (parse.position_refs([f.get("name") or "" for f in files], season,
+                               jobs.VIDEO_EXTENSIONS) if season is not None else {})
     keep, drop = [], []
     found: set[str] = set()
     for f in files:
@@ -1957,6 +2000,8 @@ def _match_pack_files(job: dict, t: dict, files: list[dict]
         # (a referência está na PASTA) — vale para arquivos de legenda
         refs = subs.refs_in_path(full) if Path(name).suffix.lower() in subs.TEXT_EXT \
             else parse.parse_episode_refs(name)
+        if not refs and full in pos:
+            refs = [pos[full]]
         hit = [wanted[r] for r in refs if r in wanted]
         if hit and Path(name).suffix.lower() in jobs.VIDEO_EXTENSIONS:
             found.update(hit)
@@ -2120,7 +2165,7 @@ async def switch_torrent(job_id: str, torrent_n: int,
     job = jobs._jobs.get(job_id)
     if not job or job.get("media_type") != "tv":
         raise ValueError("Job de série não encontrado")
-    if job["status"] != "downloading":
+    if job["status"] != "downloading" and not _paused_at_gaps(job):
         raise ValueError("Só dá para trocar torrent durante o download")
     t = next((x for x in job["torrents"] if x["n"] == torrent_n), None)
     if t is None:
@@ -2208,8 +2253,45 @@ async def research(job_id: str) -> dict:
     return jobs._public(job)
 
 
+async def _refresh_done_paths(job: dict):
+    """Onde os torrents concluídos estão AGORA. O content_path é gravado
+    quando o torrent termina, mas ele pode mudar depois: o usuário move o
+    torrent no próprio qBittorrent (falta de espaço) ou ele é reinserido em
+    outra pasta. Consulta pelo hash; sem resposta do qBittorrent, fica o
+    gravado (o erro de arquivo não encontrado diz o caminho tentado)."""
+    done = [t for t in job["torrents"] if t["state"] == "done" and t.get("hash")]
+    if not done:
+        return
+    try:
+        infos = await jobs._qbit.info_by_hashes([t["hash"] for t in done])
+    except Exception as e:  # noqa: BLE001 — sem qBittorrent: segue com o gravado
+        jobs._event(job, "qbit", f"⚠️ não consegui confirmar onde estão os "
+                                 f"torrents concluídos ({type(e).__name__})")
+        return
+    by_hash = {(i.get("hash") or "").lower(): i for i in infos}
+    for t in done:
+        info = by_hash.get(t["hash"].lower())
+        if not info:
+            continue
+        _update_size(t, info)
+        cp = info.get("content_path")
+        if cp and cp != t.get("content_path"):
+            jobs._event(job, "qbit", f"t{t['n']} mudou de lugar no qBittorrent: "
+                                     f"{t.get('content_path')} → {cp}")
+            t["content_path"] = cp
+
+
+def _update_size(t: dict, info: dict):
+    """Tamanho REAL do torrent (dos metadados) no lugar do informado pelo
+    indexador — que costuma ser estimado ("512 MB") ou nem vir."""
+    total = info.get("total_size")
+    if isinstance(total, (int, float)) and total > 0:
+        t["size"] = int(total)
+
+
 async def _resolve_episode_files(job: dict):
     """Mapeia cada episódio para os arquivos baixados (um por papel)."""
+    await _refresh_done_paths(job)
     for t in job["torrents"]:
         if t["state"] != "done" or not t.get("content_path"):
             continue
@@ -2226,7 +2308,8 @@ async def _resolve_episode_files(job: dict):
                 continue
             try:
                 f = await asyncio.to_thread(
-                    _find_episode_file, root, *_search_ref(job, key))
+                    _find_episode_file, root, *_search_ref(job, key),
+                    _single_season(t))
                 ep["src"][t["role"]] = str(f)
                 # legendas externas do episódio (srt/ass/vtt) — entram no
                 # MKV final, com os tempos tratados no merge
@@ -2256,12 +2339,15 @@ async def _resolve_episode_files(job: dict):
     jobs._persist(job)
 
 
-def _find_episode_file(root, season: int, episode: int) -> Path:
+def _find_episode_file(root, season: int, episode: int,
+                       position_season: int | None = None) -> Path:
     """Arquivo de vídeo do episódio dentro do diretório do torrent.
 
     Match por SxxEyy/1x02 no NOME do arquivo (substitui a heurística de filmes
     "maior arquivo da pasta", que não faz sentido em pack). Torrent de arquivo
-    único sem referência no nome: é o próprio arquivo."""
+    único sem referência no nome: é o próprio arquivo. Pack de UMA temporada
+    (`position_season`, ver _single_season) com os arquivos numerados só pela
+    posição ("1 - Nome.mp4"): o número do início do nome é o episódio."""
     p = Path(root)
     if p.is_file():
         return p
@@ -2277,6 +2363,12 @@ def _find_episode_file(root, season: int, episode: int) -> Path:
         return max(matches, key=lambda f: f.stat().st_size)
     if len(vids) == 1:
         return vids[0]
+    if position_season is not None and position_season == season:
+        pos = parse.position_refs([str(f.relative_to(p)) for f in vids], season,
+                                  jobs.VIDEO_EXTENSIONS)
+        hit = [f for f in vids if pos.get(str(f.relative_to(p))) == (season, episode)]
+        if len(hit) == 1:
+            return hit[0]
     raise RuntimeError(
         f"nenhum dos {len(vids)} vídeos tem S{season:02d}E{episode:02d} no nome")
 

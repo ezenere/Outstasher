@@ -17,8 +17,9 @@ from services import selector
 # "T01E02" também: T de Temporada, convenção de packs brasileiros (só na forma
 # com o E — "T2" solto seria ambíguo com sequência de filme, e não é aceito
 # como temporada solta).
+# Temporada com zero a mais ("S012E05", visto em packs brasileiros) é a S12.
 _SXXEYY_RE = re.compile(
-    r"[sStT](\d{1,2})[ ._-]?[eE](\d{1,3})"
+    r"[sStT]0?(\d{1,2})[ ._-]?[eE](\d{1,3})"
     r"(?:[ ]?[-~][ ]?[eE]?(\d{1,3}))?")
 
 # forma "1x02" (scene antiga). e com EXATAMENTE 2 dígitos: 3 casaria o 264 de
@@ -58,6 +59,56 @@ def parse_episode_refs(title: str) -> list[tuple[int, int]]:
             seen.add(ref)
             uniq.append(ref)
     return uniq
+
+
+# Pack de UMA temporada que numera os arquivos só pela posição, sem SxxEyy:
+# "1 - Nome do Episódio.mp4", "07. Nome.mkv", "Episódio 3.mkv". O número
+# precisa vir no INÍCIO do nome e seguido de separador — "1080p..." não casa
+# (o lookahead barra o dígito seguinte).
+_LEADING_NUM_RE = re.compile(
+    r"^\s*(?:ep(?:is[oó]dio)?[ ._-]*)?(\d{1,3})(?!\d)(?=[\s._\-–)\]]|$)", re.I)
+
+
+def position_refs(names: list[str], season: int,
+                  video_ext: set[str] | frozenset[str]) -> dict[str, tuple[int, int]]:
+    """Episódio de cada arquivo de um pack de temporada ÚNICA numerado por
+    posição: {nome: (season, n)}. Vazio quando a regra não se aplica sem
+    ambiguidade — algum arquivo já traz SxxEyy/1x02 (o pack não é desse
+    tipo), algum VÍDEO sem número no início, ou dois vídeos com o mesmo
+    número. Arquivos que não são vídeo (legendas) entram se tiverem o número.
+
+    `names` podem ser caminhos ("pasta/1 - Nome.mp4"): vale o último trecho."""
+    def base(n: str) -> str:
+        return n.replace("\\", "/").rsplit("/", 1)[-1]
+
+    def ext(n: str) -> str:
+        b = base(n)
+        return b[b.rfind("."):].lower() if "." in b else ""
+
+    if any(parse_episode_refs(base(n)) for n in names):
+        return {}
+    out: dict[str, tuple[int, int]] = {}
+    vid_nums: list[int] = []
+    for n in names:
+        b = base(n)
+        stem = b[:b.rfind(".")] if "." in b else b
+        m = _LEADING_NUM_RE.match(stem)
+        is_video = ext(n) in video_ext
+        if not m:
+            if is_video:
+                return {}
+            continue
+        num = int(m.group(1))
+        if num == 0:
+            if is_video:
+                return {}
+            continue
+        if is_video:
+            vid_nums.append(num)
+        out[n] = (season, num)
+    if not vid_nums or len(set(vid_nums)) != len(vid_nums):
+        return {}
+    return out
 
 
 # -------------------- temporadas / packs --------------------

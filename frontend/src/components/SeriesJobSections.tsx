@@ -106,6 +106,13 @@ export function SeriesTorrents({ job, onChanged }: { job: Job; onChanged: () => 
   const [editing, setEditing] = useState(false)
   const torrents = job.torrents ?? []
   if (!torrents.length) return null
+  // trocar/remover valem durante o download E no aviso de lacunas aberto no
+  // meio dele (torrent removido, pack sem os arquivos esperados): os
+  // torrents seguem no qBittorrent e a decisão das lacunas pode depender de
+  // trocar um deles
+  const canEdit = job.status === 'downloading'
+    || (job.status === 'awaiting' && job.awaiting?.reason === 'gaps_confirm'
+      && !!job.awaiting.payload?.mid_download)
 
   async function removeTorrent(n: number) {
     const t = torrents.find((x) => x.n === n)
@@ -264,6 +271,11 @@ export function SeriesTorrents({ job, onChanged }: { job: Job; onChanged: () => 
                 <span>{t.coverage.length} episódio(s): {t.coverage.join(', ')}</span>
                 {t.quality && <span>· {t.quality}</span>}
                 {t.size != null && <span>· {fmtSize(t.size)}</span>}
+                {/* pack com parte dos arquivos: o que de fato vai baixar */}
+                {t.size != null && t.progress?.size != null && t.progress.size > 0
+                  && t.progress.size < t.size * 0.98 && (
+                  <span>({fmtSize(t.progress.size)} selecionados)</span>
+                )}
                 {t.selected_files && t.selected_files.length > 0 && (
                   <span title={t.selected_files.join('\n')}>
                     · {t.selected_files.length} arquivo(s) selecionado(s) do pack
@@ -272,12 +284,12 @@ export function SeriesTorrents({ job, onChanged }: { job: Job; onChanged: () => 
               </div>
               {t.state !== 'done' && p && <ProgressBar label="Download" p={p} />}
               {/* troca manual: como nos filmes, por torrent do plano */}
-              {job.status === 'downloading' && t.state === 'done' && (
+              {canEdit && t.state === 'done' && (
                 <div className="mt-1.5 flex flex-wrap items-center gap-2">
                   {removeButton(t.n)}
                 </div>
               )}
-              {job.status === 'downloading' && t.state === 'downloading' && (
+              {canEdit && t.state === 'downloading' && (
                 <div className="mt-1.5">
                   <div className="flex flex-wrap items-center gap-2">
                     <button
