@@ -112,10 +112,9 @@ async def _run(job: dict):
                       if v["state"] == "downloaded")
         for i, key in enumerate(keys, start=1):
             ep = job["episodes"][key]
-            lock = jobs._get_merge_lock()
-            if lock.locked():
-                job["detail"] = f"{key}: na fila de conversão ({i}/{len(keys)})..."
-            async with lock:
+            async with jobs._merge_slot(
+                    job, f"{key}: na fila de conversão ({i}/{len(keys)})...",
+                    set_status=False):
                 ep["state"] = "merging"
                 job["detail"] = f"{key}: recomprimindo ({i}/{len(keys)})..."
                 try:

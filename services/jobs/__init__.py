@@ -34,7 +34,7 @@ from services.jobs import (
 from services.jobs.runtime import (
     KINDS, MAX_SELECTABLE, VIDEO_EXTENSIONS, _CONN_ERRORS, _cancelling,
     _delete_output, _event, _fail, _ffmpeg_hooks, _ffmpeg_procs,
-    _get_merge_lock, _jobs, _lookup, _map_qbit_path, _needed_torrents, _persist,
+    _get_merge_lock, _jobs, _merge_slot, _lookup, _map_qbit_path, _needed_torrents, _persist,
     _public, _qbit, _register_proc, _set, _spawn, _tasks, flush_dirty, load,
     persist_loop, poll_interval, progress_demanded, touch_progress_demand,
 )
@@ -70,7 +70,7 @@ __all__ = [
     # infraestrutura compartilhada com services/series/*
     "MAX_SELECTABLE", "_CONN_ERRORS", "_cancelling", "_dedup_results",
     "_delete_output", "_deliver_single", "_download_pct", "_event", "_fail",
-    "_ffmpeg_hooks", "_ffmpeg_procs", "_get_merge_lock", "_jobs", "_lookup",
+    "_ffmpeg_hooks", "_ffmpeg_procs", "_get_merge_lock", "_jobs", "_merge_slot", "_lookup",
     "_map_qbit_path", "_merge", "_needed_torrents", "_persist",
     "_probe_manual_file", "_public", "_qbit", "_register_proc", "_run_from_download", "_search",
     "_set", "_shape_verdict", "_slim_job", "_spawn",

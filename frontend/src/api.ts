@@ -302,7 +302,7 @@ export const MIN_RES_OPTIONS: [MinQuality['res'], string][] = [
 ]
 export const MIN_AUDIO_OPTIONS: [NonNullable<MinQuality['audio']> | null, string][] = [
   [null, 'Qualquer áudio'], ['51', '5.1+'], ['71', '7.1/Atmos'],
-  ['lossless', 'Sem perda (TrueHD/DTS-HD/FLAC)'],
+  ['lossless', 'Sem perda'],
 ]
 export const MIN_SOURCE_OPTIONS: [MinQuality['source'], string][] = [
   [null, 'Qualquer fonte'], ['webrip', 'WEBRip+'], ['webdl', 'WEB-DL+'],
@@ -586,9 +586,12 @@ export interface MergeProgress {
 /** Etapas de uma conversão. O backend rotula cada uma em progress.merge.phase
  *  e as expõe em summary().phase / lista.progress.merge_phase — o dropdown, a
  *  lista e o detalhe do job leem TODOS daqui, para dizerem a mesma coisa. */
-export type MergePhase = 'align' | 'reencode' | 'edl' | 'mux' | 'convert'
+export type MergePhase = 'queue' | 'align' | 'reencode' | 'edl' | 'mux' | 'convert'
 
 export const MERGE_PHASE: Record<MergePhase, { label: string; amber: boolean }> = {
+  // esperando a vez no lock global de conversão (só 1 roda por vez) — sem
+  // ela, quem esperava mostrava "Convertendo" e o texto da etapa anterior
+  queue: { label: 'Na fila de conversão', amber: false },
   // etapas intermediárias (âmbar): ainda não é o arquivo final saindo
   align: { label: 'Buscando alinhamento', amber: true },
   // render da EDL: cada passada com o seu nome — com um nome só, a barra

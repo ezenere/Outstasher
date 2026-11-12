@@ -7,7 +7,7 @@ from pathlib import Path
 
 from services import catalog, store, tmdb, transcode
 from services.jobs.runtime import (
-    _event, _fail, _ffmpeg_hooks, _ffmpeg_procs, _free_name, _get_merge_lock,
+    _event, _fail, _ffmpeg_hooks, _ffmpeg_procs, _free_name, _merge_slot,
     _jobs, _public, _register_proc, _set, _spawn)
 
 
@@ -83,10 +83,7 @@ async def _run_recompress(job: dict, src: Path, opts: "transcode.ConvertOptions 
                 job["movie"] = await tmdb.details(job["tmdb_id"], job["language"])
             except Exception:  # noqa: BLE001 - metadado é cosmético aqui
                 pass
-        lock = _get_merge_lock()
-        if lock.locked():
-            _set(job, "merging", "Na fila de conversão...")
-        async with lock:
+        async with _merge_slot(job):
             await _recompress(job, src, tmp, opts)
     except asyncio.CancelledError:
         tmp.unlink(missing_ok=True)  # cancelado: nada de lixo (o original nem foi tocado)

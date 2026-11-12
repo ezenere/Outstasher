@@ -740,15 +740,15 @@ export default function SeriesModal({
         </div>
 
         {/* ações */}
-        <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
+        <div className="mt-4 flex items-center justify-end gap-2">
           {!hasSelection && (
-            <span className="mr-auto text-xs text-zinc-500">Selecione temporadas ou episódios.</span>
+            <span className="mr-auto min-w-0 truncate text-xs text-zinc-500">Selecione temporadas ou episódios.</span>
           )}
           <button
             onClick={() => start('original')}
             disabled={!hasSelection || starting || !destinations.length}
             title="Baixa só a versão original de cada episódio, sem merge"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
           >
             <MediaVideo width={15} height={15} /> Só original
           </button>
@@ -756,7 +756,7 @@ export default function SeriesModal({
             onClick={() => start('dubbed')}
             disabled={!hasSelection || starting || !destinations.length}
             title="Baixa só a versão dublada de cada episódio, sem merge"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
           >
             <SoundHigh width={15} height={15} /> Só dublado
           </button>
@@ -764,7 +764,7 @@ export default function SeriesModal({
             onClick={() => start('both')}
             disabled={!hasSelection || starting || !destinations.length}
             title="Baixa as versões original e dublada de cada episódio e faz o merge"
-            className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
+            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
           >
             <Download width={15} height={15} /> Baixar e fazer merge
           </button>

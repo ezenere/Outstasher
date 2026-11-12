@@ -27,6 +27,8 @@ export function localInput(offsetHours = 1): string {
 }
 
 const fieldCls = 'rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm'
+// divide a linha por igual: a opção mais longa não empurra o select para baixo
+const minSelCls = `${fieldCls} min-w-0 flex-1`
 
 /** "Agendar download [liga/desliga]" + data/hora quando ligado. */
 export function ScheduleField({ value, onChange, label = 'Agendar download' }: {
@@ -88,18 +90,18 @@ function MinRow({ label, value, onChange }: {
   const set = (r: MinQuality['res'], s: MinQuality['source'], a: MinQuality['audio']) =>
     onChange(r || s || a ? { res: r, source: s, audio: a } : null)
   return (
-    <div className="flex flex-wrap items-center gap-2 text-sm">
-      <span className="w-20 text-zinc-400">{label}</span>
-      <select value={res ?? ''} className={fieldCls}
+    <div className="flex items-center gap-2 text-sm">
+      <span className="w-20 shrink-0 text-zinc-400">{label}</span>
+      <select value={res ?? ''} className={minSelCls}
         onChange={(e) => set((e.target.value || null) as MinQuality['res'], source, audio)}>
         {MIN_RES_OPTIONS.map(([v, l]) => <option key={l} value={v ?? ''}>{l}</option>)}
       </select>
-      <select value={source ?? ''} className={fieldCls}
+      <select value={source ?? ''} className={minSelCls}
         onChange={(e) => set(res, (e.target.value || null) as MinQuality['source'], audio)}>
         {MIN_SOURCE_OPTIONS.map(([v, l]) => <option key={l} value={v ?? ''}>{l}</option>)}
       </select>
-      <select value={audio ?? ''} className={fieldCls}
-        title="Pelo nome do release: quem não informa o áudio não passa"
+      <select value={audio ?? ''} className={minSelCls}
+        title="Pelo nome do release: quem não informa o áudio não passa. Sem perda = TrueHD, DTS-HD MA ou FLAC"
         onChange={(e) => set(res, source, (e.target.value || null) as MinQuality['audio'])}>
         {MIN_AUDIO_OPTIONS.map(([v, l]) => <option key={l} value={v ?? ''}>{l}</option>)}
       </select>

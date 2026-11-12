@@ -9,6 +9,7 @@ Camada de baixo: não importa nenhum outro módulo do pacote.
 
 import asyncio
 import atexit
+import contextlib
 import subprocess
 import threading
 import time
@@ -168,6 +169,36 @@ def _get_merge_lock() -> asyncio.Lock:
     return _merge_lock
 
 
+def _merge_busy(lock: asyncio.Lock) -> bool:
+    """O acquire vai esperar? `locked()` sozinho mente no repasse: quem termina
+    solta o lock e acorda o próximo da fila, mas esse próximo ainda não rodou
+    — o lock parece livre e o acquire de quem olhou nesse instante entra na
+    fila ATRÁS dele (o Lock é justo). Foi assim que um job de série esperando
+    a vez ficava com "Gravando o arquivo final..." e "Convertendo" na tela."""
+    waiters = getattr(lock, "_waiters", None) or ()
+    return lock.locked() or any(not w.cancelled() for w in waiters)
+
+
+@contextlib.asynccontextmanager
+async def _merge_slot(job: dict, detail: str = "Na fila de conversão...",
+                      set_status: bool = True):
+    """O lock global de conversão com a espera visível: se for esperar, o job
+    mostra a fila (detalhe + etapa `queue`) em vez da etapa anterior; ao
+    entrar, a etapa da fila sai — quem roda carimba a sua."""
+    lock = _get_merge_lock()
+    progress = job.setdefault("progress", {})
+    if _merge_busy(lock):
+        if set_status:
+            _set(job, "merging", detail)
+        else:
+            job["detail"] = detail
+        progress["merge"] = {"phase": PHASE_QUEUE}
+    async with lock:
+        if (progress.get("merge") or {}).get("phase") == PHASE_QUEUE:
+            progress["merge"] = None
+        yield
+
+
 def _register_proc(job_id: str):
     """on_start para o merger: guarda o Popen do ffmpeg deste job, para que o
     cancel() possa matá-lo. Retorna a função a passar como on_start."""
@@ -185,6 +216,7 @@ PHASE_EDL = "edl"          # remontando a faixa dublada (arquivo intermediário)
 PHASE_REENCODE = "reencode"  # vídeo re-encodado com keyframe nos pontos de corte
 PHASE_MUX = "mux"          # gravando o arquivo final (cópia de tudo)
 PHASE_CONVERT = "convert"  # merge/render/recompressão de fato
+PHASE_QUEUE = "queue"      # esperando a vez na fila de conversão (lock global)
 
 
 def _stage(job: dict, phase: str):

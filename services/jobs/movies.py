@@ -12,7 +12,7 @@ from pathlib import Path
 from services import candidates, merger, store, tmdb, transcode
 from services.jobs import advanced, delivery, downloads, schedule, search
 from services.jobs.runtime import (
-    KINDS, _TERMINAL_STATUSES, _delete_job, _event, _fail, _get_merge_lock,
+    KINDS, _TERMINAL_STATUSES, _delete_job, _event, _fail, _merge_slot,
     _jobs, _needed_torrents, _persist, _public, _set, _spawn)
 
 
@@ -211,10 +211,7 @@ async def _run_manual(job: dict, video_file: Path, audio_file: Path):
         movie = await tmdb.details(job["tmdb_id"], job["language"])
         job["movie"] = movie
         _event(job, "info", f"Filme: {movie['original_title']} ({movie['year']})")
-        lock = _get_merge_lock()
-        if lock.locked():
-            _set(job, "merging", "Na fila de conversão...")
-        async with lock:
+        async with _merge_slot(job):
             await delivery._merge(job, video_file, audio_file)
     except asyncio.CancelledError:
         raise
@@ -355,10 +352,7 @@ async def _run_from_download(job: dict):
         job["src_roots"] = {kind: content for kind, content in paths.items()}
         # merge (ffmpeg) e entrega single (hardlink/cópia) entram na mesma fila:
         # só 1 por vez, para uma cópia grande não concorrer com uma conversão.
-        lock = _get_merge_lock()
-        if lock.locked():
-            _set(job, "merging", "Na fila de conversão...")
-        async with lock:
+        async with _merge_slot(job):
             if len(_needed_torrents(job)) == 1:
                 await delivery._deliver_single(job, files)
             else:

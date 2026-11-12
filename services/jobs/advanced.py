@@ -13,7 +13,7 @@ from services import merger
 from services.series import subs as ext_subs
 from services.jobs import delivery, runtime
 from services.jobs.runtime import (
-    _event, _fail, _ffmpeg_hooks, _ffmpeg_procs, _get_merge_lock, _jobs,
+    _event, _fail, _ffmpeg_hooks, _ffmpeg_procs, _merge_slot, _jobs,
     _map_qbit_path, _public, _register_proc, _set, _spawn)
 
 
@@ -194,10 +194,7 @@ async def _render_advanced(job: dict):
     adv = job["advanced"]
     output = await delivery._movie_output(job)
     job["output"] = str(output)
-    lock = _get_merge_lock()
-    if lock.locked():
-        _set(job, "merging", "Na fila de conversão...")
-    async with lock:
+    async with _merge_slot(job):
         _set(job, "merging", "Renderizando a EDL...")
         # preparo do render (sondagem, legendas, tela preta) antes da 1ª passada
         runtime._stage(job, runtime.PHASE_EDL)
@@ -314,10 +311,7 @@ async def _resume_merge(job: dict, video_file: Path, audio_file: Path):
     """Retoma o merge pausado pelo drift, agora com allow_drift=True (a medição
     das janelas se repete, mas isso custa segundos — o caro é o re-encode)."""
     try:
-        lock = _get_merge_lock()
-        if lock.locked():
-            _set(job, "merging", "Na fila de conversão...")
-        async with lock:
+        async with _merge_slot(job):
             await delivery._merge(job, video_file, audio_file, allow_drift=True)
     except asyncio.CancelledError:
         raise
