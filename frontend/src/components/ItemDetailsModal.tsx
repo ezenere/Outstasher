@@ -6,7 +6,7 @@ import {
 } from '../api'
 import { AlignTimeline } from './AlignTimeline'
 import { EpisodeBadge } from './SeriesJobSections'
-import { Badge } from './ui'
+import { Badge, useScrollLock } from './ui'
 
 /** Ficha do episódio (ou do filme, sem `ep`): arquivos e de onde vieram,
  *  faixas de cada arquivo, como foi processado (método, offsets, timeline do
@@ -172,6 +172,7 @@ export default function ItemDetailsModal({ jobId, ep, onClose }: {
   const [probe, setProbe] = useState<Record<string, ProbeFile> | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [probeErr, setProbeErr] = useState<string | null>(null)
+  useScrollLock()  // só o conteúdo da ficha rola
 
   useEffect(() => {
     let dead = false
