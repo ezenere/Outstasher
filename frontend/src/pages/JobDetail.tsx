@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   Check, Download, Folder, Magnet, MediaVideo, NavArrowLeft, Play, Refresh,
   Settings as SettingsIcon, SkipNext, SoundHigh, Trash, WarningTriangle,
 } from 'iconoir-react'
-import { convertSummary, mergePhase, post, prog, researchJob, type Job, type JobEvent, type JobProgress, type AdvancedMergeConfig } from '../api'
+import { convertSummary, mergePhase, post, prog, researchJob, type Job, type JobEvent, type JobProgress, type AdvancedMergeConfig, type LiveTimeline } from '../api'
 import { api } from '../api'
 import { Badge, CandidatesTable, ClampText, Collapsible, Elapsed, Empty, KindTags, MergeBar, ProgressBar, alignRole } from '../components/ui'
 import { useDialog } from '../components/Dialog'
@@ -12,6 +12,8 @@ import AdvancedMergePolicy from '../components/AdvancedMergePolicy'
 import { SeriesEpisodes, SeriesGate, SeriesReport, SeriesTorrents } from '../components/SeriesJobSections'
 import { SchedulePanel, useSearchRetryGlobal } from '../components/SearchOptions'
 import AlignmentReview from '../components/AlignmentReview'
+import { AlignTimeline } from '../components/AlignTimeline'
+import ItemDetailsModal from '../components/ItemDetailsModal'
 import StallSwitchControl, { StallClockLine } from '../components/StallSwitch'
 import { jobTitle, removeJob } from './Jobs'
 
@@ -61,13 +63,26 @@ export default function JobDetail() {
   // Só ativo quando há progresso mudando (baixando/convertendo); em outros
   // estados o reload de 5s já basta. Só remenda status/detail/progress/output.
   const live = job?.status === 'downloading' || job?.status === 'merging'
+  // timeline do alinhamento/render em curso: o tick manda a versão que já
+  // tem e só recebe a lista de trechos de novo quando ela muda
+  const [liveTl, setLiveTl] = useState<LiveTimeline | null>(null)
+  const tlRev = useRef<number | null>(null)
+  const [movieDetails, setMovieDetails] = useState(false)
   useEffect(() => {
     if (!id || !live) return
     let stop = false
     async function tick() {
       try {
-        const p = await api<JobProgress>(`/api/jobs/${id}/progress`)
+        const q = tlRev.current != null ? `?tl_rev=${tlRev.current}` : ''
+        const p = await api<JobProgress>(`/api/jobs/${id}/progress${q}`)
         if (stop) return
+        if (!p.timeline) {
+          tlRev.current = null
+          setLiveTl(null)
+        } else if (!p.timeline.unchanged) {
+          tlRev.current = p.timeline.rev
+          setLiveTl(p.timeline)
+        }
         setJob((cur) =>
           cur ? { ...cur, status: p.status, detail: p.detail, progress: p.progress,
                   output: p.output, merge_started_at: p.merge_started_at,
@@ -624,10 +639,28 @@ export default function JobDetail() {
                 title="Tempo desde o início da conversão/cópia"
               />
             )}
+            {job.media_type !== 'tv' && (
+              <button onClick={() => setMovieDetails(true)}
+                className="ml-auto rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800">
+                Detalhes da conversão
+              </button>
+            )}
           </div>
           {job.status === 'merging' && job.progress?.merge && <MergeBar p={job.progress.merge} />}
+          {/* alinhamento/render ao vivo: o que o alinhador achou nos dois
+              arquivos e, no render, a linha da saída com os cortes */}
+          {job.status === 'merging' && liveTl && (liveTl.segments || liveTl.plan
+            || Object.keys(liveTl.scan ?? {}).length > 0) && (
+            <div className="mt-3">
+              {liveTl.key && <div className="mb-1 font-mono text-xs text-zinc-400">{liveTl.key}</div>}
+              <AlignTimeline segments={liveTl.segments} durDub={liveTl.dur_dub}
+                durOrig={liveTl.dur_orig} scan={liveTl.scan} plan={liveTl.plan}
+                window={liveTl.window} stage={liveTl.stage} />
+            </div>
+          )}
         </section>
       )}
+      {movieDetails && <ItemDetailsModal jobId={job.id} onClose={() => setMovieDetails(false)} />}
 
       {/* série: todos os torrents em andamento + estado por episódio */}
       {job.media_type === 'tv' && <SeriesTorrents job={job} onChanged={reload} />}

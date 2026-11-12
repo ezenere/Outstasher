@@ -1102,13 +1102,37 @@ async def job_detail(job_id: str):
 
 
 @app.get("/api/jobs/{job_id}/progress")
-async def job_progress(job_id: str):
+async def job_progress(job_id: str, tl_rev: int | None = None):
     """Só status/detail/progresso — tick de 1s do detalhe do job."""
     jobs.touch_progress_demand()  # alguém acompanhando: watchdog acelera
-    p = jobs.progress(job_id)
+    p = jobs.progress(job_id, tl_rev)
     if not p:
         raise HTTPException(404, "Job não encontrado")
     return p
+
+
+@app.get("/api/jobs/{job_id}/details")
+async def job_details(job_id: str, ep: str | None = None):
+    """Ficha do episódio (ep=S01E02) ou do filme (sem ep): arquivos,
+    processamento, EDL, plano do render e log do episódio."""
+    from services.jobs import details
+    d = await asyncio.to_thread(
+        details.episode if ep else details.movie, *((job_id, ep) if ep else (job_id,)))
+    if d is None:
+        raise HTTPException(404, "Episódio/job não encontrado")
+    return d
+
+
+@app.get("/api/jobs/{job_id}/details/probe")
+async def job_details_probe(job_id: str, ep: str | None = None):
+    """Faixas de cada arquivo da ficha (ffprobe) — à parte: sondar arquivo
+    grande em disco lento não pode segurar a abertura da ficha."""
+    from services.jobs import details
+    d = await asyncio.to_thread(
+        details.episode if ep else details.movie, *((job_id, ep) if ep else (job_id,)))
+    if d is None:
+        raise HTTPException(404, "Episódio/job não encontrado")
+    return await asyncio.to_thread(details.probe_paths, d["files"])
 
 
 @app.post("/api/jobs/{job_id}/select")

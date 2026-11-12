@@ -10,6 +10,7 @@ Camada de baixo: não importa nenhum outro módulo do pacote.
 import asyncio
 import atexit
 import contextlib
+import itertools
 import subprocess
 import threading
 import time
@@ -247,6 +248,99 @@ def _ffmpeg_hooks(job: dict, phase: str = PHASE_CONVERT):
     return log, on_progress
 
 
+# -------------------- ficha do episódio: o que acontece com ele --------------------
+# Episódio (ou "" no filme) em curso por job: os eventos ganham data.ep com
+# ele — é assim que a ficha recorta o log de UM episódio num lote de 300.
+_current_ep: dict[str, str] = {}
+
+
+def _begin_episode(job: dict, key: str):
+    _current_ep[job["id"]] = key
+
+
+def _end_episode(job: dict):
+    _current_ep.pop(job["id"], None)
+    _timelines.pop(job["id"], None)
+
+
+def _report(job: dict, key: str | None = None, reset: bool = False, **fields):
+    """Junta campos no relatório do episódio (key) ou do filme (key None).
+    Diagnóstico: falhar aqui nunca derruba o merge."""
+    try:
+        store.update_report(job["id"],
+                            store.REPORT_MOVIE_KEY if key is None else key,
+                            fields, reset=reset)
+    except Exception as e:  # noqa: BLE001
+        print(f"[report] {job.get('id')} {key}: {type(e).__name__}: {e}")
+
+
+# Timeline AO VIVO do alinhamento e do render (só memória — a rota de
+# progresso serve): leitura dos dois arquivos, os trechos achados a cada
+# etapa do refino e, no render, o plano de fatias e cortes. `rev` sobe a cada
+# mudança; o polling manda o rev que já tem e só recebe a lista de novo
+# quando ela mudou (a lista de um episódio tem centenas de trechos).
+_timelines: dict[str, dict] = {}
+# rev global (não por timeline): o episódio seguinte começa uma timeline nova,
+# e um rev que recomeçasse do zero podia coincidir com o que a tela já tinha
+_tl_seq = itertools.count(1)
+
+
+def _tl(job: dict, key: str | None) -> dict:
+    tl = _timelines.get(job["id"])
+    if tl is None or tl.get("key") != key:
+        tl = {"key": key, "rev": 0, "stage": None, "scan": {},
+              "dur_dub": None, "dur_orig": None, "segments": None,
+              "plan": None, "window": None}
+        _timelines[job["id"]] = tl
+    return tl
+
+
+def _tl_bump(tl: dict, **fields):
+    tl.update(fields)
+    tl["rev"] = next(_tl_seq)
+
+
+def timeline_scan(job: dict, key: str | None, info: dict):
+    """Progresso da leitura (fingerprint) de um dos dois arquivos."""
+    tl = _tl(job, key)
+    lado = "dub" if info.get("label") == "dublado" else "orig"
+    scan = dict(tl["scan"])
+    scan[lado] = round(float(info.get("pct") or 0.0), 1)
+    _tl_bump(tl, scan=scan, stage="Lendo os dois arquivos")
+
+
+def timeline_segments(job: dict, key: str | None, segs, stage: str,
+                      dur_dub: float | None = None, dur_orig: float | None = None,
+                      window=None):
+    """Trechos achados até aqui (Segments ou dicts da EDL)."""
+    from services.series.align import edl as edl_mod
+    tl = _tl(job, key)
+    lista = [s if isinstance(s, dict) else edl_mod._seg_dict(s) for s in segs]
+    fields = {"segments": lista, "stage": stage,
+              "scan": {"dub": 100.0, "orig": 100.0}}
+    if dur_dub:
+        fields["dur_dub"] = round(float(dur_dub), 3)
+    if dur_orig:
+        fields["dur_orig"] = round(float(dur_orig), 3)
+    if window is not None:
+        fields["window"] = list(window)
+    _tl_bump(tl, **fields)
+
+
+def timeline_plan(job: dict, key: str | None, plan: dict, stage: str):
+    tl = _tl(job, key)
+    _tl_bump(tl, plan=plan, stage=stage)
+
+
+def timeline_view(job_id: str, have_rev: int | None = None) -> dict | None:
+    tl = _timelines.get(job_id)
+    if tl is None:
+        return None
+    if have_rev is not None and have_rev == tl["rev"]:
+        return {"key": tl["key"], "rev": tl["rev"], "unchanged": True}
+    return dict(tl)
+
+
 def _kill_ffmpeg(job_id: str):
     """Mata o ffmpeg em andamento deste job (se houver). Chamado ao cancelar:
     o subprocess roda numa thread, então cancelar a task não o interrompe."""
@@ -437,6 +531,8 @@ def _forget(job_id: str):
         _removed.add(job_id)
         _dirty.pop(job_id, None)
         _last_persist.pop(job_id, None)
+    _current_ep.pop(job_id, None)
+    _timelines.pop(job_id, None)
 
 
 def _delete_job(job_id: str):
@@ -474,6 +570,10 @@ def _add_event(job: dict, kind: str, message: str, data=None) -> bool:
     if job["id"] in _removed:
         return False  # job apagado: evento tardio viraria linha órfã
     ev = {"ts": datetime.now().isoformat(timespec="seconds"), "kind": kind, "message": message}
+    ep = _current_ep.get(job["id"])
+    if data is None and ep:
+        # o episódio em curso: a ficha dele recorta o log por esta marca
+        data = {"ep": ep}
     if data is not None:
         ev["data"] = data
     store.add_event(job["id"], ev)

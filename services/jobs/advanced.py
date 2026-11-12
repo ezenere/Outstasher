@@ -71,6 +71,12 @@ async def _pause_for_drift(job: dict, files: dict, e: "merger.VersionMismatch"):
         "tau1_ms": e.tau1_ms, "tau2_ms": e.tau2_ms,
     }
     job["drift_confirm"] = gate
+    runtime._report(job, None, reset=True, method="mismatch",
+                    method_label="Offsets divergentes — aguardando decisão",
+                    verdict=getattr(e, "verdict", None),
+                    windows=[[t, round(o / 1000, 4), q] for t, o, q in e.windows],
+                    sources={"original": str(files["video"]),
+                             "dubbed": str(files["audio"])})
     _set(job, "awaiting",
          f"⚠️ Possível versão/corte diferente — {e.summary}. "
          f"Medindo o perfil do offset...")
@@ -79,6 +85,7 @@ async def _pause_for_drift(job: dict, files: dict, e: "merger.VersionMismatch"):
             _offset_profile, str(files["video"]), str(files["audio"]))
         gate["profile"] = profile
         gate["verdict"] = verdict
+        runtime._report(job, None, drift_profile=profile, drift_verdict=verdict)
         label = {"drift": "drift (muda aos poucos)", "cut": "corte (salto entre patamares)",
                  "flat": "constante nas janelas medidas", "mixed": "misto"}.get(verdict, "indefinido")
         _event(job, "merge", f"Perfil do offset em {len(profile)} janela(s): {label} — "
@@ -143,17 +150,28 @@ async def _run_advanced(job: dict, video_file: Path, audio_file: Path):
             job["detail"] = (f"Buscando alinhamento ({papel}) — "
                              f"{info['pct']:.0f}%")
             on_progress(info)
+            runtime.timeline_scan(job, None, info)
 
+        def on_stage(lista, rotulo):   # thread do refino
+            runtime.timeline_segments(job, None, lista, rotulo)
+
+        runtime._report(job, None, method="edl",
+                        method_label="Alinhamento por conteúdo (EDL)",
+                        sources={"original": orig, "dubbed": dub})
         edl_dict = await asyncio.to_thread(engine.align_pair, dub, orig, "filme",
                                            on_wait=on_wait, on_progress=on_fp)
         segs = edl_mod.segments(edl_dict)
+        runtime.timeline_segments(
+            job, None, segs, "Casamento pelas imagens",
+            edl_dict["source_dub"]["duration"], edl_dict["source_orig"]["duration"],
+            window=edl_dict.get("b_window"))
         dub_a, orig_a = await asyncio.to_thread(_alignment_pair, dub, orig)
         # fingerprint terminou: some a barra, fica a etapa (o refino por
         # áudio ainda é alinhamento — num 4K leva minutos)
         runtime._stage(job, runtime.PHASE_ALIGN)
         job["detail"] = "Alinhamento avançado: refino por áudio..."
         segs = await asyncio.to_thread(
-            refine.refine_offsets, segs, dub, dub_a, orig, orig_a, log)
+            refine.refine_offsets, segs, dub, dub_a, orig, orig_a, log, on_stage)
         # tela preta dos trechos sem dublagem medida já aqui: vai na EDL, a
         # revisão mostra e o render decide sem decodificar de novo
         from services import advanced_merge
@@ -162,6 +180,7 @@ async def _run_advanced(job: dict, video_file: Path, audio_file: Path):
                                 edl_dict["source_orig"]["duration"], log)
         dur_a = edl_dict["source_dub"]["duration"]
         segs, needs = rules.apply_rules(segs, job.get("review_rules") or [], dur_a)
+        runtime.timeline_segments(job, None, segs, "Alinhamento pronto")
         extras = {k: edl_dict[k] for k in ("merged_side", "a_window", "b_window", "note")
                   if k in edl_dict}
         edl_dict = edl_mod.build(segs, "filme", dub, dur_a, orig,
@@ -186,6 +205,8 @@ async def _run_advanced(job: dict, video_file: Path, audio_file: Path):
         _fail(job, f"conflito de alinhamento: {e}")
     except Exception as e:  # noqa: BLE001
         _fail(job, f"{type(e).__name__}: {e}")
+    finally:
+        runtime._timelines.pop(job["id"], None)
 
 
 async def _render_advanced(job: dict):
@@ -236,15 +257,31 @@ async def _render_advanced(job: dict):
             "dub_lang": merger.canonical_lang(merger.LANG_ISO.get(
                 job["language"], job["language"])),
         }
+        runtime.timeline_segments(
+            job, None, adv["edl"].get("segments") or [], "Renderizando a EDL",
+            dur_a, dur_b, window=adv["edl"].get("b_window"))
+
+        def on_plan(plan):   # thread do render
+            runtime.timeline_plan(job, None, plan, "Renderizando a EDL")
+
         try:
             info = await asyncio.to_thread(
                 render_mod.render, segs, adv["audio_file"], adv["video_file"],
                 str(output), job["language"], log, on_progress,
                 _register_proc(job["id"]), adv["edl"].get("b_window"),
-                externas, movie.get("original_language"), **extra_kw)
+                externas, movie.get("original_language"), on_plan=on_plan,
+                **extra_kw)
         finally:
             _ffmpeg_procs.pop(job["id"], None)
+            runtime._timelines.pop(job["id"], None)
         job["progress"]["merge"] = None
+        runtime._report(job, None, method="edl",
+                        method_label="Alinhamento por conteúdo (EDL)",
+                        plan=(info or {}).get("plan"),
+                        subs_muxed=(info or {}).get("subs_muxed"),
+                        sources={"original": adv["video_file"],
+                                 "dubbed": adv["audio_file"]},
+                        finished_at=datetime.now().isoformat(timespec="seconds"))
         if v_subs or a_subs:
             _event(job, "merge",
                    f"{(info or {}).get('subs_muxed') or 0} legenda(s) "

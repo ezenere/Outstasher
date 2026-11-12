@@ -29,6 +29,7 @@ O pacote (quem chama usa só `from services import store` e `store.X`):
   candidates     candidatos de busca
   series         episódios e torrents (série)
   edls           EDLs do alinhador
+  reports        relatório do processamento por episódio/filme (a ficha)
   scalars        escalares do job e metadados do TMDB (os codecs; o SQL
                  dessas linhas em scalar_rows)
   common         utilitários das seções (JSON, hash, lotes de ids)
@@ -64,6 +65,9 @@ from .edls import (
     _legacy_edls, _profile_blob, _profile_from_blob,
 )
 from .events import MAX_EVENTS_RETURNED, add_event, load_events
+from .reports import (
+    REPORT_MOVIE_KEY, load_episode_events, load_report, update_report,
+)
 from .jobs import (
     LIST_SECTIONS, SECTIONS, _apply_upsert, _prepare_upsert, _remember,
     count_jobs_by_status, delete_job, error_jobs_for, get_job, load_jobs,

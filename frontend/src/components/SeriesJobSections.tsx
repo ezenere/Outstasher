@@ -11,6 +11,7 @@ import {
   type TorrentChoice,
 } from '../api'
 import AlignmentReview from './AlignmentReview'
+import ItemDetailsModal from './ItemDetailsModal'
 import { useDialog } from './Dialog'
 import StallSwitchControl, { StallClockLine } from './StallSwitch'
 import { CandidatesTable, Collapsible, ProgressBar, Toggle } from './ui'
@@ -36,7 +37,7 @@ const STATE_TONE: Partial<Record<EpisodeState, string>> = {
   skipped_mismatch: 'bg-zinc-800 text-zinc-400',
 }
 
-function EpisodeBadge({ state }: { state: EpisodeState }) {
+export function EpisodeBadge({ state }: { state: EpisodeState }) {
   return (
     <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${
       STATE_TONE[state] ?? 'bg-zinc-800 text-zinc-300'}`}
@@ -48,12 +49,16 @@ function EpisodeBadge({ state }: { state: EpisodeState }) {
 
 /** Tabela de episódios do job de série (estado por episódio). */
 export function SeriesEpisodes({ job }: { job: Job }) {
+  // ficha do episódio aberta (clique na linha)
+  const [open, setOpen] = useState<string | null>(null)
   const eps = Object.entries(job.episodes ?? {})
   if (!eps.length) return null
   return (
     <section className="mt-6">
+      {open && <ItemDetailsModal jobId={job.id} ep={open} onClose={() => setOpen(null)} />}
       <h2 className="mb-2 text-sm font-semibold text-zinc-400">
         Episódios ({eps.length})
+        <span className="ml-2 text-xs font-normal text-zinc-500">clique num episódio para ver a ficha</span>
       </h2>
       <div className="max-h-96 overflow-auto rounded-xl border border-zinc-800">
         <table className="w-full border-collapse text-sm">
@@ -67,7 +72,8 @@ export function SeriesEpisodes({ job }: { job: Job }) {
           </thead>
           <tbody>
             {eps.map(([key, ep]) => (
-              <tr key={key} className="border-t border-zinc-800/60">
+              <tr key={key} onClick={() => setOpen(key)} title="Ver a ficha do episódio"
+                className="cursor-pointer border-t border-zinc-800/60 hover:bg-zinc-800/40">
                 <td className="px-3 py-1.5 font-mono text-xs">{key}</td>
                 <td className="max-w-72 truncate px-3 py-1.5 text-zinc-300" title={ep.name ?? undefined}>
                   {ep.name ?? '—'}

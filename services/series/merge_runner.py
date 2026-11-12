@@ -51,6 +51,7 @@ async def merge_all(job: dict):
                 set_status=False):
             ep["state"] = "merging"
             job["detail"] = f"{key}: fazendo merge ({i}/{len(keys)})..."
+            jobs.runtime._begin_episode(job, key)
             try:
                 if pipeline.single_role(job):
                     # só original / só dublado: não há o que alinhar
@@ -98,9 +99,16 @@ async def merge_all(job: dict):
             finally:
                 job["progress"]["merge"] = None
                 job["output"] = None
+                jobs.runtime._report(job, key, finished_at=_now(),
+                                     result=ep["state"], error=ep.get("error"))
+                jobs.runtime._end_episode(job)
         jobs._persist(job)
 
     await _wrap_up(job)
+
+
+def _now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
 
 
 async def _wrap_up(job: dict):
@@ -151,7 +159,10 @@ async def _align_episode(job: dict, key: str, ep: dict):
         job["detail"] = (f"{key}: buscando alinhamento ({papel}) — "
                          f"{info['pct']:.0f}%")
         on_progress(info)
+        jobs.runtime.timeline_scan(job, key, info)
 
+    jobs.runtime._report(job, key, method="edl",
+                         method_label="Alinhamento por conteúdo (EDL)")
     try:
         edl_dict = await asyncio.to_thread(
             engine.align_pair, dub, orig, key, on_wait=on_wait,
@@ -165,6 +176,15 @@ async def _align_episode(job: dict, key: str, ep: dict):
         return
 
     segs = edl_mod.segments(edl_dict)
+    dur_dub = edl_dict["source_dub"]["duration"]
+    dur_orig = edl_dict["source_orig"]["duration"]
+
+    def on_stage(lista, rotulo):   # thread do refino
+        jobs.runtime.timeline_segments(job, key, lista, rotulo)
+
+    jobs.runtime.timeline_segments(
+        job, key, segs, "Casamento pelas imagens", dur_dub, dur_orig,
+        window=edl_dict.get("b_window"))
     # ffprobe é bloqueante (subprocess): fora do event loop, como o resto.
     # Para MEDIR usa o par de mesma língua (faixa inglesa do dual áudio vs
     # original): correlação bem mais nítida do que dublagem vs original
@@ -173,7 +193,8 @@ async def _align_episode(job: dict, key: str, ep: dict):
     # ainda é alinhamento)
     jobs.runtime._stage(job, jobs.runtime.PHASE_ALIGN)
     segs = await asyncio.to_thread(
-        refine.refine_offsets, segs, dub, dub_a, orig, orig_a, log)
+        refine.refine_offsets, segs, dub, dub_a, orig, orig_a, log,
+        on_stage)
     # tela preta dos trechos sem dublagem medida já aqui: vai na EDL, a
     # revisão mostra e o render decide sem decodificar de novo
     from services import advanced_merge
@@ -182,6 +203,7 @@ async def _align_episode(job: dict, key: str, ep: dict):
                             edl_dict["source_orig"]["duration"], log)
     dur_a = edl_dict["source_dub"]["duration"]
     segs, needs = rules.apply_rules(segs, job.get("review_rules") or [], dur_a)
+    jobs.runtime.timeline_segments(job, key, segs, "Alinhamento pronto")
     # o rebuild só reescreve os segmentos: os metadados do arquivo FUNDIDO
     # (janela/nota) têm que sobreviver — o render corta o original por eles
     extras = {k: edl_dict[k] for k in ("merged_side", "a_window", "b_window", "note")
@@ -327,16 +349,29 @@ async def _render_from_edl(job: dict, key: str, ep: dict):
         "dub_lang": merger.canonical_lang(merger.LANG_ISO.get(
             job["language"], job["language"])),
     }
+    # a timeline ao vivo mostra a EDL que vai ser renderizada (episódio que
+    # veio da revisão não passou pelo alinhador nesta rodada) e o plano
+    jobs.runtime.timeline_segments(
+        job, key, ep["edl"].get("segments") or [], "Renderizando a EDL",
+        dur_a, dur_b, window=ep["edl"].get("b_window"))
+
+    def on_plan(plan):   # thread do render
+        jobs.runtime.timeline_plan(job, key, plan, "Renderizando a EDL")
+
     try:
         info = await asyncio.to_thread(
             render_mod.render, segs, ep["src"]["dubbed"],
             ep["src"]["original"], str(output), job["language"],
             log, on_progress, jobs._register_proc(job["id"]),
             ep["edl"].get("b_window"), externas,
-            m.get("original_language"), **extra_kw)
+            m.get("original_language"), on_plan=on_plan, **extra_kw)
     finally:
         jobs._ffmpeg_procs.pop(job["id"], None)
     ep["output"] = str(output)
+    jobs.runtime._report(job, key, method="edl",
+                         method_label="Alinhamento por conteúdo (EDL)",
+                         plan=(info or {}).get("plan"),
+                         subs_muxed=(info or {}).get("subs_muxed"))
     if externas["orig"] or externas["dub"]:
         n = (info or {}).get("subs_muxed") or 0
         jobs._event(job, "merge",
@@ -355,6 +390,7 @@ async def _merge_episode(job: dict, key: str, ep: dict, convert_opts):
     # rápido não tem como estar certo — e a validação em janelas pode
     # até "concordar" por acaso e entregar lixo. Vai direto para o alinhador.
     from services.series.align import classify as _cls, engine as _eng
+    jobs.runtime._report(job, key, reset=True, started_at=_now())
     d_a, d_b = await asyncio.gather(
         asyncio.to_thread(_eng._duration, ep["src"]["dubbed"]),
         asyncio.to_thread(_eng._duration, ep["src"]["original"]))
@@ -373,6 +409,10 @@ async def _merge_episode(job: dict, key: str, ep: dict, convert_opts):
     constant, pts = await asyncio.to_thread(
         _ref.scan_constant_offset, ep["src"]["dubbed"], dub_a,
         ep["src"]["original"], orig_a, min(d_a, d_b))
+    jobs.runtime._report(
+        job, key, durations={"dub": round(d_a, 3), "orig": round(d_b, 3)},
+        scan={"constant": bool(constant),
+              "points": [[round(t, 2), round(o, 4), round(q, 1)] for t, o, q in pts]})
     if not constant:
         offs = ", ".join(f"{t / 60:.0f}min {o * 1000:+.0f}ms" for t, o, _ in pts)
         raise NeedsContentAlign(f"offset varia ao longo do episódio ({offs})")
@@ -398,6 +438,17 @@ async def _merge_episode(job: dict, key: str, ep: dict, convert_opts):
     finally:
         jobs._ffmpeg_procs.pop(job["id"], None)
     ep["output"] = result.output
+    if result.linked:
+        metodo = ("hardlink", "Hardlink — o melhor vídeo já tinha o áudio alvo")
+    elif result.verdict == "drift":
+        metodo = ("drift", "Drift linear corrigido (áudio re-encodado)")
+    else:
+        metodo = ("offset", "Offset constante (stream copy)")
+    jobs.runtime._report(job, key, method=metodo[0], method_label=metodo[1],
+                         offset_ms=result.offset_ms, mode=result.mode,
+                         verdict=result.verdict,
+                         windows=[list(w) for w in result.windows],
+                         notes=result.notes or None)
     if result.drift_warning:
         # com o episódio na frente: num lote, o aviso solto no log não diz qual
         jobs._event(job, "merge", f"{key}: {result.drift_warning}")
@@ -421,6 +472,7 @@ async def _deliver_episode(job: dict, key: str, ep: dict, convert_opts):
     from services.series import pipeline
     role = pipeline.single_role(job)
     src = Path(ep["src"][role])
+    jobs.runtime._report(job, key, reset=True, started_at=_now())
     m = job["movie"]
     tag = "orig" if role == "original" else job["language"]
     stem = naming.episode_file_name(m["original_title"], m["year"],
@@ -448,6 +500,10 @@ async def _deliver_episode(job: dict, key: str, ep: dict, convert_opts):
             jobs._event(job, "info", f"{key}: {n}")
         ep["output"] = str(output)
         linked = True
+    jobs.runtime._report(
+        job, key, method="convert" if not linked else "deliver",
+        method_label=("Convertido (opções avançadas)" if not linked else
+                      "Entregue direto (hardlink/cópia)"))
     # legendas externas do torrent: arquivo hardlinkado não é reescrito (seria
     # copiar o episódio inteiro para anexar uma legenda) — vão ao lado
     fn = subs.shift_fn(0.0)

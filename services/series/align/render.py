@@ -591,7 +591,8 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
            original_lang: str | None = None,
            fill_with_original: bool = True,
            video_reencode: dict | None = None,
-           dub_extras: bool = True):
+           dub_extras: bool = True,
+           on_plan=None):
     """Renderiza a EDL num MKV final. Bloqueante (roda ffmpeg).
 
     external_subs: {"orig": [paths], "dub": [paths], "orig_lang", "dub_lang"}
@@ -607,6 +608,10 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
     preenchido com áudio original como qualquer trecho sem dublagem.
     """
     tmp_dir = Path(tempfile.mkdtemp(prefix="edl_render_"))
+    # o que vai sair do vídeo, ANTES do corte (que remapeia os segmentos):
+    # é daqui que sai o motivo de cada corte na timeline do render
+    alvos_corte = [(s.b_start, s.b_end, s.kind, s.extra.get("picture_s"))
+                   for s in segs if s.extra.get("action") == "cut_video"]
     # cut_video ANTES de tudo: o original pode ser trocado pela versão cortada
     # (cenas sem dublagem removidas), e o resto do render nem fica sabendo —
     # só trabalha com um arquivo mais curto e uma EDL já remapeada
@@ -701,6 +706,13 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
                 sl["src"] = "silence"
     if not slices:
         raise merger.MergeError("EDL sem nenhum trecho renderizável")
+    plan = _render_plan(slices, b_cuts, alvos_corte, duration_b,
+                        (kf, w1) if b_window else None)
+    if on_plan is not None:
+        try:
+            on_plan(plan)
+        except Exception:  # noqa: BLE001 — a timeline é acessório
+            pass
 
     # a faixa alvo e, pela MESMA cadeia de fatias, os outros idiomas que só o
     # dublado tem (política do caminho rápido: melhor áudio por idioma entre
@@ -798,7 +810,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
             _check_mux_duration(output, duration_b)
             _log_subs(subs_prontas, log)
             return {"b_shift": 0.0, "b_cuts": b_cuts,
-                    "subs_muxed": len(subs_prontas)}
+                    "subs_muxed": len(subs_prontas), "plan": plan}
 
         # loglevel WARNING (não error): é em nível de aviso que o ffmpeg diz
         # "forcing output" — o sinal de que a intercalação saiu frouxa. Com
@@ -880,7 +892,36 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
     # legendas externas precisa dele
     _log_subs(subs_prontas, log)
     return {"b_shift": float(in_opts[1]) if in_opts else 0.0, "b_cuts": b_cuts,
-            "subs_muxed": len(subs_prontas)}
+            "subs_muxed": len(subs_prontas), "plan": plan}
+
+
+def _render_plan(slices: list[dict], cuts: list[tuple[float, float]],
+                 alvos: list[tuple], duration: float,
+                 window: tuple[float, float] | None) -> dict:
+    """O plano do render como a UI o desenha: a linha da SAÍDA (timeline do
+    original depois dos cortes e da janela) com as fatias de dublagem /
+    original / silêncio, cada uma com o motivo, e os cortes do vídeo na
+    posição em que caem na saída."""
+    r = lambda x: round(float(x), 3)  # noqa: E731
+    fatias = []
+    for sl in slices:
+        item = {"b_start": r(sl["b_start"]), "b_end": r(sl["b_end"]),
+                "src": sl["src"], "kind": sl.get("kind"), "why": sl.get("why")}
+        if sl["src"] == "dub":
+            item["offset"] = r(sl["b_start"] - sl["src_start"])
+            item["src_start"] = r(sl["src_start"])
+            if sl.get("tempo") and abs(sl["tempo"] - 1.0) > 0.001:
+                item["tempo"] = round(sl["tempo"], 5)
+        if sl.get("stretch"):
+            item["stretch"] = sl["stretch"]
+        fatias.append(item)
+    cortes, removido = [], 0.0
+    for c0, c1 in cuts:
+        cortes.append({"at": r(c0 - removido), "src_start": r(c0),
+                       "src_end": r(c1), "why": _cut_why(c0, c1, alvos)})
+        removido += c1 - c0
+    return {"duration": r(duration), "slices": fatias, "cuts": cortes,
+            "window": [r(window[0]), r(window[1])] if window else None}
 
 
 def _dub_chains(slices: list[dict], dub_inp: str, orig_inp: str | None,
@@ -1170,6 +1211,50 @@ def _run_mux(cmd: list[str], duration_s: float = 0.0,
     return subprocess.CompletedProcess(cmd, proc.returncode, "", "".join(erros))
 
 
+_ACTION_TXT = {
+    "silence": "silêncio (decisão)",
+    "fill_original": "áudio original (decisão)",
+    "use_dub": "dublagem mantida (decisão)",
+    "cut_video": "cortada do vídeo",
+}
+
+
+def _slice_why(seg: Segment) -> str:
+    """Por que a fatia é o que é — o texto do hover na timeline do render."""
+    if seg.kind in ("match", "drift", "pal"):
+        base = {"match": "trecho casado", "drift": "drift de framerate",
+                "pal": "speedup PAL"}[seg.kind]
+        ref = seg.extra.get("refine")
+        return f"{base} — {ref}" if ref else base
+    base = {"gap_orig": "cena sem dublagem",
+            "replaced": "cena substituída"}.get(seg.kind, seg.kind)
+    partes = [base]
+    pic = seg.extra.get("picture_s")
+    if pic is not None and pic < 0.5:
+        partes.append("tela preta")
+    if seg.extra.get("action") in _ACTION_TXT:
+        partes.append(_ACTION_TXT[seg.extra["action"]])
+    if seg.note:
+        partes.append(seg.note)
+    return " — ".join(partes)
+
+
+def _cut_why(c0: float, c1: float, alvos: list[tuple]) -> str:
+    """Motivo de um corte do vídeo: os trechos marcados para sair que ele
+    cobre (vários quando cortes vizinhos foram fundidos)."""
+    motivos = []
+    for b0, b1, kind, pic in alvos:
+        if b0 is None or b1 is None or b1 <= c0 or b0 >= c1:
+            continue
+        txt = {"gap_orig": "cena sem dublagem",
+               "replaced": "cena substituída"}.get(kind, kind)
+        if pic is not None and pic < 0.5:
+            txt += " (tela preta)"
+        if txt not in motivos:
+            motivos.append(txt)
+    return (" + ".join(motivos) or "trecho marcado") + " — cortada do vídeo"
+
+
 def _plan_slices(segs: list[Segment],
                  duration_b: float) -> tuple[list[dict], list[dict]]:
     """EDL -> fatias contíguas na timeline do ORIGINAL (b), sem buracos.
@@ -1181,12 +1266,12 @@ def _plan_slices(segs: list[Segment],
     fills: list[dict] = []
     cursor = 0.0
 
-    def fill(b0: float, b1: float, src: str, why: str):
+    def fill(b0: float, b1: float, src: str, why: str, kind: str | None = None):
         if b1 - b0 <= _EPS:
             return
         slices.append({"src": "silence" if src == "silence" else "orig",
                        "src_start": b0, "src_end": b1,
-                       "b_start": b0, "b_end": b1})
+                       "b_start": b0, "b_end": b1, "kind": kind, "why": why})
         fills.append({"b_start": b0, "b_end": b1, "why": why})
 
     # segmento que não chega a ocupar _EPS na saída não existe mais nela (um
@@ -1217,31 +1302,36 @@ def _plan_slices(segs: list[Segment],
                 # — jamais buraco nem áudio original no meio da fala
                 slices[-1]["src_end"] += hole
                 slices[-1]["b_end"] += hole
+                slices[-1]["stretch"] = round(slices[-1].get("stretch", 0.0) + hole, 3)
             else:
                 # buraco de verdade não descrito pela EDL: preenche com o original
                 fill(cursor, b0, "orig", "trecho sem correspondência mapeada")
         action = seg.extra.get("action")
+        why = _slice_why(seg)
         if seg.kind in ("match", "drift"):
             slices.append({"src": "dub",
                            "src_start": b0 - seg.offset,
                            "src_end": b1 - seg.offset,
-                           "b_start": b0, "b_end": b1})
+                           "b_start": b0, "b_end": b1,
+                           "kind": seg.kind, "why": why})
         elif seg.kind == "pal":
             a_dur = seg.a_end - seg.a_start
             b_dur = (seg.b_end - seg.b_start) or a_dur
             slices.append({"src": "dub", "src_start": seg.a_start,
                            "src_end": seg.a_end, "b_start": b0, "b_end": b1,
-                           "tempo": b_dur / a_dur if a_dur else 1.0})
+                           "tempo": b_dur / a_dur if a_dur else 1.0,
+                           "kind": seg.kind, "why": why})
         elif seg.kind == "gap_orig":
             fill(b0, b1, "silence" if action == "silence" else "orig",
-                 "cena sem dublagem")
+                 why or "cena sem dublagem", seg.kind)
         elif seg.kind == "replaced":
             if action == "use_dub":
                 slices.append({"src": "dub", "src_start": seg.a_start,
-                               "src_end": seg.a_end, "b_start": b0, "b_end": b1})
+                               "src_end": seg.a_end, "b_start": b0, "b_end": b1,
+                               "kind": seg.kind, "why": why})
             else:
                 fill(b0, b1, "silence" if action == "silence" else "orig",
-                     "cena substituída")
+                     why or "cena substituída", seg.kind)
         cursor = b1
     if cursor < duration_b - _EPS:
         fill(cursor, duration_b, "orig", "final sem correspondência mapeada")

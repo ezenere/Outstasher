@@ -1095,25 +1095,43 @@ def _snap_gap_edges(segs: list[Segment], dub_path, dub_a,
 
 
 def refine_offsets(segs: list[Segment], dub_path: str, dub_a: int,
-                   orig_path: str, orig_a: int, log=print) -> list[Segment]:
+                   orig_path: str, orig_a: int, log=print,
+                   on_stage=None) -> list[Segment]:
     """Refino por áudio: funde wobbles do vídeo, resolve 'substituídas' cujo
     áudio é contínuo, mede o perfil de offset em cada match e divide onde há
     edição (corte em silêncio), descarta matches espúrios, refina as
     FRONTEIRAS entre segmentos (junção de cena cortada por bissecção; bordas
     de recap/substituída no silêncio), descarta gaps que o offset medido
     desmente e funde vizinhos iguais. Retorna a lista NOVA de segmentos (a
-    estrutura pode mudar)."""
+    estrutura pode mudar).
+
+    on_stage(segs, rótulo): chamado depois de cada etapa com a lista como
+    está — a timeline ao vivo da UI. Só leitura: quem recebe não muda nada."""
+    def etapa(lista, rotulo):
+        if on_stage is not None:
+            try:
+                on_stage(list(lista), rotulo)
+            except Exception:  # noqa: BLE001 — a timeline é acessório
+                pass
+
     segs = collapse_wobbles(segs, dub_path, dub_a, orig_path, orig_a, log)
+    etapa(segs, "Oscilações do vídeo fundidas")
     segs = _resolve_replaced_by_audio(segs, dub_path, dub_a, orig_path, orig_a, log)
+    etapa(segs, "Cenas substituídas conferidas pelo áudio")
     segs = _reclaim_gap_dub(segs, dub_path, dub_a, orig_path, orig_a, log)
     # substituídas resolvidas podem abrir novos wobbles
     segs = collapse_wobbles(segs, dub_path, dub_a, orig_path, orig_a, log)
+    etapa(segs, "Trechos só do dublado conferidos")
     out: list[Segment] = []
-    for seg in segs:
+    medir = sum(1 for s in segs if s.kind in ("match", "drift", "pal")
+                and s.offset is not None)
+    feitos = 0
+    for i, seg in enumerate(segs):
         if seg.kind not in ("match", "drift", "pal") or seg.offset is None:
             out.append(seg)
             continue
         seg.extra["video_offset"] = seg.offset
+        feitos += 1
         if seg.a_end - seg.a_start < MIN_SEGMENT_S:
             seg.extra["refine"] = "curto demais — herda vizinho"
             out.append(seg)
@@ -1121,11 +1139,15 @@ def refine_offsets(segs: list[Segment], dub_path: str, dub_a: int,
         pts = _profile(seg, dub_path, dub_a, orig_path, orig_a, log)
         out.extend(_split_by_profile(seg, pts, dub_path, dub_a, orig_path,
                                      orig_a, log))
+        etapa(out + segs[i + 1:],
+              f"Medindo o offset pelo áudio ({feitos}/{medir})")
     _inherit_short(out)
     out = _drop_stray_matches(out, log, dub_path, dub_a, orig_path, orig_a)
     out = _tighten_extra_dub(out, dub_path, dub_a, log)
+    etapa(out, "Trechos espúrios descartados")
     # fronteiras ENTRE segmentos: também saem da grade do vídeo para o áudio
     out = _refine_cut_junctions(out, dub_path, dub_a, orig_path, orig_a, log)
+    etapa(out, "Junções de cena refinadas")
     out = _snap_gap_edges(out, dub_path, dub_a, log)
     out = _drop_spurious_gaps(out, log)
     return _merge_adjacent(out)

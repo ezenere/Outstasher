@@ -198,6 +198,22 @@ async def _merge(job: dict, video_file: Path, audio_file: Path,
 
     job["output"] = result.output
     if result.linked:
+        metodo = ("hardlink", "Hardlink — o melhor vídeo já tinha o áudio alvo")
+    elif result.verdict == "drift":
+        metodo = ("drift", "Drift linear corrigido (áudio re-encodado)")
+    elif result.offset_ms is None:
+        metodo = ("convert", "Conversão de arquivo único")
+    else:
+        metodo = ("offset", "Offset (stream copy)" if not convert_opts
+                  else "Offset + conversão do vídeo")
+    runtime._report(job, None, reset=True, method=metodo[0],
+                    method_label=metodo[1], offset_ms=result.offset_ms,
+                    mode=result.mode, verdict=result.verdict,
+                    windows=[list(w) for w in result.windows],
+                    notes=result.notes or None,
+                    sources={"original": str(video_file), "dubbed": str(audio_file)},
+                    finished_at=datetime.now().isoformat(timespec="seconds"))
+    if result.linked:
         ref = result.ref_input if result.ref_input is not None else 0
         shifts = (0.0 if ref == 0 else None, 0.0 if ref == 1 else None)
     else:

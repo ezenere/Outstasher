@@ -167,6 +167,11 @@ class MergeResult:
     # dublagem foi RE-ENCODADA (o codec original — TrueHD/DTS — não sobrevive).
     # Decisão do usuário: corrigir sem parar no gate, mas avisar sempre.
     drift_warning: str | None = None
+    # o que a validação do offset viu, para o relatório do episódio/filme:
+    # janelas [(início_s, offset_s, qualidade)], o veredito e o modo aplicado
+    windows: list = field(default_factory=list)
+    verdict: str | None = None
+    mode: str | None = None
 
 
 class MergeError(RuntimeError):
@@ -1302,6 +1307,9 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
     check = classify_offsets(measure_offsets(
         ref_path, ref_align_a, oth_path, oth_align_a, duration, log=log))
     n_win, n_good = len(check.windows), len(check.good)
+    result.windows = [(round(t, 2), round(o, 4), round(q, 1))
+                      for t, o, q in check.windows]
+    result.verdict = check.verdict
     if check.verdict == "constant":
         spread = max(w[1] for w in check.good) - min(w[1] for w in check.good)
         log(f"Offsets consistentes em {n_good} de {n_win} janela(s) (variação "
@@ -1363,6 +1371,7 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
         log(result.drift_warning)
     else:
         mode = "drift: re-encode com adelay/atrim"
+    result.mode = mode
     log(f"Offset aplicado: {result.offset_ms:+.2f} ms ({mode})")
 
     in_ref, in_oth = ["-i", ref_path], ["-i", oth_path]

@@ -365,12 +365,15 @@ def _page(jobs_: list[dict], page: int, per_page: int | None, total: int,
             "pages": max(1, -(-total // per_page))}
 
 
-def progress(job_id: str) -> dict | None:
-    """Só status + detail + progresso, para o tick de 1s do detalhe do job."""
+def progress(job_id: str, tl_rev: int | None = None) -> dict | None:
+    """Só status + detail + progresso, para o tick de 1s do detalhe do job.
+    `timeline`: a do alinhamento/render em curso (tl_rev = a versão que a
+    tela já tem; igual -> só o número, sem a lista de trechos de novo)."""
     job = _lookup(job_id)
     if not job:
         return None
     return {"id": job["id"], "status": job["status"], "detail": job.get("detail", ""),
             "progress": job["progress"], "output": job.get("output"),
             "merge_started_at": job.get("merge_started_at"),
-            "stall": stall_view(job)}
+            "stall": stall_view(job),
+            "timeline": runtime.timeline_view(job_id, tl_rev)}

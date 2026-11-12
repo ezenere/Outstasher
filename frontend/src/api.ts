@@ -387,6 +387,11 @@ export interface Edl {
   segments: EdlSegment[]
   confidence_profile: number[] | null
   review: { required: boolean; flagged: { a_start: number; a_end: number; reason: string }[] }
+  /** arquivo fundido (dois episódios): janela do episódio no lado longo */
+  merged_side?: 'orig' | 'dub'
+  b_window?: [number, number]
+  a_window?: [number, number]
+  note?: string
 }
 
 /** Regra de revisão reaplicável ("aplicar a todos os episódios"). */
@@ -887,6 +892,133 @@ export interface JobProgress {
   output: string | null
   merge_started_at?: string | null
   stall?: StallView | null
+  /** Timeline do alinhamento/render em curso (null fora dele). Com o tl_rev
+   *  igual ao que a tela já tem, vem só {key, rev, unchanged}. */
+  timeline?: LiveTimeline | null
+}
+
+/** Plano do render da EDL: a linha da SAÍDA (timeline do original depois dos
+ *  cortes), com as fatias e os cortes do vídeo — cada um com o motivo. */
+export interface RenderSlice {
+  b_start: number
+  b_end: number
+  src: 'dub' | 'orig' | 'silence'
+  kind: SegmentKind | null
+  why: string | null
+  /** só fatia dublada: b - posição no dublado */
+  offset?: number
+  src_start?: number
+  tempo?: number
+  /** segundos que a fatia foi esticada para cobrir sobra de fronteira */
+  stretch?: number
+}
+
+export interface RenderPlan {
+  duration: number
+  slices: RenderSlice[]
+  cuts: { at: number; src_start: number; src_end: number; why: string }[]
+  window: [number, number] | null
+}
+
+export interface LiveTimeline {
+  key: string | null
+  rev: number
+  unchanged?: boolean
+  stage?: string | null
+  /** leitura (fingerprint) de cada arquivo, 0-100 */
+  scan?: { dub?: number; orig?: number }
+  dur_dub?: number | null
+  dur_orig?: number | null
+  segments?: EdlSegment[] | null
+  plan?: RenderPlan | null
+  window?: [number, number] | null
+}
+
+/** Relatório do processamento (ficha do episódio / filme). Forma livre:
+ *  o backend junta o que cada etapa sabe. */
+export interface MergeReport {
+  method?: string
+  method_label?: string
+  offset_ms?: number | null
+  mode?: string | null
+  verdict?: string | null
+  /** janelas de offset do merge rápido: [início_s, offset_s, qualidade] */
+  windows?: [number, number, number][]
+  /** varredura de série (uma janela a cada 5 min) */
+  scan?: { constant: boolean; points: [number, number, number][] }
+  durations?: { dub: number; orig: number }
+  drift_profile?: unknown
+  drift_verdict?: string
+  plan?: RenderPlan | null
+  notes?: string[]
+  subs_muxed?: number
+  sources?: { original?: string; dubbed?: string }
+  started_at?: string
+  finished_at?: string
+  result?: string
+  error?: string
+}
+
+export interface ProbeStream {
+  index: number
+  type: string
+  codec: string | null
+  profile?: string | null
+  lang?: string | null
+  title?: string | null
+  default: boolean
+  forced: boolean
+  cover: boolean
+  bit_rate?: number | null
+  width?: number
+  height?: number
+  fps?: number | null
+  pix_fmt?: string
+  hdr?: boolean
+  channels?: number
+  layout?: string
+  sample_rate?: number | null
+}
+
+export interface ProbeFile {
+  path: string
+  exists: boolean
+  size?: number
+  duration?: number | null
+  bit_rate?: number | null
+  format?: string
+  chapters?: number
+  streams?: ProbeStream[]
+  error?: string
+}
+
+/** Ficha do episódio (ou do filme, key null). */
+export interface ItemDetails {
+  key: string | null
+  season?: number
+  episode?: number
+  name?: string | null
+  air_date?: string | null
+  runtime?: number | null
+  state: string | null
+  error: string | null
+  files: { original?: string | null; dubbed?: string | null; file?: string | null; output?: string | null }
+  subs: Record<string, string[]>
+  torrents: { n: number; role: string; title: string; tracker?: string | null;
+              state?: string; size?: number | null; content_path?: string | null }[]
+  edl: Edl | null
+  report: MergeReport | null
+  events: JobEvent[]
+}
+
+export function fetchDetails(jobId: string, ep?: string | null) {
+  const q = ep ? `?ep=${encodeURIComponent(ep)}` : ''
+  return api<ItemDetails>(`/api/jobs/${jobId}/details${q}`)
+}
+
+export function fetchDetailsProbe(jobId: string, ep?: string | null) {
+  const q = ep ? `?ep=${encodeURIComponent(ep)}` : ''
+  return api<Record<string, ProbeFile>>(`/api/jobs/${jobId}/details/probe${q}`)
 }
 
 // ---------- catálogo ----------

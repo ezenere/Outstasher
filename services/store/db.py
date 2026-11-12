@@ -19,6 +19,7 @@ from .configuration import (
     load_language_config,
 )
 from .edls import _create_edl_tables
+from .reports import _create_report_tables
 from .jobs import _migrate_from_json
 from .scalar_rows import _create_scalar_tables
 from .series import _create_series_tables
@@ -108,6 +109,7 @@ def init():
     _create_candidate_tables()
     _create_series_tables()
     _create_edl_tables()
+    _create_report_tables()
     _create_scalar_tables()   # colunas da jobs + idx_jobs_media + metadados
     store._conn.commit()
     _migrate_from_json()
