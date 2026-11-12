@@ -170,7 +170,7 @@ function SegTrack({ segs, side, dur, hover, setHover, setTip, scanPct, window }:
     const p = scanPct ?? 0
     return (
       <div className="relative h-5 flex-1 overflow-hidden rounded bg-zinc-800">
-        <div className="absolute inset-y-0 left-0 animate-pulse bg-zinc-600/70 transition-all"
+        <div className="absolute inset-y-0 left-0 bg-zinc-600/70 transition-all"
           style={{ width: `${p}%` }} />
         <div className="absolute inset-0 flex items-center justify-center text-[10px] text-zinc-300">
           {p >= 100 ? 'lido' : `lendo… ${Math.round(p)}%`}
@@ -338,7 +338,11 @@ export function AlignTimeline({ segments, durDub, durOrig, scan, plan, window, s
   }, [segs])
 
   return (
-    <div className="relative space-y-1.5 rounded-xl border border-zinc-800 bg-zinc-950/40 p-3">
+    <div className="relative rounded-xl border border-zinc-800 bg-zinc-950/40 p-3">
+      {/* o tooltip fica fora do grupo espaçado: no Tailwind 4 o space-y põe
+          margem embaixo de todo filho menos o último, e o tooltip virando o
+          último filho fazia a legenda ganhar margem e a caixa crescer */}
+      <div className="space-y-1.5">
       {stage && <div className="mb-1 text-xs text-zinc-400">{stage}</div>}
       <Row label="Áudio dublado" sub={durDub ? t(durDub) : undefined}>
         <SegTrack segs={segs} side="a" dur={dA} hover={hover} setHover={setHover}
@@ -384,6 +388,7 @@ export function AlignTimeline({ segments, durDub, durOrig, scan, plan, window, s
             )}
           </>
         )}
+      </div>
       </div>
 
       {tip && (
