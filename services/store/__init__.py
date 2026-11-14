@@ -30,6 +30,7 @@ O pacote (quem chama usa só `from services import store` e `store.X`):
   series         episódios e torrents (série)
   edls           EDLs do alinhador
   reports        relatório do processamento por episódio/filme (a ficha)
+  sessions       sessões de login da UI (hash do token + último uso)
   scalars        escalares do job e metadados do TMDB (os codecs; o SQL
                  dessas linhas em scalar_rows)
   common         utilitários das seções (JSON, hash, lotes de ids)
@@ -67,6 +68,9 @@ from .edls import (
 from .events import MAX_EVENTS_RETURNED, add_event, load_events
 from .reports import (
     REPORT_MOVIE_KEY, load_episode_events, load_report, update_report,
+)
+from .sessions import (
+    delete_sessions, load_sessions, save_session, touch_session,
 )
 from .jobs import (
     LIST_SECTIONS, SECTIONS, _apply_upsert, _prepare_upsert, _remember,

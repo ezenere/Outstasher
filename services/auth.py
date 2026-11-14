@@ -2,14 +2,18 @@
 
 - Uma senha, guardada com hash PBKDF2 na tabela `settings` (key MAIN_PASSWORD).
 - Se nao houver senha no boot, a UI pede para criar (fluxo de "setup").
-- Login troca a senha por um TOKEN de sessao (aleatorio) guardado em memoria.
-  O front guarda o token no sessionStorage: fechou o navegador, cai a sessao.
-  Reiniciou o servidor, cai a sessao (aceitavel para um servico simples).
+- Login troca a senha por um TOKEN de sessao (aleatorio), entregue num COOKIE
+  de sessao (HttpOnly, sem validade): vale em todas as abas e o navegador
+  apaga ao fechar — como o SID do qBittorrent. Do lado do servidor a sessao
+  expira apos SESSION_IDLE_S sem uso (aba aberta faz polling e a mantem
+  viva) e sobrevive a reinicio/deploy: o hash do token fica no banco.
 - Uma API key tambem e gerada no setup (key API_KEY) para uso via header.
 """
 import hashlib
 import hmac
 import secrets
+import threading
+import time
 
 from services import store
 
@@ -18,8 +22,34 @@ API_KEY = "API_KEY"              # chave alternativa para chamadas via header
 
 _PBKDF2_ITERATIONS = 200_000
 
-# tokens de sessao validos (em memoria; some no restart, e o esperado)
-_sessions: set[str] = set()
+SESSION_IDLE_S = 24 * 3600   # sessao sem uso por isto: expira
+_TOUCH_EVERY_S = 300         # ultimo uso vai ao banco no maximo a cada 5 min
+
+# sessoes validas: {sha256 do token: ultimo uso} — espelho do banco, carregado
+# no primeiro uso (o polling da UI nao pode ler o banco a cada requisicao)
+_sessions: dict[str, float] = {}
+_persisted: dict[str, float] = {}   # ultimo uso que esta no banco
+_loaded = False
+_mu = threading.Lock()
+
+
+def _digest(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _ensure_loaded():
+    global _loaded
+    if _loaded:
+        return
+    now = time.time()
+    try:
+        store.delete_sessions(older_than=now - SESSION_IDLE_S)
+        rows = store.load_sessions()
+    except Exception:  # noqa: BLE001 — sem banco (testes): so memoria
+        rows = {}
+    _sessions.update(rows)
+    _persisted.update(rows)
+    _loaded = True
 
 
 # -------------------- hashing da senha --------------------
@@ -69,14 +99,44 @@ def get_api_key() -> str | None:
 
 def create_session() -> str:
     token = secrets.token_urlsafe(32)
-    _sessions.add(token)
+    h, now = _digest(token), time.time()
+    with _mu:
+        _ensure_loaded()
+        _sessions[h] = now
+        _persisted[h] = now
+    store.save_session(h, now)
     return token
+
+
+def _session_alive(token: str) -> bool:
+    h, now = _digest(token), time.time()
+    with _mu:
+        _ensure_loaded()
+        last = _sessions.get(h)
+        if last is None:
+            return False
+        if now - last > SESSION_IDLE_S:
+            _sessions.pop(h, None)
+            _persisted.pop(h, None)
+            expired = True
+        else:
+            expired = False
+            _sessions[h] = now
+            touch = now - _persisted.get(h, 0.0) >= _TOUCH_EVERY_S
+            if touch:
+                _persisted[h] = now
+    if expired:
+        store.delete_sessions([h])
+        return False
+    if touch:
+        store.touch_session(h, now)
+    return True
 
 
 def validate_token(token: str | None) -> bool:
     if not token:
         return False
-    if token in _sessions:
+    if _session_alive(token):
         return True
     # tambem aceita a API key como token permanente (para scripts)
     api = get_api_key()
@@ -84,10 +144,19 @@ def validate_token(token: str | None) -> bool:
 
 
 def revoke_session(token: str | None):
-    if token:
-        _sessions.discard(token)
+    if not token:
+        return
+    h = _digest(token)
+    with _mu:
+        _sessions.pop(h, None)
+        _persisted.pop(h, None)
+    store.delete_sessions([h])
 
 
 def revoke_all_sessions():
     """Ao trocar a senha, derruba todas as sessoes abertas."""
-    _sessions.clear()
+    with _mu:
+        _ensure_loaded()
+        _sessions.clear()
+        _persisted.clear()
+    store.delete_sessions()

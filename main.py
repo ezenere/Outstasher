@@ -76,9 +76,28 @@ app = FastAPI(title="Outstasher", lifespan=lifespan)
 _PUBLIC_PATHS = {"/api/auth/status", "/api/auth/setup", "/api/auth/login"}
 
 
+# cookie de sessao da UI: sem Max-Age/Expires (o navegador apaga ao fechar),
+# HttpOnly (o JS nao le) e SameSite=Strict (outro site nao consegue fazer o
+# navegador manda-lo — e o que segura CSRF sem token extra)
+SESSION_COOKIE = "outstasher_sid"
+
+
 def _bearer(request: Request) -> str | None:
     h = request.headers.get("Authorization", "")
     return h[7:].strip() if h.lower().startswith("bearer ") else None
+
+
+def _authenticated(request: Request) -> bool:
+    """Header (API key / scripts) OU cookie de sessao (UI)."""
+    return (auth.validate_token(_bearer(request))
+            or auth.validate_token(request.cookies.get(SESSION_COOKIE)))
+
+
+def _with_session(request: Request, token: str) -> JSONResponse:
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="strict",
+                    path="/", secure=request.url.scheme == "https")
+    return resp
 
 
 @app.middleware("http")
@@ -89,7 +108,7 @@ async def auth_gate(request: Request, call_next):
         # sem senha cadastrada ainda: obriga o setup antes de qualquer coisa
         if not auth.is_password_set():
             return JSONResponse({"detail": "Senha não configurada"}, status_code=401)
-        if not auth.validate_token(_bearer(request)):
+        if not _authenticated(request):
             return JSONResponse({"detail": "Não autenticado"}, status_code=401)
     return await call_next(request)
 
@@ -108,44 +127,46 @@ async def auth_status(request: Request):
     """A UI chama isto no boot: precisa de setup? esta logado?"""
     return {
         "password_set": auth.is_password_set(),
-        "authenticated": auth.validate_token(_bearer(request)),
+        "authenticated": _authenticated(request),
     }
 
 
 @app.post("/api/auth/setup")
-async def auth_setup(req: PasswordRequest):
+async def auth_setup(req: PasswordRequest, request: Request):
     if auth.is_password_set():
         raise HTTPException(409, "Senha já configurada — use o login")
     if len(req.password) < 4:
         raise HTTPException(400, "A senha precisa ter pelo menos 4 caracteres")
     auth.set_password(req.password)
-    return {"token": auth.create_session()}
+    return _with_session(request, auth.create_session())
 
 
 @app.post("/api/auth/login")
-async def auth_login(req: PasswordRequest):
+async def auth_login(req: PasswordRequest, request: Request):
     if not auth.is_password_set():
         raise HTTPException(409, "Nenhuma senha configurada ainda")
     if not auth.verify_password(req.password):
         raise HTTPException(401, "Senha incorreta")
-    return {"token": auth.create_session()}
+    return _with_session(request, auth.create_session())
 
 
 @app.post("/api/auth/logout")
 async def auth_logout(request: Request):
-    auth.revoke_session(_bearer(request))
-    return {"ok": True}
+    auth.revoke_session(request.cookies.get(SESSION_COOKIE))
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(SESSION_COOKIE, path="/", httponly=True, samesite="strict")
+    return resp
 
 
 @app.post("/api/auth/change-password")
-async def auth_change_password(req: ChangePasswordRequest):
+async def auth_change_password(req: ChangePasswordRequest, request: Request):
     if not auth.verify_password(req.current_password):
         raise HTTPException(401, "Senha atual incorreta")
     if len(req.new_password) < 4:
         raise HTTPException(400, "A nova senha precisa ter pelo menos 4 caracteres")
     auth.set_password(req.new_password)
     auth.revoke_all_sessions()  # derruba as outras sessoes
-    return {"token": auth.create_session()}  # mantem quem trocou logado
+    return _with_session(request, auth.create_session())  # mantem quem trocou logado
 
 
 @app.get("/api/languages")

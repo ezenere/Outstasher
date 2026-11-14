@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { BrowserRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom'
 import { Bookmark, Cube, LogOut, Search, Settings as SettingsIcon } from 'iconoir-react'
-import { api, authStatus, getToken, logout, type JobSummary } from './api'
+import { api, authStatus, logout, type JobSummary } from './api'
 import { JobsSummaryContext } from './jobsSummary'
 import Movies from './pages/Movies'
 import Jobs from './pages/Jobs'
@@ -49,7 +49,7 @@ export default function App() {
     try {
       const s = await authStatus()
       if (!s.password_set) setGate('setup')
-      else if (s.authenticated && getToken()) setGate('ok')
+      else if (s.authenticated) setGate('ok')
       else setGate('login')
     } catch {
       // API fora do ar: trata como precisa logar
@@ -81,8 +81,11 @@ export default function App() {
   }, [gate])
 
   async function doLogout() {
-    await logout()
-    setGate('login')
+    try {
+      await logout()
+    } finally {
+      setGate('login')
+    }
   }
 
   if (gate === 'loading') {

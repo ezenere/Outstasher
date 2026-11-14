@@ -400,14 +400,12 @@ export interface ReviewRule {
   action: ReviewAction
 }
 
-/** Busca um frame de comparação como blob-URL (o <img> puro não manda o
- *  header de Authorization — buscamos via fetch autenticado). O chamador é
- *  dono do URL e deve dar URL.revokeObjectURL ao descartar. */
+/** Busca um frame de comparação como blob-URL. O chamador é dono do URL e
+ *  deve dar URL.revokeObjectURL ao descartar. */
 export async function fetchFrame(jobId: string, episode: string,
                                  side: 'a' | 'b', t: number): Promise<string> {
   const r = await fetch(
-    `/api/jobs/${jobId}/frame?episode=${episode}&side=${side}&t=${t.toFixed(2)}`,
-    { headers: { Authorization: `Bearer ${getToken() ?? ''}` } })
+    `/api/jobs/${jobId}/frame?episode=${episode}&side=${side}&t=${t.toFixed(2)}`)
   if (!r.ok) throw new Error(`frame ${r.status}`)
   return URL.createObjectURL(await r.blob())
 }
@@ -1116,16 +1114,12 @@ export interface CatalogDetail {
   tmdb: Movie | null
 }
 
-// ---------- sessão / token ----------
-// Token no sessionStorage: some quando o navegador/aba fecha (login de novo),
-// que é o comportamento pedido. Um evento 'auth-expired' avisa o App quando a
-// API responde 401 (sessão caiu, servidor reiniciou etc.).
-
-const TOKEN_KEY = 'downloader_token'
-
-export const getToken = () => sessionStorage.getItem(TOKEN_KEY)
-export const setToken = (t: string) => sessionStorage.setItem(TOKEN_KEY, t)
-export const clearToken = () => sessionStorage.removeItem(TOKEN_KEY)
+// ---------- sessão ----------
+// A sessão é um cookie HttpOnly que o servidor grava no login: vale em todas
+// as abas e o navegador apaga ao fechar (como no qBittorrent); o servidor a
+// expira depois de um tempo sem uso. O JS não vê o token — o fetch manda o
+// cookie sozinho. Um evento 'auth-expired' avisa o App quando a API responde
+// 401 (sessão expirou, senha trocada em outra aba etc.).
 
 export interface AuthStatus {
   password_set: boolean
@@ -1133,12 +1127,8 @@ export interface AuthStatus {
 }
 
 export async function api<T>(path: string, opts?: RequestInit): Promise<T> {
-  const token = getToken()
-  const headers = new Headers(opts?.headers)
-  if (token) headers.set('Authorization', `Bearer ${token}`)
-  const r = await fetch(path, { ...opts, headers })
+  const r = await fetch(path, { ...opts, credentials: 'same-origin' })
   if (r.status === 401 && !path.startsWith('/api/auth/')) {
-    clearToken()
     window.dispatchEvent(new Event('auth-expired'))
   }
   if (!r.ok) {
@@ -1169,29 +1159,19 @@ export const del = <T,>(path: string) => api<T>(path, { method: 'DELETE' })
 export const authStatus = () => api<AuthStatus>('/api/auth/status')
 
 export async function login(password: string): Promise<void> {
-  const { token } = await post<{ token: string }>('/api/auth/login', { password })
-  setToken(token)
+  await post('/api/auth/login', { password })
 }
 
 export async function setupPassword(password: string): Promise<void> {
-  const { token } = await post<{ token: string }>('/api/auth/setup', { password })
-  setToken(token)
+  await post('/api/auth/setup', { password })
 }
 
 export async function logout(): Promise<void> {
-  try {
-    await post('/api/auth/logout')
-  } finally {
-    clearToken()
-  }
+  await post('/api/auth/logout')
 }
 
 export async function changePassword(current_password: string, new_password: string): Promise<void> {
-  const { token } = await post<{ token: string }>('/api/auth/change-password', {
-    current_password,
-    new_password,
-  })
-  setToken(token)
+  await post('/api/auth/change-password', { current_password, new_password })
 }
 
 // ---------- formatadores ----------
