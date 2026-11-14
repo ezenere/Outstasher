@@ -160,6 +160,8 @@ async def _run_advanced(job: dict, video_file: Path, audio_file: Path):
                         sources={"original": orig, "dubbed": dub})
         edl_dict = await asyncio.to_thread(engine.align_pair, dub, orig, "filme",
                                            on_wait=on_wait, on_progress=on_fp)
+        if edl_dict.get("framing"):
+            log(edl_dict["framing"]["note"])
         segs = edl_mod.segments(edl_dict)
         runtime.timeline_segments(
             job, None, segs, "Casamento pelas imagens",
@@ -171,7 +173,8 @@ async def _run_advanced(job: dict, video_file: Path, audio_file: Path):
         runtime._stage(job, runtime.PHASE_ALIGN)
         job["detail"] = "Alinhamento avançado: refino por áudio..."
         segs = await asyncio.to_thread(
-            refine.refine_offsets, segs, dub, dub_a, orig, orig_a, log, on_stage)
+            refine.refine_offsets, segs, dub, dub_a, orig, orig_a, log, on_stage,
+            edl_dict.get("framing"))
         # tela preta dos trechos sem dublagem medida já aqui: vai na EDL, a
         # revisão mostra e o render decide sem decodificar de novo
         from services import advanced_merge
@@ -181,7 +184,8 @@ async def _run_advanced(job: dict, video_file: Path, audio_file: Path):
         dur_a = edl_dict["source_dub"]["duration"]
         segs, needs = rules.apply_rules(segs, job.get("review_rules") or [], dur_a)
         runtime.timeline_segments(job, None, segs, "Alinhamento pronto")
-        extras = {k: edl_dict[k] for k in ("merged_side", "a_window", "b_window", "note")
+        extras = {k: edl_dict[k] for k in ("merged_side", "a_window", "b_window", "note",
+                                           "framing")
                   if k in edl_dict}
         edl_dict = edl_mod.build(segs, "filme", dub, dur_a, orig,
                                  edl_dict["source_orig"]["duration"],

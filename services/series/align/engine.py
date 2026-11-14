@@ -9,7 +9,7 @@ import threading
 from pathlib import Path
 
 from services import merger
-from services.series.align import classify, dp, edl, fingerprint
+from services.series.align import classify, dp, edl, fingerprint, framing
 
 
 class AlignError(RuntimeError):
@@ -92,6 +92,16 @@ def _align_locked(dub_path: str, orig_path: str, episode: str,
     # estágio 0: normalização geométrica de CADA lado antes do hash
     crop_a = fingerprint.crop_params(dub_path, dur_a)
     crop_b = fingerprint.crop_params(orig_path, dur_b)
+    # um lado é RECORTE do outro (proporções diferentes)? então o outro é
+    # hasheado recortado igual — senão nenhum frame casa
+    framing_info = None
+    try:
+        crop_a, crop_b, nota = framing.match_framing(
+            dub_path, crop_a, dur_a, orig_path, crop_b, dur_b)
+    except Exception:  # noqa: BLE001 — detecção opcional: segue sem ela
+        nota = None
+    if nota:
+        framing_info = {"dub": crop_a, "orig": crop_b, "note": nota}
     # estágio 1: fingerprint (dos arquivos inteiros) — a parte demorada, por
     # isso é ela que reporta progresso
     def step(n: int, label: str):
@@ -113,8 +123,11 @@ def _align_locked(dub_path: str, orig_path: str, episode: str,
         _check_match_fraction(runs, min(len(ha), len(hb)))
         segs = classify.classify_runs(runs, D, lo)
         profile = classify.confidence_profile(segs, dur_a)
-        return edl.build(segs, episode, dub_path, dur_a, orig_path, dur_b,
-                         profile=profile)
+        out = edl.build(segs, episode, dub_path, dur_a, orig_path, dur_b,
+                        profile=profile)
+        if framing_info:
+            out["framing"] = framing_info
+        return out
 
     # ---- fundido: localiza o episódio dentro do longo e alinha na diagonal
     # de inclinação 1 (offset constante ± banda) ----
@@ -206,6 +219,8 @@ def _align_locked(dub_path: str, orig_path: str, episode: str,
     out["note"] = (f"arquivo {'original' if long_is_b else 'dublado'} fundido "
                    f"(razão {ratio:.2f}): episódio localizado em "
                    f"{window[0]:.0f}s–{window[1]:.0f}s ({locate_note})")
+    if framing_info:
+        out["framing"] = framing_info
     return out
 
 

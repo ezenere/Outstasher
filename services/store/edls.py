@@ -23,7 +23,8 @@ from .common import _in_chunks, _json
 #    segments[{kind, a_start, a_end, b_start, b_end, slope, residual,
 #              confidence, offset, note, action?, refine?, extra?}],
 #    confidence_profile[um valor por segundo], review{required, flagged},
-#    merged_side?, a_window?/b_window? [início, fim], note?}
+#    merged_side?, a_window?/b_window? [início, fim], note?,
+#    framing?{dub, orig, note} (um lado é recorte do outro — vai no spill)}
 # Vira: uma linha em edls (ep_key = chave do episódio, ou "filme") e uma por
 # segmento em edl_segments. O dict em memória não muda — quem aplica a
 # decisão de revisão (`action`) continua mexendo nele direto.
@@ -34,7 +35,7 @@ from .common import _in_chunks, _json
 # ausente, None em chave opcional, estrutura com outra forma — vai para
 # `spill` (JSON) e a leitura devolve no mesmo lugar. EDL gerada pelo
 # alinhador nunca usa o spill; EDL montada à mão (testes, jobs antigos)
-# volta igual mesmo assim.
+# volta igual mesmo assim. (Exceção: o `framing`, raro, vai no spill.)
 #
 # confidence_profile: ~2.500 valores por episódio (13,6 KB em JSON) — não
 # vira linha, vai num BLOB float32. Os valores saem do edl.build

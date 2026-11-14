@@ -936,12 +936,15 @@ def _video_junction(dub_path, orig_path, cut: float, off_a: float, off_b: float,
 
 
 def _refine_cut_junctions(segs: list[Segment], dub_path, dub_a,
-                          orig_path, orig_a, log) -> list[Segment]:
+                          orig_path, orig_a, log,
+                          framing: dict | None = None) -> list[Segment]:
     """[match A][gap_orig][match B] com o DUB contínuo (cena cortada da versão
     dublada): a fronteira exata em `a` vem do áudio (bissecção de presença) e
     cai num silêncio — não na grade de 0,25 s do vídeo. Os lados b são
     recomputados dos offsets medidos, então o preenchimento se ajusta."""
     crops: dict[str, str | None] = {}
+    if framing:   # recorte do enquadramento já decidido pelo alinhador
+        crops = {dub_path: framing.get("dub"), orig_path: framing.get("orig")}
 
     def crop_of(path) -> str | None:
         if path not in crops:
@@ -1096,7 +1099,7 @@ def _snap_gap_edges(segs: list[Segment], dub_path, dub_a,
 
 def refine_offsets(segs: list[Segment], dub_path: str, dub_a: int,
                    orig_path: str, orig_a: int, log=print,
-                   on_stage=None) -> list[Segment]:
+                   on_stage=None, framing: dict | None = None) -> list[Segment]:
     """Refino por áudio: funde wobbles do vídeo, resolve 'substituídas' cujo
     áudio é contínuo, mede o perfil de offset em cada match e divide onde há
     edição (corte em silêncio), descarta matches espúrios, refina as
@@ -1106,7 +1109,10 @@ def refine_offsets(segs: list[Segment], dub_path: str, dub_a: int,
     estrutura pode mudar).
 
     on_stage(segs, rótulo): chamado depois de cada etapa com a lista como
-    está — a timeline ao vivo da UI. Só leitura: quem recebe não muda nada."""
+    está — a timeline ao vivo da UI. Só leitura: quem recebe não muda nada.
+
+    framing: o `framing` da EDL (um lado é recorte do outro) — as janelas de
+    vídeo da junção de cena usam os mesmos recortes do fingerprint."""
     def etapa(lista, rotulo):
         if on_stage is not None:
             try:
@@ -1146,7 +1152,8 @@ def refine_offsets(segs: list[Segment], dub_path: str, dub_a: int,
     out = _tighten_extra_dub(out, dub_path, dub_a, log)
     etapa(out, "Trechos espúrios descartados")
     # fronteiras ENTRE segmentos: também saem da grade do vídeo para o áudio
-    out = _refine_cut_junctions(out, dub_path, dub_a, orig_path, orig_a, log)
+    out = _refine_cut_junctions(out, dub_path, dub_a, orig_path, orig_a, log,
+                                framing)
     etapa(out, "Junções de cena refinadas")
     out = _snap_gap_edges(out, dub_path, dub_a, log)
     out = _drop_spurious_gaps(out, log)

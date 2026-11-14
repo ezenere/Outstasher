@@ -175,6 +175,8 @@ async def _align_episode(job: dict, key: str, ep: dict):
         jobs._event(job, "merge", f"⚠️ {key}: {ep['error']}")
         return
 
+    if edl_dict.get("framing"):
+        jobs._event(job, "merge", f"{key}: {edl_dict['framing']['note']}")
     segs = edl_mod.segments(edl_dict)
     dur_dub = edl_dict["source_dub"]["duration"]
     dur_orig = edl_dict["source_orig"]["duration"]
@@ -194,7 +196,7 @@ async def _align_episode(job: dict, key: str, ep: dict):
     jobs.runtime._stage(job, jobs.runtime.PHASE_ALIGN)
     segs = await asyncio.to_thread(
         refine.refine_offsets, segs, dub, dub_a, orig, orig_a, log,
-        on_stage)
+        on_stage, edl_dict.get("framing"))
     # tela preta dos trechos sem dublagem medida já aqui: vai na EDL, a
     # revisão mostra e o render decide sem decodificar de novo
     from services import advanced_merge
@@ -206,7 +208,8 @@ async def _align_episode(job: dict, key: str, ep: dict):
     jobs.runtime.timeline_segments(job, key, segs, "Alinhamento pronto")
     # o rebuild só reescreve os segmentos: os metadados do arquivo FUNDIDO
     # (janela/nota) têm que sobreviver — o render corta o original por eles
-    extras = {k: edl_dict[k] for k in ("merged_side", "a_window", "b_window", "note")
+    extras = {k: edl_dict[k] for k in ("merged_side", "a_window", "b_window", "note",
+                                       "framing")
               if k in edl_dict}
     edl_dict = edl_mod.build(segs, key, dub, dur_a, orig,
                              edl_dict["source_orig"]["duration"],
