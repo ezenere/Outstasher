@@ -269,3 +269,44 @@ def test_crop_params_acha_barras_sujas(tmp_path):
     if crop2 is not None:
         w2, h2, x2, y2 = (int(v) for v in crop2.split(":"))
         assert w2 >= 310 and h2 >= 172, crop2     # continua quadro inteiro
+
+
+def test_crop_params_ignora_cena_escura_de_um_lado(tmp_path):
+    """Caso de campo: episódio 16:9 de quadro cheio cuja amostra do cropdetect
+    caiu numa cena com o lado ESQUERDO escuro. Com uma amostra só, o detector
+    devolvia 'barra' de 80 px só à esquerda, o hash saía do miolo da imagem e
+    o alinhador não casava nada com o original (hasheado inteiro)."""
+    from services.series.align import fingerprint
+    v = tmp_path / "cena_escura.mkv"
+    # 200 s a 5 fps: amostras em 20 s, 80 s e 140 s (500 frames = 100 s
+    # cada); o lado esquerdo fica preto nos primeiros 120 s
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=5:duration=200",
+         "-vf", "drawbox=x=0:y=0:w=80:h=180:color=black:t=fill:enable='lt(t,120)'",
+         "-c:v", "libx264", "-preset", "ultrafast", str(v)], check=True)
+    assert fingerprint._cropdetect(str(v), 20.0, 24) is not None  # o detector cai na armadilha
+    assert fingerprint.crop_params(str(v), duration=200.0) is None
+
+
+def test_crop_params_pillarbox_de_verdade(tmp_path):
+    """Barras laterais no arquivo todo continuam saindo no crop."""
+    from services.series.align import fingerprint
+    v = tmp_path / "pillar.mkv"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc2=size=240x180:rate=5:duration=60",
+         "-vf", "pad=320:180:40:0:color=black",
+         "-c:v", "libx264", "-preset", "ultrafast", str(v)], check=True)
+    crop = fingerprint.crop_params(str(v), duration=60.0)
+    assert crop is not None
+    w, h, x, y = (int(v) for v in crop.split(":"))
+    assert 236 <= w <= 244 and h >= 176 and 38 <= x <= 42, crop
+
+
+def test_bars_shape_ok():
+    from services.series.align import fingerprint
+    assert fingerprint._bars_shape_ok((0, 140, 0, 140), 1920, 1080)      # letterbox
+    assert fingerprint._bars_shape_ok((240, 0, 240, 0), 1920, 1080)      # pillarbox
+    assert not fingerprint._bars_shape_ok((220, 0, 0, 0), 1280, 720)     # cena escura
+    assert not fingerprint._bars_shape_ok((0, 0, 0, 40), 1280, 720)

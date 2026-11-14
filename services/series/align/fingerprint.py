@@ -51,50 +51,91 @@ def _cropdetect(path: str, start: float, limit: int) -> str | None:
     return crop if w > 0 and h > 0 else None
 
 
-def crop_params(path: str, duration: float | None = None) -> str | None:
-    """Crop dominante ("w:h:x:y") via cropdetect, ou None (sem crop preciso).
+def _frame_info(path: str) -> tuple[int, int, float | None] | None:
+    """(largura, altura, duração) do primeiro vídeo, ou None."""
+    proc = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=width,height:format=duration", "-of", "default=nw=1", path],
+        capture_output=True, text=True)
+    vals = dict(line.split("=", 1) for line in proc.stdout.splitlines() if "=" in line)
+    try:
+        w, h = int(vals["width"]), int(vals["height"])
+    except (KeyError, ValueError):
+        return None
+    try:
+        dur = float(vals.get("duration", ""))
+    except ValueError:
+        dur = None
+    return w, h, dur
 
-    Amostra 500 frames a partir de ~5 min (ou de 10% da duração, se o arquivo
-    for curto) — o começo costuma ter logos/créditos sobre preto, que fariam o
-    cropdetect "detectar" um crop gigante.
+
+def _crop_sample_starts(duration: float | None) -> list[float]:
+    """Três pontos espalhados: a partir de ~5 min (o começo costuma ter
+    logos/créditos sobre preto) e em ~40% e ~70% da duração."""
+    if not duration:
+        return [CROP_SAMPLE_START]
+    first = CROP_SAMPLE_START if duration >= CROP_SAMPLE_START * 2 else duration * 0.1
+    return [first, duration * 0.4, duration * 0.7]
+
+
+def _bars(crop: str, full_w: int, full_h: int) -> tuple[int, int, int, int]:
+    """(esquerda, cima, direita, baixo) que o crop "w:h:x:y" tira."""
+    w, h, x, y = (int(v) for v in crop.split(":"))
+    return x, y, max(0, full_w - x - w), max(0, full_h - y - h)
+
+
+def _bars_shape_ok(bars, full_w: int, full_h: int) -> bool:
+    """Barra de verdade é SIMÉTRICA: a mesma faixa em cima e embaixo, e/ou
+    nas duas laterais. Recorte torto é conteúdo escuro, não barra."""
+    left, top, right, bottom = bars
+    tol_x = max(4, int(full_w * 0.01))
+    tol_y = max(4, int(full_h * 0.01))
+    return abs(left - right) <= tol_x and abs(top - bottom) <= tol_y
+
+
+def crop_params(path: str, duration: float | None = None) -> str | None:
+    """Crop das barras pretas ("w:h:x:y"), ou None (quadro inteiro / sem
+    crop confiável).
+
+    O cropdetect roda em três pontos do arquivo e, de cada lado, vale a MENOR
+    faixa preta vista: a barra de verdade está em todos os pontos, uma cena
+    escura só em um. Caso de campo: episódio 16:9 de quadro cheio cuja
+    amostra única (aos 5 min) caiu numa cena com o lado esquerdo escuro — o
+    detector devolveu 220 px "de barra" só à esquerda, o hash do dublado saiu
+    do miolo da imagem e o do original do quadro inteiro, e o alinhador
+    concluiu que "nada casa" entre dois arquivos do mesmo episódio.
 
     Barras "sujas" escapam do limiar padrão (24): num REMUX 4K HDR de campo,
     as barras só apareceram com limiar >= 64 — e aí o hash de um lado saía COM
     barras e o do outro sem, distância ~14 até em cena idêntica (limiar de
-    match: 12), o DP passava o filme inteiro no ruído e desistia de blocos de
-    10+ min. Quando o limiar padrão diz "quadro inteiro", tentamos limiares
-    maiores; o resultado só vale se tiver FORMATO de barras (letterbox com a
-    largura cheia ou pillarbox com a altura cheia) — conteúdo que enche o
-    quadro de verdade produz recortes irregulares nos limiares altos e é
-    descartado, ficando o quadro inteiro mesmo.
+    match: 12). Quando o limiar padrão diz "quadro inteiro", tentamos
+    limiares maiores. Em qualquer limiar o resultado só vale se tiver FORMATO
+    de barras (simétricas); recorte torto é descartado e fica o quadro
+    inteiro.
     """
-    start = CROP_SAMPLE_START
-    if duration is not None and duration < CROP_SAMPLE_START * 2:
-        start = max(0.0, duration * 0.1)
-    crop = _cropdetect(path, start, 24)
-    if crop is None:
+    info = _frame_info(path)
+    if info is None:
         return None
-    w, h, x, y = (int(v) for v in crop.split(":"))
-    if x > 2 or y > 2:
-        return crop      # já achou barras com o limiar padrão
-    full_w, full_h = w + x, h + y
-    for limit in (64, 96):
-        alt = _cropdetect(path, start, limit)
-        if alt is None or alt == crop:
+    full_w, full_h, probed = info
+    starts = _crop_sample_starts(duration or probed)
+    for limit in (24, 64, 96):
+        crops = [c for c in (_cropdetect(path, s, limit) for s in starts) if c]
+        if not crops:
+            if limit == 24:
+                return None
             continue
-        w2, h2, x2, y2 = (int(v) for v in alt.split(":"))
-        # barra de verdade é SIMÉTRICA (mesma faixa em cima e embaixo, ou nas
-        # duas laterais); conteúdo com borda escura produz recorte torto e é
-        # descartado (caso do controle nos testes: 286:180:34:0)
-        tol_y = max(4, int(full_h * 0.01))
-        tol_x = max(4, int(full_w * 0.01))
-        letterbox = (w2 >= full_w * 0.97 and h2 <= full_h * 0.97
-                     and abs(y2 - (full_h - h2) / 2) <= tol_y)
-        pillarbox = (h2 >= full_h * 0.97 and w2 <= full_w * 0.97
-                     and abs(x2 - (full_w - w2) / 2) <= tol_x)
-        if letterbox or pillarbox:
-            return alt
-    return crop
+        per = [_bars(c, full_w, full_h) for c in crops]
+        bars = tuple(min(b[i] for b in per) for i in range(4))
+        if max(bars) <= 2:
+            continue                  # quadro inteiro neste limiar
+        if not _bars_shape_ok(bars, full_w, full_h):
+            continue
+        left, top, right, bottom = bars
+        w, h = full_w - left - right, full_h - top - bottom
+        if w <= 0 or h <= 0:
+            continue
+        return f"{w}:{h}:{left}:{top}"
+    return None
 
 
 # aceleradores de decode tentados, em ordem, antes do software (a chave é a
