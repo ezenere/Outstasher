@@ -27,7 +27,7 @@ import threading
 from functools import lru_cache
 from pathlib import Path
 
-from services import merger
+from services import fsperm, merger
 from services.series.align.classify import Segment
 
 # tolerância para "fatia colada na anterior" (evita micro-gaps de arredondamento)
@@ -735,7 +735,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
                         for ex in extras))
     filter_complex = ";".join(chains)
 
-    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    fsperm.makedirs(Path(output).parent)
     log(f"Montando o áudio dublado: {len(slices)} fatia(s), {len(fills)} preenchimento(s)"
         + ("" if has_rubberband() else " (sem rubberband: fallback asetrate)"))
 
@@ -808,6 +808,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
                     "mux final (mkvmerge) falhou: "
                     + merger.describe_exit(p2.returncode, p2.stdout or p2.stderr))
             _check_mux_duration(output, duration_b)
+            fsperm.apply(output)
             _log_subs(subs_prontas, log)
             return {"b_shift": 0.0, "b_cuts": b_cuts,
                     "subs_muxed": len(subs_prontas), "plan": plan}
@@ -883,6 +884,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         # código 0 e um arquivo pela METADE — melhor um erro claro aqui do que
         # um episódio faltando o final na estante
         _check_mux_duration(output, duration_b)
+        fsperm.apply(output)
     finally:
         # a pasta INTEIRA: o .mka, o original cortado, o re-encodado (que só o
         # rmdir de pasta vazia nunca alcançava — 55 sobras de ~1,5 GB, 78 GB de

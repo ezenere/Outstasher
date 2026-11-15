@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 import config
 from services import advanced_merge, auth, catalog, jackett, jobs, store, tmdb, transcode
-from services import browse
+from services import browse, fsperm
 from services import search_retry, stall_switch
 from services.series import activity as series_activity
 from services.series import manual as series_manual
@@ -51,6 +51,7 @@ def _with_disk(dest: dict) -> dict:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    print(fsperm.describe(), flush=True)
     jobs.load()
     jobs.resume_pending()
     # _event só marca o job como sujo; este loop grava os sujos quando a

@@ -29,7 +29,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from services import merger
+from services import fsperm, merger
 from services.merger import MergeError, MergeResult
 
 # offsets de segmentos que diferem menos que isto são "o mesmo offset"
@@ -455,10 +455,11 @@ def merge_segmented(file1: str, file2: str, output: str, target_lang: str | None
             str(merger.sized_interleave_delta(merger.byte_rate_of(probes[ref_input]))),
             output]
 
-    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    fsperm.makedirs(Path(output).parent)
     log("Executando ffmpeg...")
     log("+ " + " ".join(cmd))
     merger._run_ffmpeg_progress(cmd, duration, on_progress)
 
+    fsperm.apply(output)
     log(f"OK: {output}")
     return result

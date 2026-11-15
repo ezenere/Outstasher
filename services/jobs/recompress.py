@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from services import catalog, store, tmdb, transcode
+from services import catalog, fsperm, store, tmdb, transcode
 from services.jobs.runtime import (
     _event, _fail, _ffmpeg_hooks, _ffmpeg_procs, _free_name, _merge_slot,
     _jobs, _public, _register_proc, _set, _spawn)
@@ -131,9 +131,11 @@ async def _recompress(job: dict, src: Path, tmp: Path, opts: "transcode.ConvertO
             return str(src), after, None
         if replace:
             out.replace(src)  # atômico: o filme nunca some, só troca de conteúdo
+            fsperm.apply(src)
             return str(src), after, str(src)
         final = _free_name(src.with_name(f"{src.stem} [recomprimido].mkv"))
         out.replace(final)
+        fsperm.apply(final)
         return str(final), after, str(final)
 
     final_path, after, wrote = await asyncio.to_thread(_finalize)

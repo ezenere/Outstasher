@@ -26,7 +26,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from services import merger
+from services import fsperm, merger
 from services.series import parse
 
 TEXT_EXT = {".srt", ".ass", ".ssa", ".vtt"}
@@ -448,6 +448,7 @@ def mux(output: str, items: list[dict], log=print) -> int:
         tmp.unlink(missing_ok=True)
         raise merger.MergeError(f"mux de legendas falhou: {p.stderr.strip()[-600:]}")
     os.replace(tmp, out)
+    fsperm.apply(out)   # inode novo, criado pelo ffmpeg como root
     log("Legendas externas anexadas: " + ", ".join(
         f"{Path(it['path']).name} → {it['lang']}"
         + (f" ({it['flavor']})" if it['flavor'] != 'normal' else "")
@@ -472,6 +473,7 @@ def sidecar(output: str, items: list[dict], log=print) -> int:
             dst = out.with_name(f"{out.stem}.{it['lang']}{suffix}.{k}.srt")
             k += 1
         dst.write_bytes(Path(it["srt"]).read_bytes())  # o srt está num temp dir
+        fsperm.apply(dst)
         n += 1
         log(f"Legenda externa gravada ao lado: {dst.name} (de {Path(it['path']).name})")
     return n

@@ -63,6 +63,10 @@ docker compose up -d --build   # http://localhost:8008
   caminhos de dentro do container.
 - `jobs.db` e senha em `./outstasher-config` (`/config`).
 - GPU Intel: `devices: /dev/dri` + `group_add` com os GIDs de `render`/`video`.
+- Dono/permissão do que o app grava: `PUID`, `PGID` (números do host) e
+  `FILE_MODE`/`DIR_MODE` em octal (ex.: `775`). Valem para arquivo entregue,
+  legenda ao lado, recompressão e pastas que o app cria; vazio = não mexe.
+  Hardlink é o mesmo inode do torrent: a regra vale para os dois.
 
 ## Filmes
 

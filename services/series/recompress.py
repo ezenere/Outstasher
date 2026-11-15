@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from services import catalog, store, tmdb, transcode
+from services import catalog, fsperm, store, tmdb, transcode
 from services import jobs
 from services.series import merge_runner
 
@@ -199,6 +199,7 @@ async def _recompress_one(job: dict, ep: dict, opts):
             return None
         if job["recompress"]["replace"]:
             out.replace(src)
+            fsperm.apply(src)
             return str(src)
         final = src.with_name(f"{src.stem} [recomprimido].mkv")
         n = 2
@@ -206,6 +207,7 @@ async def _recompress_one(job: dict, ep: dict, opts):
             final = src.with_name(f"{src.stem} [recomprimido] ({n}).mkv")
             n += 1
         out.replace(final)
+        fsperm.apply(final)
         return str(final)
 
     final_path = await asyncio.to_thread(_finalize)

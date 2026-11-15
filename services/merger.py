@@ -48,6 +48,8 @@ from pathlib import Path
 
 import numpy as np
 
+from services import fsperm
+
 # ---------- parametros do alinhamento ----------
 ALIGN_SR = 8000
 ALIGN_START = 30.0        # pula intros/logos
@@ -807,11 +809,12 @@ def _link_or_copy(src: Path, dst: Path, notes: list[str]):
     não quebra se o original for movido). Se não der (volumes diferentes, FS sem
     suporte a hardlink), cai para cópia real.
     """
-    dst.parent.mkdir(parents=True, exist_ok=True)
+    fsperm.makedirs(dst.parent)
     if dst.exists() or dst.is_symlink():
         dst.unlink()
     try:
         os.link(src, dst)
+        fsperm.apply(dst)   # mesmo inode do torrent: a regra vale para os dois
         notes.append(f"hardlink criado: {dst}")
         return
     except OSError as e:
@@ -829,6 +832,7 @@ def _link_or_copy(src: Path, dst: Path, notes: list[str]):
             shutil.copystat(src, dst)
         except OSError:
             pass  # metadados (mtime/permissões) são melhor-esforço
+    fsperm.apply(dst)   # depois do copystat, que traria o modo da origem
     notes.append(f"cópia criada: {dst}")
 
 
@@ -1107,6 +1111,7 @@ def fix_interleaving(output: str, stderr: str, log=lambda _m: None) -> str | Non
             tmp.unlink(missing_ok=True)
             return warn
         os.replace(tmp, output)
+        fsperm.apply(output)   # inode novo, criado pelo mkvmerge como root
     except OSError:
         tmp.unlink(missing_ok=True)
         return warn
@@ -1520,7 +1525,7 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
             str(sized_interleave_delta(byte_rate_of(probes[ref_input]))),
             output]
 
-    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    fsperm.makedirs(Path(output).parent)
     log("Executando ffmpeg...")
     log("+ " + " ".join(cmd))
     # duracao esperada da saida = duracao do arquivo de referencia (video em copy)
@@ -1543,5 +1548,6 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
             result.notes.append(n)
             log(n)
 
+    fsperm.apply(output)
     log(f"OK: {output}")
     return result

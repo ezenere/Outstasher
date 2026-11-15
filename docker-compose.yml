@@ -19,6 +19,15 @@ services:
       # Destino "Padrao" criado na primeira execucao. E um caminho DENTRO do
       # container: precisa existir via algum mount de volumes.
       - OUTPUT_DIR=/mnt/outer/coldstorage/media/movies
+      # Dono e permissao de TUDO que o app grava na midia (filme, legenda,
+      # pastas que ele cria). O container roda como root: sem isto sai
+      # root:root 644. NUMEROS do host (id -u; getent group <grupo>) —
+      # nomes do host nao existem no container. Vazio = nao mexe.
+      # Modos em octal: 775 = rwxrwxr-x.
+      - PUID=
+      - PGID=
+      - FILE_MODE=
+      - DIR_MODE=
     ports:
       - "8008:8008"
 

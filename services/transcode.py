@@ -27,7 +27,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import config
-from services import merger  # o merger só importa este módulo dentro de função (sem ciclo)
+from services import fsperm, merger  # o merger só importa este módulo dentro de função (sem ciclo)
 
 # -------------------- catálogo do que oferecemos --------------------
 
@@ -1027,7 +1027,7 @@ def convert_single(src: str, output: str, opts: ConvertOptions,
             str(merger.sized_interleave_delta(merger.byte_rate_of(probe))),
             output]
 
-    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    fsperm.makedirs(Path(output).parent)
     for n in result.notes:
         log(n)
     log("Executando ffmpeg...")
@@ -1039,5 +1039,6 @@ def convert_single(src: str, output: str, opts: ConvertOptions,
         for n in preserve_hdr_metadata(src, output, int(best_v.get("_type_index") or 0)):
             result.notes.append(n)
             log(n)
+    fsperm.apply(output)
     log(f"OK: {output}")
     return result
