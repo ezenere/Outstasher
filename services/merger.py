@@ -41,6 +41,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import wave
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -969,65 +970,219 @@ def has_mkvmerge() -> bool:
     return shutil.which("mkvmerge") is not None
 
 
+MKV_PROGRESS = re.compile(r"Progress:\s*(\d+(?:\.\d+)?)%")
+
+
+def run_mkvmerge(cmd: list[str], on_progress=None,
+                 on_start=None) -> subprocess.CompletedProcess:
+    """mkvmerge com progresso: ele imprime 'Progress: NN%' na saída padrão
+    enquanto copia. Sem isso o mux de um REMUX de 150 GB fica uma hora sem
+    dar sinal e parece travado. on_start(proc): como no ffmpeg, para o
+    cancelamento do job poder matar o processo."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace",
+                            bufsize=1, preexec_fn=mem_limiter())
+    if on_start:
+        on_start(proc)
+    erros: list[str] = []
+    dreno = threading.Thread(target=lambda: erros.extend(proc.stderr), daemon=True)
+    dreno.start()
+    linhas: list[str] = []
+    for line in proc.stdout:
+        linhas.append(line)
+        m = MKV_PROGRESS.search(line)
+        if m and on_progress:
+            pct = float(m.group(1))
+            on_progress({"pct": pct, "read_pct": pct, "out_s": 0.0,
+                         "duration_s": 0.0, "size": 0, "bitrate": 0,
+                         "speed": 0.0, "fps": 0.0, "eta": None})
+    proc.stdout.close()
+    proc.wait()
+    dreno.join(timeout=5)
+    proc.stderr.close()
+    if on_progress and proc.returncode < 2:
+        on_progress({"pct": 100.0, "read_pct": 100.0, "out_s": 0.0, "duration_s": 0.0,
+                     "size": 0, "bitrate": 0, "speed": 0.0, "fps": 0.0, "eta": 0})
+    return subprocess.CompletedProcess(cmd, proc.returncode,
+                                       "".join(linhas), "".join(erros))
+
+
+def is_matroska(probe: dict) -> bool:
+    return "matroska" in ((probe.get("format") or {}).get("format_name") or "")
+
+
+def mkvmerge_merge_cmd(output: str, paths: tuple[str, str], video: dict,
+                       audios: list[dict], subs: list[dict],
+                       chapters_from: int | None,
+                       shifts_ms: tuple[int, int]) -> list[str]:
+    """mkvmerge do merge de CÓPIA (offset constante, nada re-encodado): o
+    mesmo arquivo que o ffmpeg faria, sem o modo de falha de intercalação
+    dele (fix_interleaving) — o mkvmerge puxa de cada entrada pelo tempo.
+
+    paths: (entrada 0 = a do vídeo, entrada 1 = a outra). video/audios/subs:
+    {"src": 0|1, "stream": <stream do ffprobe>, ...}; audios com "lang",
+    "title" e "default", subs com "lang" e "title". Ids de faixa do mkvmerge
+    num MKV = `index` do ffprobe (a ordem das faixas no arquivo).
+    shifts_ms: atraso de cada entrada (o -itsoffset do caminho ffmpeg).
+    Flags das legendas (padrão/forçada) vêm da origem, como no ffmpeg."""
+    per = {0: [], 1: []}
+    sel = {0: {"d": [], "a": [], "s": []}, 1: {"d": [], "a": [], "s": []}}
+    order = []
+
+    def tid(item):
+        return int(item["stream"]["index"])
+
+    sel[video["src"]]["d"].append(tid(video))
+    order.append((video["src"], tid(video)))
+    for a in audios:
+        t = tid(a)
+        sel[a["src"]]["a"].append(t)
+        order.append((a["src"], t))
+        per[a["src"]] += ["--language", f"{t}:{a['lang']}",
+                          "--track-name", f"{t}:{a.get('title') or ''}",
+                          "--default-track-flag", f"{t}:{'yes' if a.get('default') else 'no'}",
+                          "--forced-display-flag", f"{t}:no"]
+    for sb in subs:
+        t = tid(sb)
+        sel[sb["src"]]["s"].append(t)
+        order.append((sb["src"], t))
+        per[sb["src"]] += ["--language", f"{t}:{sb['lang']}",
+                           "--track-name", f"{t}:{sb.get('title') or ''}"]
+    cmd = ["mkvmerge", "-o", output]
+    for f in (0, 1):
+        opts = []
+        for key, none in (("d", "-D"), ("a", "-A"), ("s", "-S")):
+            ids = sel[f][key]
+            opts += [f"-{key}", ",".join(map(str, ids))] if ids else [none]
+        # anexos e botões ficam de fora (o ffmpeg também não levava); tags
+        # globais e capítulos só de onde o caminho ffmpeg tiraria
+        opts += ["-B", "-M"]
+        if chapters_from != f:
+            opts.append("--no-chapters")
+        if f == 1:
+            opts.append("--no-global-tags")
+        if shifts_ms[f]:
+            for t in sel[f]["d"] + sel[f]["a"] + sel[f]["s"]:
+                opts += ["--sync", f"{t}:{shifts_ms[f]}"]
+        cmd += opts + per[f] + [paths[f]]
+    return cmd + ["--track-order", ",".join(f"{f}:{t}" for f, t in order)]
+
+
+def isolate_subtitles(src: str, in_opts: list[str], subs: list[dict],
+                      tmp_dir: Path, tag: str, log=lambda _m: None) -> str | None:
+    """Copia as legendas `subs` (streams do ffprobe, com _type_index) de `src`
+    para um .mks pequeno, que entra no mux do ffmpeg como ENTRADA PRÓPRIA.
+
+    É a prevenção do defeito de fix_interleaving no caminho ffmpeg: com a
+    legenda esparsa numa entrada barata, o scheduler destrava ESSA entrada,
+    lê a próxima fala na hora, e as entradas de vídeo/áudio andam juntas.
+    in_opts: as MESMAS opções de entrada que `src` tem no mux (janela -ss/-t),
+    para os tempos baterem — o .mks só de legenda não tem start_time e não
+    é deslocado de novo. Legenda que o MKV não aceita em cópia (mov_text...)
+    já sai convertida para SRT. Custa uma leitura de `src`. None = falhou
+    (o chamador mapeia da entrada original, como antes)."""
+    out = Path(tmp_dir) / f"legendas_{tag}.mks"
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+           *in_opts, "-i", src]
+    for k, s in enumerate(subs):
+        cmd += ["-map", f"0:s:{int(s['_type_index'])}"]
+        cmd += [f"-c:s:{k}", "subrip" if sub_needs_reencode_to_mkv(s.get("codec_name"))
+                else "copy"]
+    cmd += ["-f", "matroska", str(out)]
+    log(f"Separando {len(subs)} legenda(s) de {Path(src).name} numa entrada "
+        f"própria (lê o arquivo uma vez; evita a dublagem sair fora do lugar)...")
+    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                       errors="replace")
+    if p.returncode != 0 or not out.exists():
+        log(f"⚠️ não deu para separar as legendas ({p.stderr.strip()[-200:]}); "
+            f"elas seguem da entrada original")
+        out.unlink(missing_ok=True)
+        return None
+    return str(out)
+
+
 # quanto uma faixa de áudio pode estar gravada longe do vídeo do mesmo
 # instante (no arquivo, não no tempo) antes de o arquivo precisar ser
-# reintercalado — o piso de intercalação do próprio ffmpeg
-INTERLEAVE_CHECK_TOL_S = INTERLEAVE_MIN_S
-INTERLEAVE_CHECK_POINTS = (0.1, 0.35, 0.6, 0.85)
-# janela por TEMPO, não por pacotes: TrueHD manda ~1.200 pacotes/s e 4.000
-# pacotes cobriam só 3 s — uma faixa poucos segundos fora caía da janela
-INTERLEAVE_CHECK_WINDOW_S = 20
+# reintercalado. Num mux sadio fica abaixo de 1 s (ffmpeg ou mkvmerge); os
+# buracos de verdade vão de ~8 s a vários minutos.
+INTERLEAVE_CHECK_TOL_S = 5.0
+
+
+def _packet_order(path: str):
+    """(stream_index, pts) de cada pacote NA ORDEM GRAVADA no arquivo — o
+    ffprobe lê o arquivo inteiro e a saída vem em streaming (um REMUX 4K tem
+    ~9 milhões de pacotes de TrueHD; nada disso fica na memória)."""
+    proc = subprocess.Popen(
+        ["ffprobe", "-v", "error", "-show_entries", "packet=stream_index,pts_time",
+         "-of", "csv=p=0", path],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        encoding="utf-8", errors="replace")
+    try:
+        for line in proc.stdout:
+            idx, _, t = line.strip().partition(",")
+            try:
+                yield int(idx), float(t.split(",")[0])
+            except ValueError:
+                continue
+    finally:
+        proc.stdout.close()
+        proc.wait()
+    if proc.returncode != 0:
+        raise MergeError(f"ffprobe falhou lendo os pacotes de {path}")
 
 
 def interleave_lags(path: str) -> dict[int, float] | None:
     """Quanto cada faixa de áudio está gravada longe do vídeo, em segundos,
-    medido NO ARQUIVO: em alguns pontos, lê pacotes na ordem em que estão
-    gravados e compara o tempo de cada áudio com o do vídeo ali. Faixa que
-    nem aparece no trecho conta como infinita. Chave = posição da faixa entre
-    os ÁUDIOS (0 = primeiro áudio). None = não deu para medir (o chamador não
-    mexe no arquivo).
+    medido NO ARQUIVO INTEIRO: lê os pacotes na ordem em que estão gravados e,
+    para cada áudio, guarda o maior desvio entre o tempo dele e o do vídeo
+    gravado ali e o maior trecho em que o vídeo anda sem ele aparecer
+    (buraco). Faixa que nunca aparece conta como infinita. Chave = posição da
+    faixa entre os ÁUDIOS (0 = primeiro áudio). None = não deu para medir (o
+    chamador não mexe no arquivo).
 
-    O aviso "forcing output" do ffmpeg não basta: num caso real a dublagem
-    saiu inteira gravada nos primeiros minutos do arquivo (8 min adiantada
-    aos 5 min, ausente dali em diante) e o Jellyfin cortava o áudio aos ~6
-    min — com o aviso escondido pelo -loglevel error do comando."""
+    O arquivo INTEIRO, não amostras: o defeito é local. Caso real: a
+    dublagem sumia em 11 trechos de 8 s a 6 min (uma música sem legenda
+    basta, ver fix_interleaving) e a amostra de 4 pontos passou limpa. Custa
+    uma leitura do arquivo (~10 min num REMUX 4K de 80 GB).
+
+    Desvio de pacote depois do ÚLTIMO vídeo não conta: dublagem que segue
+    uns segundos além do vídeo é normal, não intercalação."""
     try:
-        pr = ffprobe_json(path)
-        dur = float((pr.get("format") or {}).get("duration") or 0)
-    except (MergeError, ValueError, TypeError):
+        streams = ffprobe_json(path).get("streams") or []
+        video = next((s["index"] for s in streams if s.get("codec_type") == "video"
+                      and (s.get("disposition") or {}).get("attached_pic") != 1), None)
+        audios = [s["index"] for s in streams if s.get("codec_type") == "audio"]
+    except (MergeError, ValueError, TypeError, KeyError, AttributeError):
         return None
-    streams = pr.get("streams") or []
-    video = next((s["index"] for s in streams if s.get("codec_type") == "video"
-                  and (s.get("disposition") or {}).get("attached_pic") != 1), None)
-    audios = [s["index"] for s in streams if s.get("codec_type") == "audio"]
-    if video is None or not audios or dur <= 0:
+    if video is None or not audios:
         return None
-    lags = {k: 0.0 for k in range(len(audios))}
-    for frac in INTERLEAVE_CHECK_POINTS:
-        p = subprocess.run(
-            ["ffprobe", "-v", "error", "-read_intervals",
-             f"{dur * frac:.1f}%+{INTERLEAVE_CHECK_WINDOW_S}",
-             "-show_entries", "packet=stream_index,pts_time", "-of", "csv=p=0", path],
-            capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if p.returncode != 0:
-            return None
-        pts: dict[int, list[float]] = defaultdict(list)
-        for line in p.stdout.split():
-            idx, _, t = line.partition(",")
-            try:
-                pts[int(idx)].append(float(t.split(",")[0]))
-            except ValueError:
+    pos = {a: k for k, a in enumerate(audios)}
+    worst = {a: 0.0 for a in audios}
+    pending = {a: 0.0 for a in audios}      # desvios desde o último vídeo
+    seen_at: dict[int, float | None] = {a: None for a in audios}
+    last_v = None
+    try:
+        for idx, t in _packet_order(path):
+            if idx == video:
+                last_v = t if last_v is None else max(last_v, t)
+                for a in audios:
+                    if pending[a] > worst[a]:
+                        worst[a] = pending[a]
+                    pending[a] = 0.0
                 continue
-        if not pts.get(video):
-            continue
-        v = sorted(pts[video])[len(pts[video]) // 2]
-        for k, a in enumerate(audios):
-            if not pts.get(a):
-                lags[k] = float("inf")
+            if idx not in pos or last_v is None:
                 continue
-            mediana = sorted(pts[a])[len(pts[a]) // 2]
-            lags[k] = max(lags[k], abs(mediana - v))
-    return lags
+            prev = seen_at[idx]
+            if prev is not None and last_v - prev > worst[idx]:
+                worst[idx] = last_v - prev               # buraco
+            seen_at[idx] = last_v
+            pending[idx] = max(pending[idx], abs(t - last_v))
+    except MergeError:
+        return None
+    if last_v is None:
+        return None
+    return {pos[a]: (worst[a] if seen_at[a] is not None else float("inf"))
+            for a in audios}
 
 
 def interleave_lag(path: str) -> float | None:
@@ -1076,6 +1231,17 @@ def fix_interleaving(output: str, stderr: str, log=lambda _m: None) -> str | Non
     (caso real: o Jellyfin perdia a dublagem aos 6 min). O mkvmerge
     reintercala e reescreve os indices em stream copy.
 
+    De onde vem (reproduzido com o ffmpeg 7.1): mux de DUAS entradas com uma
+    legenda esparsa. O scheduler do ffmpeg só destrava a entrada da faixa
+    mais atrasada — a legenda sem fala —, lê só aquela entrada, e quando o
+    -max_interleave_delta estoura o muxer grava sem a faixa da OUTRA entrada.
+    Legenda na entrada do vídeo: a dublagem some e chega atrasada (caso real:
+    11 buracos, 19 min, porque as músicas não tinham legenda); legenda na
+    entrada dublada: a dublagem sai adiantada e depois some. O "forcing
+    output" do muxer é log de DEBUG — nunca chega no stderr. Por isso o
+    merge de cópia vai pelo mkvmerge e o do ffmpeg tira as legendas para uma
+    entrada própria (isolate_subtitles); isto aqui é a rede.
+
     Além do aviso do ffmpeg, MEDE o arquivo (interleave_lags): o aviso pode
     não chegar (loglevel) e não é a única forma de sair desgarrado. Faixa de
     áudio medida fora do lugar ganha leitor próprio no mkvmerge
@@ -1084,7 +1250,14 @@ def fix_interleaving(output: str, stderr: str, log=lambda _m: None) -> str | Non
 
     Devolve a nota para o usuario (None se o mux ja saiu limpo)."""
     warn = interleave_warning(stderr)
-    lags = interleave_lags(output) if Path(output).suffix.lower() == ".mkv" else None
+    lags = None
+    if Path(output).suffix.lower() == ".mkv":
+        log("Conferindo a intercalação no arquivo inteiro (lê o arquivo todo)...")
+        t0 = time.monotonic()
+        lags = interleave_lags(output)
+        if lags is not None:
+            log(f"Intercalação conferida em {time.monotonic() - t0:.0f} s: pior faixa "
+                f"a {max(lags.values()):.1f} s do vídeo")
     soltas = sorted(k for k, v in (lags or {}).items() if v > INTERLEAVE_CHECK_TOL_S)
     if soltas:
         pior = max(lags[k] for k in soltas)
@@ -1424,6 +1597,7 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
            "-progress", "pipe:1", "-y",
            *(vplan.input_args if vplan else []),
            "-fflags", "+genpts", *in_ref, *in_oth]
+    inputs_end = len(cmd)   # legendas isoladas entram aqui (são entradas)
 
     cmd += ["-map", f"0:v:{int(best_v['_type_index'])}"]
 
@@ -1507,16 +1681,53 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
     for i in range(len(mapped)):
         cmd += [f"-disposition:a:{i}", "default" if i == default_audio_out else "0"]
 
+    # Cópia pura num MKV (o caso comum): quem muxa é o mkvmerge, que puxa de
+    # cada entrada pelo tempo. O ffmpeg, com duas entradas e uma legenda
+    # esparsa, grava trechos inteiros sem a dublagem (fix_interleaving).
+    use_mkvmerge = (Path(output).suffix.lower() == ".mkv" and has_mkvmerge()
+                    and container_sync and not filter_chains
+                    and not (vplan and vplan.encode)
+                    and not any(it["plan"] and it["plan"].encode for it in mapped)
+                    and not any(sub_needs_reencode_to_mkv(s.get("codec_name"))
+                                for _, s in selected_subs)
+                    and is_matroska(probes[ref_input]) and is_matroska(probes[other_input]))
+
+    # No ffmpeg, as legendas saem para uma entrada própria (isolate_subtitles)
+    sub_tmp = None
+    isolated: dict[int, tuple[int, list[int]]] = {}   # src_cmd -> (entrada, ordem)
+    if not use_mkvmerge and selected_subs:
+        sub_tmp = Path(tempfile.mkdtemp(prefix="merge_legendas_"))
+        extra_inputs = []
+        for src_cmd, (path, in_args) in enumerate(((ref_path, in_ref), (oth_path, in_oth))):
+            grupo = [s for src_orig, s in selected_subs
+                     if (0 if src_orig == ref_input else 1) == src_cmd]
+            if not grupo:
+                continue
+            mks = isolate_subtitles(path, [], grupo, sub_tmp, str(src_cmd), log)
+            if mks is None:
+                continue
+            isolated[src_cmd] = (2 + len(isolated),
+                                 [int(s["_type_index"]) for s in grupo])
+            # o mesmo -itsoffset da entrada de onde as legendas vieram
+            extra_inputs += [*in_args[:-2], "-i", mks]
+        cmd[inputs_end:inputs_end] = extra_inputs
+
+    sub_items = []
     for out_s, (src_orig, s) in enumerate(selected_subs):
         src_cmd = 0 if src_orig == ref_input else 1
-        cmd += ["-map", f"{src_cmd}:s:{int(s['_type_index'])}"]
-        if sub_needs_reencode_to_mkv(s.get("codec_name")):
-            cmd += [f"-c:s:{out_s}", "subrip"]
+        if src_cmd in isolated:
+            entrada, ordem = isolated[src_cmd]
+            cmd += ["-map", f"{entrada}:s:{ordem.index(int(s['_type_index']))}"]
+        else:
+            cmd += ["-map", f"{src_cmd}:s:{int(s['_type_index'])}"]
+            if sub_needs_reencode_to_mkv(s.get("codec_name")):
+                cmd += [f"-c:s:{out_s}", "subrip"]
         sub_lang = canonical_lang(raw_lang_of(s))
         cmd += [f"-metadata:s:s:{out_s}", f"language={sub_lang}"]
         # mesmo tratamento das legendas: só título relevante (SDH/forçada/und)
         sub_title = clean_stream_title(s, sub_lang, from_disposition_forced=is_forced(s)) or ""
         cmd += [f"-metadata:s:s:{out_s}", f"title={sub_title}"]
+        sub_items.append({"src": src_cmd, "stream": s, "lang": sub_lang, "title": sub_title})
 
     cmd += ["-map_chapters", "-1" if chapters_src is None else str(0 if chapters_src == ref_input else 1)]
     cmd += ["-map_metadata", "0",
@@ -1526,17 +1737,43 @@ def merge(file1: str, file2: str, output: str, target_lang: str | None = None,
             output]
 
     fsperm.makedirs(Path(output).parent)
-    log("Executando ffmpeg...")
-    log("+ " + " ".join(cmd))
-    # duracao esperada da saida = duracao do arquivo de referencia (video em copy)
-    out_duration = _duration_of(probes[ref_input]) or duration
-    total_frames = _total_frames(probes[ref_input], out_duration)
-    # pára-quedas de memória só quando NÃO há encode de vídeo: aí o comando é
-    # cópia (mais, no máximo, áudio filtrado) e GBs de RAM significariam o
-    # muxer preso numa faixa esparsa — o que o delta dimensionado já impede.
-    mem_cap = None if (vplan and vplan.encode) else MUX_MEM_LIMIT_GB
-    tail = _run_ffmpeg_progress(cmd, out_duration, on_progress, on_start,
-                                total_frames, mem_limit_gb=mem_cap)
+    if use_mkvmerge:
+        shift_ms = round(abs(tau_s) * 1000) if apply_offset else 0
+        mkv_cmd = mkvmerge_merge_cmd(
+            output, (ref_path, oth_path),
+            {"src": 0, "stream": best_v},
+            [{"src": it["src_cmd"], "stream": it["stream"], "lang": it["lang"],
+              "title": clean_stream_title(it["stream"], it["lang"]) or "",
+              "default": out_i == default_audio_out}
+             for out_i, it in enumerate(mapped)],
+            sub_items,
+            None if chapters_src is None else (0 if chapters_src == ref_input else 1),
+            (shift_ms if tau_s > 0 else 0, shift_ms if tau_s < 0 else 0))
+        result.mode = result.mode.replace("via -itsoffset", "via mkvmerge --sync")
+        log("Executando mkvmerge (cópia: intercala as faixas pelo tempo)...")
+        log("+ " + " ".join(mkv_cmd))
+        p = run_mkvmerge(mkv_cmd, on_progress, on_start)
+        if p.returncode >= 2:   # 1 = só avisos
+            Path(output).unlink(missing_ok=True)
+            raise MergeError("mkvmerge falhou: "
+                             + describe_exit(p.returncode, (p.stdout or "") + (p.stderr or "")))
+        tail = ""
+    else:
+        log("Executando ffmpeg...")
+        log("+ " + " ".join(cmd))
+        # duracao esperada da saida = duracao do arquivo de referencia (video em copy)
+        out_duration = _duration_of(probes[ref_input]) or duration
+        total_frames = _total_frames(probes[ref_input], out_duration)
+        # pára-quedas de memória só quando NÃO há encode de vídeo: aí o comando é
+        # cópia (mais, no máximo, áudio filtrado) e GBs de RAM significariam o
+        # muxer preso numa faixa esparsa — o que o delta dimensionado já impede.
+        mem_cap = None if (vplan and vplan.encode) else MUX_MEM_LIMIT_GB
+        try:
+            tail = _run_ffmpeg_progress(cmd, out_duration, on_progress, on_start,
+                                        total_frames, mem_limit_gb=mem_cap)
+        finally:
+            if sub_tmp is not None:
+                shutil.rmtree(sub_tmp, ignore_errors=True)
     warn = fix_interleaving(output, tail, log)
     if warn:
         result.notes.append(warn)

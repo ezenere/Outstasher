@@ -19,7 +19,6 @@ na EDL do job, não na mídia. Num original FUNDIDO (b_window) o ffmpeg desloca
 e recorta os capítulos junto com o -ss/-to.
 """
 import math
-import re
 import shutil
 import subprocess
 import tempfile
@@ -498,7 +497,7 @@ def _apply_video_cuts(segs, orig_path: str, tmp_dir: Path, log,
     # 11 cortes = dublagem até 4 s fora do lugar depois do remapeamento).
     spec = ",".join(f"{ts(a)}-{ts(b)}" for a, b in mantidos)
     base = tmp_dir / "orig_parte.mkv"
-    p = _run_mkvmerge(["mkvmerge", "-o", str(base),
+    p = merger.run_mkvmerge(["mkvmerge", "-o", str(base),
                        "--split", f"parts:{spec}", orig_path], None)
     partes = sorted(tmp_dir.glob("orig_parte-*.mkv")) or (
         [base] if base.exists() else [])
@@ -802,7 +801,7 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         if has_mkvmerge() and not in_opts:
             cmd2 = _mkvmerge_cmd(str(output), orig_path, str(dub_mka),
                                  iso, probe_orig, subs_prontas, extras)
-            p2 = _run_mkvmerge(cmd2, mux_progress)
+            p2 = merger.run_mkvmerge(cmd2, mux_progress)
             if p2.returncode >= 2:   # 1 = só avisos; 2 = erro de verdade
                 raise merger.MergeError(
                     "mux final (mkvmerge) falhou: "
@@ -828,6 +827,15 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
         sub_in0 = 2 + (1 if ch_file is not None else 0)
         for it in subs_prontas:
             cmd2 += ["-i", it["srt"]]
+        # legendas do original numa ENTRADA PRÓPRIA (com a mesma janela): com
+        # elas na entrada do vídeo, um trecho longo sem fala faz o ffmpeg ler
+        # só o original e gravar sem a dublagem (merger.fix_interleaving)
+        subs_orig = merger.usable_subtitles(probe_orig)
+        subs_mks = (merger.isolate_subtitles(orig_path, in_opts, subs_orig, tmp_dir,
+                                             "orig", log) if subs_orig else None)
+        subs_in = sub_in0 + len(subs_prontas)
+        if subs_mks:
+            cmd2 += ["-i", subs_mks]
         cmd2 += ["-map", "0:v:0", "-c:v", "copy"]
         # áudios do original (todas as línguas), depois o dublado
         n_orig_a = len(merger.get_streams(probe_orig, "audio"))
@@ -844,10 +852,10 @@ def render(segs: list[Segment], dub_path: str, orig_path: str, output: str,
                 cmd2 += [f"-metadata:s:a:{n_orig_a + k}", f"title={ex['title']}"]
         # legendas do original intactas — TODAS: legenda comum é o motivo
         # de existirem, e é a intercalação que se adapta a elas (abaixo)
-        subs_orig = merger.usable_subtitles(probe_orig)
         n_orig_s = len(subs_orig)
         for k, st in enumerate(subs_orig):
-            cmd2 += ["-map", f"0:s:{int(st['_type_index'])}", f"-c:s:{k}", "copy"]
+            src = f"{subs_in}:s:{k}" if subs_mks else f"0:s:{int(st['_type_index'])}"
+            cmd2 += ["-map", src, f"-c:s:{k}", "copy"]
         for k, it in enumerate(subs_prontas):
             idx = n_orig_s + k
             titulo = {"forced": "Forçada", "sdh": "SDH"}.get(it["flavor"], "")
@@ -1094,9 +1102,6 @@ def _log_subs(prontas: list[dict], log) -> None:
             for it in prontas))
 
 
-_MKV_PROGRESS = re.compile(r"Progress:\s*(\d+(?:\.\d+)?)%")
-
-
 @lru_cache(maxsize=1)
 def has_mkvmerge() -> bool:
     import shutil
@@ -1151,35 +1156,6 @@ def _check_mux_duration(output: str, expected_s: float) -> None:
         raise merger.MergeError(
             f"mux final saiu TRUNCADO: {got:.0f}s de {expected_s:.0f}s "
             f"esperados — quase sempre falta de memória no muxer")
-
-
-def _run_mkvmerge(cmd: list[str], on_progress=None) -> subprocess.CompletedProcess:
-    """mkvmerge com progresso: ele imprime 'Progress: NN%' na saída padrão
-    enquanto copia. Sem isso o mux de um REMUX de 150 GB fica uma hora sem
-    dar sinal e parece travado."""
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", errors="replace",
-                            bufsize=1, preexec_fn=merger.mem_limiter())
-    erros: list[str] = []
-    dreno = threading.Thread(target=lambda: erros.extend(proc.stderr), daemon=True)
-    dreno.start()
-    linhas: list[str] = []
-    for line in proc.stdout:
-        linhas.append(line)
-        m = _MKV_PROGRESS.search(line)
-        if m and on_progress:
-            on_progress({"pct": float(m.group(1)), "out_s": 0.0,
-                         "duration_s": 0.0, "size": 0, "bitrate": 0,
-                         "speed": 0.0, "fps": 0.0, "eta": None})
-    proc.stdout.close()
-    proc.wait()
-    dreno.join(timeout=5)
-    proc.stderr.close()
-    if on_progress and proc.returncode < 2:
-        on_progress({"pct": 100.0, "out_s": 0.0, "duration_s": 0.0, "size": 0,
-                     "bitrate": 0, "speed": 0.0, "fps": 0.0, "eta": 0})
-    return subprocess.CompletedProcess(cmd, proc.returncode,
-                                       "".join(linhas), "".join(erros))
 
 
 def _run_mux(cmd: list[str], duration_s: float = 0.0,

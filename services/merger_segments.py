@@ -24,6 +24,7 @@ Todos os thresholds têm default e são ajustáveis via SegmentParams (no CLI:
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -390,6 +391,19 @@ def merge_segmented(file1: str, file2: str, output: str, target_lang: str | None
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats",
            "-progress", "pipe:1", "-y", "-fflags", "+genpts",
            "-i", ref_path, "-i", oth_path]
+    # legendas numa ENTRADA PRÓPRIA por arquivo de origem: legenda esparsa na
+    # entrada de um arquivo faz o ffmpeg gravar sem as faixas do outro
+    # (merger.fix_interleaving)
+    sub_tmp = Path(tempfile.mkdtemp(prefix="merge_legendas_")) if selected_subs else None
+    isolated: dict[int, tuple[int, list[int]]] = {}
+    for src_cmd, path in enumerate((ref_path, oth_path)):
+        grupo = [s for src_orig, s in selected_subs
+                 if (0 if src_orig == ref_input else 1) == src_cmd]
+        mks = (merger.isolate_subtitles(path, [], grupo, sub_tmp, str(src_cmd), log)
+               if grupo else None)
+        if mks:
+            isolated[src_cmd] = (2 + len(isolated), [int(s["_type_index"]) for s in grupo])
+            cmd += ["-i", mks]
     cmd += ["-map", f"0:v:{int(best_v['_type_index'])}"]
 
     # nota: aqui input 0 = referência e input 1 = outro (na ordem ref/oth),
@@ -439,9 +453,13 @@ def merge_segmented(file1: str, file2: str, output: str, target_lang: str | None
 
     for out_s, (src_orig, s) in enumerate(selected_subs):
         src_cmd = 0 if src_orig == ref_input else 1
-        cmd += ["-map", f"{src_cmd}:s:{int(s['_type_index'])}"]
-        if merger.sub_needs_reencode_to_mkv(s.get("codec_name")):
-            cmd += [f"-c:s:{out_s}", "subrip"]
+        if src_cmd in isolated:
+            entrada, ordem = isolated[src_cmd]
+            cmd += ["-map", f"{entrada}:s:{ordem.index(int(s['_type_index']))}"]
+        else:
+            cmd += ["-map", f"{src_cmd}:s:{int(s['_type_index'])}"]
+            if merger.sub_needs_reencode_to_mkv(s.get("codec_name")):
+                cmd += [f"-c:s:{out_s}", "subrip"]
         sub_lang = merger.canonical_lang(merger.raw_lang_of(s))
         cmd += [f"-metadata:s:s:{out_s}", f"language={sub_lang}"]
         sub_title = merger.clean_stream_title(
@@ -458,7 +476,15 @@ def merge_segmented(file1: str, file2: str, output: str, target_lang: str | None
     fsperm.makedirs(Path(output).parent)
     log("Executando ffmpeg...")
     log("+ " + " ".join(cmd))
-    merger._run_ffmpeg_progress(cmd, duration, on_progress)
+    try:
+        merger._run_ffmpeg_progress(cmd, duration, on_progress)
+    finally:
+        if sub_tmp is not None:
+            shutil.rmtree(sub_tmp, ignore_errors=True)
+    warn = merger.fix_interleaving(output, "", log)
+    if warn:
+        result.notes.append(warn)
+        log(warn)
 
     fsperm.apply(output)
     log(f"OK: {output}")

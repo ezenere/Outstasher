@@ -595,16 +595,14 @@ def test_interleave_lag_le_a_ordem_do_arquivo(monkeypatch):
                     {"index": 1, "codec_type": "audio"},
                     {"index": 2, "codec_type": "audio"},
                     {"index": 3, "codec_type": "subtitle"}]})
-    def falso(cmd, **kw):
-        linhas = ["0,300.0", "0,301.0", "1,780.0", "1,781.0", "2,300.5", "2,301.5"]
-        return subprocess.CompletedProcess(cmd, 0, "\n".join(linhas), "")
-    monkeypatch.setattr(m.subprocess, "run", falso)
+    pacotes = [(0, 300.0), (0, 301.0), (1, 780.0), (1, 781.0), (2, 300.5),
+               (2, 301.5), (0, 302.0)]
+    monkeypatch.setattr(m, "_packet_order", lambda p: iter(pacotes))
     assert m.interleave_lags("x.mkv") == {0: pytest.approx(480.0), 1: pytest.approx(0.5)}
     assert m.interleave_lag("x.mkv") == pytest.approx(480.0)
 
-    def sumida(cmd, **kw):
-        return subprocess.CompletedProcess(cmd, 0, "0,400.0\n2,400.2\n", "")
-    monkeypatch.setattr(m.subprocess, "run", sumida)
+    monkeypatch.setattr(m, "_packet_order",
+                        lambda p: iter([(0, 400.0), (2, 400.2), (0, 401.0)]))
     assert m.interleave_lag("x.mkv") == float("inf")
 
 
