@@ -167,11 +167,11 @@ export default function CatalogItem() {
 
   return (
     <div>
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 mobile:flex-wrap">
         <Link to="/catalog" className="rounded-lg border border-zinc-700 p-1.5 text-zinc-400 hover:text-zinc-200">
           <NavArrowLeft width={16} height={16} />
         </Link>
-        <h1 className="flex-1 text-lg font-semibold">
+        <h1 className="flex-1 text-lg font-semibold mobile:basis-[calc(100%-3.5rem)]">
           {detail.title}
           {detail.year && <span className="ml-1 font-normal text-zinc-400">({detail.year})</span>}
         </h1>

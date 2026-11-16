@@ -31,7 +31,7 @@ const SETTINGS_TABS: { to: string; label: string; icon: typeof Folder }[] = [
 export default function Settings() {
   return (
     <div className="flex flex-col gap-6 sm:flex-row sm:gap-8">
-      <nav className="flex shrink-0 gap-1 overflow-x-auto sm:w-48 sm:flex-col">
+      <nav className="flex shrink-0 gap-1 overflow-x-auto sm:w-48 sm:flex-col mobile:flex-wrap">
         {SETTINGS_TABS.map((t) => (
           <NavLink
             key={t.to}

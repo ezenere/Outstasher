@@ -183,14 +183,14 @@ export default function Movies() {
 
   return (
     <div>
-      <div className="flex gap-2">
+      <div className="flex gap-2 mobile:flex-wrap">
         {/* toggle filmes/séries: mesma busca, endpoints e modais diferentes */}
-        <div className="flex shrink-0 gap-1 rounded-lg border border-zinc-700 bg-zinc-900 p-1">
+        <div className="flex shrink-0 gap-1 rounded-lg border border-zinc-700 bg-zinc-900 p-1 mobile:basis-full">
           {([['movie', 'Filmes'], ['tv', 'Séries']] as const).map(([k, label]) => (
             <button
               key={k}
               onClick={() => setMediaKind(k)}
-              className={`rounded-md px-3 text-sm transition-colors ${
+              className={`rounded-md px-3 text-sm transition-colors mobile:flex-1 mobile:py-1.5 ${
                 mediaKind === k
                   ? 'bg-blue-600 font-semibold text-white'
                   : 'text-zinc-400 hover:text-zinc-200'

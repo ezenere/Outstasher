@@ -37,6 +37,31 @@ function Tab({ to, children, dot }: { to: string; children: React.ReactNode; dot
   )
 }
 
+/** Aba da barra inferior do celular (no desktop as abas ficam no cabeçalho). */
+function BottomTab({ to, label, icon: Icon, dot }: {
+  to: string; label: string; icon: typeof Search; dot?: boolean
+}) {
+  return (
+    <NavLink
+      to={to}
+      end={to === '/'}
+      className={({ isActive }) =>
+        `flex flex-col items-center gap-0.5 py-2 text-[11px] ${
+          isActive ? 'text-zinc-100' : 'text-zinc-500'
+        }`
+      }
+    >
+      <span className="relative">
+        <Icon width={22} height={22} />
+        {dot && (
+          <span className="absolute -top-0.5 -right-1 h-2.5 w-2.5 rounded-full bg-red-500 ring-2 ring-zinc-950" />
+        )}
+      </span>
+      {label}
+    </NavLink>
+  )
+}
+
 type Gate = 'loading' | 'setup' | 'login' | 'ok'
 
 export default function App() {
@@ -101,12 +126,12 @@ export default function App() {
     <BrowserRouter>
       <div className="min-h-screen">
         <header className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/90 backdrop-blur">
-          <div className="mx-auto flex h-14 max-w-5xl items-center gap-6 px-4">
-            <span className="flex items-center gap-2 font-semibold">
-              <img src={logo} alt="" className="h-10 w-10 rounded" />
+          <div className="mx-auto flex h-14 max-w-5xl items-center gap-6 px-4 mobile:gap-2">
+            <span className="flex items-center gap-2 font-semibold mobile:flex-1">
+              <img src={logo} alt="" className="h-10 w-10 rounded mobile:h-8 mobile:w-8" />
               Outstasher
             </span>
-            <nav className="flex flex-1 gap-1">
+            <nav className="flex flex-1 gap-1 mobile:hidden">
               <Tab to="/">
                 <Search width={16} height={16} /> Buscar
               </Tab>
@@ -124,9 +149,9 @@ export default function App() {
             <button
               onClick={doLogout}
               title="Sair"
-              className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-zinc-400 transition-colors hover:text-zinc-200"
+              className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-zinc-400 transition-colors hover:text-zinc-200 mobile:gap-0 mobile:px-2 mobile:py-2 mobile:text-[0px]"
             >
-              <LogOut width={16} height={16} /> Sair
+              <LogOut width={16} height={16} className="mobile:h-5 mobile:w-5" /> Sair
             </button>
           </div>
         </header>
@@ -151,6 +176,15 @@ export default function App() {
             <Route path="/catalog/item" element={<CatalogItem />} />
           </Routes>
         </main>
+        <nav
+          data-mobile-only
+          className="hidden mobile:fixed mobile:inset-x-0 mobile:bottom-0 mobile:z-10 mobile:grid mobile:grid-cols-4 mobile:border-t mobile:border-zinc-800 mobile:bg-zinc-950/95 mobile:pb-[env(safe-area-inset-bottom)] mobile:backdrop-blur"
+        >
+          <BottomTab to="/" label="Buscar" icon={Search} />
+          <BottomTab to="/jobs" label="Jobs" icon={Cube} dot={pending} />
+          <BottomTab to="/catalog" label="Catálogo" icon={Bookmark} />
+          <BottomTab to="/settings" label="Configurações" icon={SettingsIcon} />
+        </nav>
       </div>
     </BrowserRouter>
     </JobsSummaryContext.Provider>

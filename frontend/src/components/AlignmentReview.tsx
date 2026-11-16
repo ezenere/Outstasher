@@ -306,12 +306,12 @@ export default function AlignmentReview({ job, onResolved }: {
                       <li key={i}>
                         <button
                           onClick={() => setSel({ ep: key, idx: i })}
-                          className={`flex w-full items-center gap-2 px-2 py-1 text-left hover:bg-zinc-800/60 ${
+                          className={`flex w-full items-center gap-2 px-2 py-1 text-left hover:bg-zinc-800/60 mobile:py-1.5 ${
                             active ? 'bg-zinc-800/80' : ''}`}
                         >
                           <span className="w-5 shrink-0 text-zinc-500 tabular-nums">{pos + 1}.</span>
                           <span className={`h-2 w-2 shrink-0 rounded-full ${SEG_COLOR[s.kind] ?? 'bg-zinc-600'}`} />
-                          <span className="min-w-0 flex-1 truncate text-zinc-300">
+                          <span className="min-w-0 flex-1 truncate text-zinc-300 mobile:whitespace-normal">
                             {KIND_LABEL[s.kind]}
                             <span className="ml-1.5 text-zinc-500 tabular-nums">
                               {fmtT(s.a_start)}–{fmtT(s.a_end)}

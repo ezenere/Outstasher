@@ -106,7 +106,7 @@ function pct(v: number, dur: number) {
 function Row({ label, sub, children }: { label: string; sub?: string; children: ReactNode }) {
   return (
     <div className="flex items-center gap-2">
-      <div className="w-28 shrink-0 text-xs text-zinc-400">
+      <div className="w-28 shrink-0 text-xs text-zinc-400 mobile:w-20">
         {label}
         {sub && <div className="text-[10px] text-zinc-500">{sub}</div>}
       </div>
@@ -305,8 +305,9 @@ function Axis({ dur }: { dur: number }) {
   for (let s = 0; s <= dur; s += passo) marcas.push(s)
   return (
     <div className="flex items-center gap-2">
-      <div className="w-28 shrink-0" />
-      <div className="relative h-3 flex-1 text-[10px] text-zinc-500">
+      <div className="w-28 shrink-0 mobile:w-20" />
+      {/* no celular metade das marcas some (encavalavam na largura estreita) */}
+      <div className="relative h-3 flex-1 text-[10px] text-zinc-500 mobile:[&>span:nth-child(even)]:hidden">
         {marcas.map((s) => (
           <span key={s} className="absolute -translate-x-1/2 tabular-nums" style={{ left: pct(s, dur) }}>
             {Math.round(s / 60)}min

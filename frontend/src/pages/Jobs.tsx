@@ -231,7 +231,7 @@ export default function Jobs() {
             )}
             <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="flex-1 font-semibold">{jobTitle(j)}</span>
+              <span className="flex-1 font-semibold mobile:basis-full">{jobTitle(j)}</span>
               <Badge status={j.status} phase={j.progress.merge_phase} />
               {j.status === 'awaiting' && (
                 <button

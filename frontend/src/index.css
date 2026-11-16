@@ -1,5 +1,29 @@
 @import "tailwindcss";
 
+/* Versão mobile: TUDO o que é só do celular usa a variante `mobile:` (ou o
+   bloco @media abaixo), que exige tela estreita E toque — num PC nenhuma
+   dessas regras casa, nem com a janela estreita, e o desktop fica idêntico.
+   Elemento que só existe no celular leva `hidden mobile:<display>` e o
+   atributo data-mobile-only. */
+@custom-variant mobile (@media (max-width: 767px) and (pointer: coarse));
+
+@media (max-width: 767px) and (pointer: coarse) {
+  /* fonte < 16px num campo faz o iPhone dar zoom ao focar */
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  select,
+  textarea {
+    font-size: 16px;
+  }
+
+  /* rótulos da tabela de candidatos em cartão (CandidatesTable). Aqui e não
+     com before:/after: do Tailwind, que registraria a --tw-content em TODO
+     elemento também no desktop */
+  .cand-seeds::after { content: " seeds"; }
+  .cand-corte::before { content: "corte "; }
+  .cand-score::before { content: "score "; }
+  .cand-motivo::before { content: "motivo: "; }
+}
+
 body {
   @apply bg-zinc-950 text-zinc-100 antialiased;
 }

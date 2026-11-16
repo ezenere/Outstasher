@@ -28,7 +28,7 @@ export function localInput(offsetHours = 1): string {
 
 const fieldCls = 'rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1 text-sm'
 // divide a linha por igual: a opção mais longa não empurra o select para baixo
-const minSelCls = `${fieldCls} min-w-0 flex-1`
+const minSelCls = `${fieldCls} min-w-0 flex-1 mobile:basis-full`
 
 /** "Agendar download [liga/desliga]" + data/hora quando ligado. */
 export function ScheduleField({ value, onChange, label = 'Agendar download' }: {
@@ -90,8 +90,8 @@ function MinRow({ label, value, onChange }: {
   const set = (r: MinQuality['res'], s: MinQuality['source'], a: MinQuality['audio']) =>
     onChange(r || s || a ? { res: r, source: s, audio: a } : null)
   return (
-    <div className="flex items-center gap-2 text-sm">
-      <span className="w-20 shrink-0 text-zinc-400">{label}</span>
+    <div className="flex items-center gap-2 text-sm mobile:flex-wrap">
+      <span className="w-20 shrink-0 text-zinc-400 mobile:w-full">{label}</span>
       <select value={res ?? ''} className={minSelCls}
         onChange={(e) => set((e.target.value || null) as MinQuality['res'], source, audio)}>
         {MIN_RES_OPTIONS.map(([v, l]) => <option key={l} value={v ?? ''}>{l}</option>)}

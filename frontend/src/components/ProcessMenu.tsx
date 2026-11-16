@@ -62,7 +62,7 @@ export default function ProcessMenu({
       </button>
 
       {open && (
-        <div className="absolute right-0 z-30 mt-2 w-80 overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900 shadow-xl">
+        <div className="absolute right-0 z-30 mt-2 w-80 overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900 shadow-xl mobile:fixed mobile:inset-x-3 mobile:top-14 mobile:mt-1 mobile:w-auto">
           <div className="flex gap-1 border-b border-zinc-800/60 px-2 py-1.5">
             {MEDIA_FILTERS.map((m) => (
               <button

@@ -487,9 +487,11 @@ export function CandidatesTable({
     return c.title === current.title && (c.tracker ?? null) === (current.tracker ?? null)
   }
   return (
-    <div className={`max-h-72 overflow-auto ${flush ? 'rounded-b-xl' : 'mb-2 rounded-lg border border-zinc-800'}`}>
-      <table className="w-full border-collapse text-xs">
-        <thead>
+    // no celular cada linha vira um cartão (só CSS): título inteiro em cima e
+    // tracker/qualidade/seeds/tamanho/corte/score embaixo, sem rolar de lado
+    <div className={`max-h-72 overflow-auto mobile:max-h-[28rem] ${flush ? 'rounded-b-xl' : 'mb-2 rounded-lg border border-zinc-800'}`}>
+      <table className="w-full border-collapse text-xs mobile:block">
+        <thead className="mobile:hidden">
           <tr className="sticky top-0 bg-zinc-900 text-left text-zinc-400">
             <th className="px-2 py-1.5" />
             <th className="px-2 py-1.5">Título</th>
@@ -502,7 +504,7 @@ export function CandidatesTable({
             {showReason && <th className="px-2 py-1.5">Motivo</th>}
           </tr>
         </thead>
-        <tbody>
+        <tbody className="mobile:block">
           {candidates.map((c, i) => {
             const isCurrent = matchesCurrent(c)
             const rowCls = c.chosen
@@ -514,19 +516,19 @@ export function CandidatesTable({
             return (
               <tr
                 key={c.id ?? i}
-                className={`border-t border-zinc-800/60 ${rowCls} ${clickable ? 'cursor-pointer hover:bg-zinc-800/40' : ''} ${
+                className={`border-t border-zinc-800/60 mobile:flex mobile:flex-wrap mobile:items-baseline mobile:gap-x-3 mobile:gap-y-0.5 mobile:py-2 mobile:pr-2 mobile:pl-9 ${rowCls} ${clickable ? 'cursor-pointer hover:bg-zinc-800/40' : ''} ${
                   selectable && selectedId === c.id ? 'bg-blue-950/40' : isCurrent ? 'bg-emerald-950/30' : ''
                 }`}
                 onClick={clickable ? () => onSelect?.(c.id!) : undefined}
               >
-                <td className="px-2 py-1.5">
+                <td className="px-2 py-1.5 mobile:-ml-7 mobile:w-4 mobile:p-0">
                   {selectable && c.id ? (
                     <input type="radio" checked={selectedId === c.id} onChange={() => onSelect?.(c.id!)} />
                   ) : c.chosen ? (
                     <Check width={14} height={14} className="text-emerald-400" />
                   ) : null}
                 </td>
-                <td className="max-w-96 truncate px-2 py-1.5" title={c.title}>
+                <td className="max-w-96 truncate px-2 py-1.5 mobile:max-w-none mobile:basis-[calc(100%-2px)] mobile:p-0 mobile:break-all mobile:whitespace-normal" title={c.title}>
                   {isCurrent && (
                     <span title="Torrent em uso agora" className="mr-1 inline-block align-[-1px] text-rose-400">
                       <BookmarkSolid width={13} height={13} />
@@ -542,14 +544,14 @@ export function CandidatesTable({
                   )}
                   {c.title}
                 </td>
-                <td className="px-2 py-1.5">{c.tracker ?? ''}</td>
-                <td className="px-2 py-1.5 whitespace-nowrap">{c.quality ?? '—'}</td>
-                <td className="px-2 py-1.5">{c.seeders ?? '—'}</td>
-                <td className="px-2 py-1.5">{c.size ? fmtSize(c.size) : '—'}</td>
-                <td className="px-2 py-1.5">{c.edition ?? 'normal'}</td>
-                <td className="px-2 py-1.5">{c.score ?? '—'}</td>
+                <td className="px-2 py-1.5 mobile:p-0">{c.tracker ?? ''}</td>
+                <td className="px-2 py-1.5 whitespace-nowrap mobile:p-0">{c.quality ?? '—'}</td>
+                <td className="px-2 py-1.5 mobile:p-0 cand-seeds">{c.seeders ?? '—'}</td>
+                <td className="px-2 py-1.5 mobile:p-0">{c.size ? fmtSize(c.size) : '—'}</td>
+                <td className="px-2 py-1.5 mobile:p-0 cand-corte">{c.edition ?? 'normal'}</td>
+                <td className="px-2 py-1.5 mobile:p-0 cand-score">{c.score ?? '—'}</td>
                 {showReason && (
-                  <td className="px-2 py-1.5">{c.rejected ?? (c.chosen ? 'escolhido' : 'ok')}</td>
+                  <td className="px-2 py-1.5 mobile:basis-full mobile:p-0 cand-motivo">{c.rejected ?? (c.chosen ? 'escolhido' : 'ok')}</td>
                 )}
               </tr>
             )

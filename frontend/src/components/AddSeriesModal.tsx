@@ -230,7 +230,7 @@ export default function AddSeriesModal({ destinations, defaultDestId, onClose }:
                   onChange={(e) => setQuery(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && void search()}
                   placeholder="Nome da série"
-                  className="flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm"
+                  className="flex-1 rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm mobile:min-w-0"
                 />
                 <button onClick={() => void search()} disabled={searching}
                   className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-700 px-3 py-1.5 text-sm hover:bg-zinc-600 disabled:opacity-50">
