@@ -175,6 +175,71 @@ def test_filme_sem_corte_compativel_vai_para_a_escolha(filme, indexador):
     assert busca["audio"] and busca["video"]
 
 
+def test_filme_sem_dublado_baixa_so_o_original(filme, indexador, qbit, monkeypatch):
+    """"Apenas original" na escolha: o job vira "só original" — o mesmo
+    caminho do botão "Só original" do modal (um torrent, entrega sem merge)."""
+    indexador["Filme Exemplo 2014"] = [_hit("Filme Exemplo 2014 1080p WEB-DL")]
+    asyncio.run(movies._run(filme))
+    assert filme["status"] == "awaiting"
+    video_id = jobs.get_job(filme["id"])["search"]["video"][0]["id"]
+
+    chegou = _parar_depois_do_envio(monkeypatch)
+    asyncio.run(_run_and_wait(filme["id"], actions.select(
+        filme["id"], None, video_id, only="original")))
+
+    assert filme["kind"] == "original"
+    assert jobs.runtime._needed_torrents(filme) == ("video",)
+    assert chegou == ["downloading"]
+    assert [tag for _, tag in qbit.added] == [f"dl-{filme['id']}-video"]
+    assert any("só o original" in e["message"]
+               for e in jobs.get_job(filme["id"])["events"])
+
+
+def test_filme_apenas_dublado_mesmo_com_os_dois_encontrados(
+        filme, indexador, qbit, monkeypatch):
+    indexador["Filme Exemplo 2014"] = [_hit("Filme Exemplo 2014 1080p WEB-DL")]
+    indexador["Filme Teste 2014"] = [_hit("Filme Teste 2014 1080p Dublado")]
+    filme["mode"] = "manual"
+    asyncio.run(movies._run(filme))
+    assert filme["status"] == "awaiting"
+    audio_id = jobs.get_job(filme["id"])["search"]["audio"][0]["id"]
+
+    chegou = _parar_depois_do_envio(monkeypatch)
+    asyncio.run(_run_and_wait(filme["id"], actions.select(
+        filme["id"], audio_id, None, only="dubbed")))
+
+    assert filme["kind"] == "dubbed"
+    assert chegou == ["downloading"]
+    assert [tag for _, tag in qbit.added] == [f"dl-{filme['id']}-audio"]
+
+
+def test_filme_apenas_um_lado_recusado_com_torrent_no_ar(filme, indexador):
+    """Fora da escolha inicial (torrent no qBittorrent: troca, pausa de
+    conversão) o outro lado já baixado ficaria órfão — recusa sem mexer."""
+    indexador["Filme Exemplo 2014"] = [_hit("Filme Exemplo 2014 1080p WEB-DL")]
+    indexador["Filme Teste 2014"] = [_hit("Filme Teste 2014 1080p Dublado")]
+    filme["mode"] = "manual"
+    asyncio.run(movies._run(filme))
+    audio = candidates.selectable(filme, "audio")[0]
+    audio["active"] = True
+    video_id = candidates.selectable(filme, "video")[0]["id"]
+    with pytest.raises(ValueError, match="escolha inicial"):
+        asyncio.run(actions.select(filme["id"], None, video_id, only="original"))
+    assert filme["kind"] == "both" and filme["status"] == "awaiting"
+    with pytest.raises(ValueError, match="only inválido"):
+        asyncio.run(actions.select(filme["id"], None, video_id, only="video"))
+
+
+def test_filme_so_original_nao_vira_so_dublado(filme, indexador):
+    filme["kind"] = "original"
+    filme["mode"] = "manual"
+    indexador["Filme Exemplo 2014"] = [_hit("Filme Exemplo 2014 1080p WEB-DL")]
+    asyncio.run(movies._run(filme))
+    with pytest.raises(ValueError, match="só um lado"):
+        asyncio.run(actions.select(filme["id"], None, None, only="dubbed"))
+    assert filme["kind"] == "original"
+
+
 # ============================== série ==============================
 
 def _ep(e):
@@ -297,3 +362,86 @@ def test_lacunas_sem_nada_coberto_nao_deixam_continuar(serie):
         asyncio.run(pipeline.resolve(serie["id"], "gaps_confirm", {"accept": True}))
     assert serie["awaiting"]["reason"] == "gaps_confirm"
     assert serie["status"] == "awaiting"
+
+
+def test_serie_sem_dublado_baixa_so_o_original(serie, indexador, qbit, monkeypatch):
+    """"Apenas original" na escolha manual da série: o job vira "só
+    original" e o plano fica só com o papel original."""
+    indexador["Serie Exemplo S01"] = [_hit("Serie Exemplo S01 1080p WEB-DL", size=9000)]
+    asyncio.run(pipeline._plan_and_gate(serie))
+    assert serie["awaiting"]["reason"] == "manual_pick"
+    pre = jobs._public(serie)["awaiting"]["payload"]["preselected"]
+
+    chegou = []
+
+    async def watchdog(job):
+        chegou.append(job["status"])
+    monkeypatch.setattr(pipeline, "_wait_downloads", watchdog)
+    asyncio.run(_run_and_wait(serie["id"], pipeline.resolve(
+        serie["id"], "manual_pick", {"replace_plan": True, "only": "original",
+                                     "torrents": [{"candidate_id": p["candidate_id"],
+                                                   "role": "original", "episodes": "auto"}
+                                                  for p in pre]})))
+
+    assert serie["kind"] == "original"
+    assert pipeline.roles_of(serie) == ("original",)
+    assert chegou == ["downloading"]
+    assert [t["role"] for t in serie["torrents"]] == ["original"]
+    assert len(qbit.added) == 1
+
+
+def test_serie_apenas_dublado_tira_o_original_do_plano(serie, indexador, qbit, monkeypatch):
+    serie["mode"] = "manual"
+    indexador["Serie Exemplo S01"] = [_hit("Serie Exemplo S01 1080p WEB-DL", size=9000)]
+    indexador["Serie Teste S01"] = [_hit("Serie Teste S01 720p WEB-DL Dublado", size=7000)]
+    asyncio.run(pipeline._plan_and_gate(serie))
+    assert serie["awaiting"]["reason"] == "manual_pick"
+    by = jobs._public(serie)["awaiting"]["payload"]["by_torrent"]
+    dub_id = by["dubbed"][0]["id"]
+    # o plano automático pré-marcado traz os dois papéis
+    assert sorted(t["role"] for t in serie["torrents"]) == ["dubbed", "original"]
+
+    async def watchdog(job):
+        pass
+    monkeypatch.setattr(pipeline, "_wait_downloads", watchdog)
+    asyncio.run(_run_and_wait(serie["id"], pipeline.resolve(
+        serie["id"], "manual_pick", {"replace_plan": True, "only": "dubbed", "torrents": [
+            {"candidate_id": dub_id, "role": "dubbed", "episodes": "auto"}]})))
+
+    assert serie["kind"] == "dubbed"
+    assert [t["role"] for t in serie["torrents"]] == ["dubbed"]
+    assert len(qbit.added) == 1
+
+
+def test_serie_apenas_um_lado_recusado_fora_da_escolha_inicial(serie, indexador):
+    indexador["Serie Exemplo S01"] = [_hit("Serie Exemplo S01 1080p WEB-DL", size=9000)]
+    asyncio.run(pipeline._plan_and_gate(serie))
+    pre = jobs._public(serie)["awaiting"]["payload"]["preselected"]
+    sel = {"replace_plan": True, "only": "original", "torrents": [
+        {"candidate_id": p["candidate_id"], "role": "original", "episodes": "auto"}
+        for p in pre]}
+
+    # o papel que saiu não entra na seleção — e nada muda no job
+    ruim = dict(sel, torrents=sel["torrents"] + [
+        {"magnet": "magnet:?xt=urn:btih:" + "3" * 40 + "&dn=Serie.Teste.S01.Dublado",
+         "role": "dubbed", "episodes": "auto"}])
+    with pytest.raises(ValueError, match="Papel inválido"):
+        asyncio.run(pipeline.resolve(serie["id"], "manual_pick", ruim))
+    assert serie["kind"] == "both"
+    assert serie["awaiting"]["reason"] == "manual_pick"
+
+    # com torrent já enviado ao qBittorrent, o outro lado ficaria órfão
+    serie["torrents"] = [dict(_t_enviado(), role="dubbed")]
+    with pytest.raises(ValueError, match="escolha inicial"):
+        asyncio.run(pipeline.resolve(serie["id"], "manual_pick", sel))
+    assert serie["kind"] == "both"
+    assert serie["awaiting"]["reason"] == "manual_pick"
+
+
+def _t_enviado():
+    return {"n": 0, "role": "original", "tag": "dl-nf2-t0", "title": "Serie Teste S01",
+            "tracker": "t", "seeders": 1, "size": 1, "quality": None,
+            "coverage_label": None, "magnet": "magnet:?xt=urn:btih:" + "8" * 40,
+            "link": None, "infohash": None, "files_count": None,
+            "coverage": ["S01E01", "S01E02"], "state": "downloading", "hash": "8" * 40,
+            "progress": None, "selected_files": None, "content_path": None}

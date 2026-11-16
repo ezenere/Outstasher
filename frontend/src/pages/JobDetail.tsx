@@ -144,12 +144,25 @@ export default function JobDetail() {
   const choosing = job.status === 'awaiting' || job.status === 'scheduled'
   const canResearch = choosing && !job.skip_search
     && !job.drift_confirm && !job.awaiting && !job.current
+  // "Apenas original"/"Apenas dublado": o job de merge vira de um lado só (o
+  // mesmo caminho do "Só original"/"Só dublado" do modal). Só na escolha
+  // inicial — com torrent no ar ou pausa de conversão o outro lado ficaria órfão
+  const canOnly = needAudio && needVideo
+    && !job.current && !job.drift_confirm && !job.awaiting
+  const mergeLabel = needAudio && needVideo
+    ? (job.download_only ? 'Baixar os dois' : 'Baixar e fazer merge')
+    : needVideo ? 'Baixar original' : 'Baixar dublado'
+  // achou só um lado: a dica aponta o botão do lado que existe
+  const onlyHint = canOnly && emptyRoles.length === 1
+    ? (emptyRoles[0] === 'o dublado' ? 'original' : 'dublado') : null
 
-  async function submitSelection() {
-    if (!job || !selectionReady) return
-    const a = needAudio && !selCustom.audio.url.trim()
+  async function submitSelection(only?: 'original' | 'dubbed') {
+    const wantAudio = only ? only === 'dubbed' : needAudio
+    const wantVideo = only ? only === 'original' : needVideo
+    if (!job || (wantAudio && !okAudio) || (wantVideo && !okVideo)) return
+    const a = wantAudio && !selCustom.audio.url.trim()
       ? job.search?.audio.find((c) => c.id === selAudio) : null
-    const v = needVideo && !selCustom.video.url.trim()
+    const v = wantVideo && !selCustom.video.url.trim()
       ? job.search?.video.find((c) => c.id === selVideo) : null
     // aviso de corte só quando os dois são baixados (merge)
     if (a && v) {
@@ -176,12 +189,13 @@ export default function JobDetail() {
     try {
       const custom: Record<string, { url: string; title: string }> = {}
       for (const k of ['audio', 'video'] as const) {
-        if (selCustom[k].url.trim()) custom[k] = selCustom[k]
+        if ((k === 'audio' ? wantAudio : wantVideo) && selCustom[k].url.trim()) custom[k] = selCustom[k]
       }
       await post(`/api/jobs/${job.id}/select`, {
-        audio_id: needAudio ? selAudio : null,
-        video_id: needVideo ? selVideo : null,
+        audio_id: wantAudio ? selAudio : null,
+        video_id: wantVideo ? selVideo : null,
         custom: Object.keys(custom).length ? custom : null,
+        only: only ?? null,
       })
       void reload()
     } catch (e) {
@@ -563,7 +577,8 @@ export default function JobDetail() {
               <WarningTriangle width={15} height={15} className="mt-0.5 shrink-0" />
               <span>
                 Nenhum torrent encontrado para {emptyRoles.join(' e ')} — cole um
-                magnet/link abaixo{canResearch ? ' ou tente buscar de novo' : ''}.
+                magnet/link abaixo{canResearch ? ' ou tente buscar de novo' : ''}
+                {onlyHint ? `, ou baixe só o ${onlyHint} (“Apenas ${onlyHint}”)` : ''}.
               </span>
             </div>
           )}
@@ -601,12 +616,34 @@ export default function JobDetail() {
           )}
           <div className="mt-3 flex flex-wrap gap-2">
             <button
-              onClick={submitSelection}
+              onClick={() => submitSelection()}
               disabled={submitting || !selectionReady}
+              title={selectionReady ? undefined
+                : needAudio && needVideo ? 'Escolha um torrent de cada lado (ou cole um magnet/link)' : undefined}
               className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
             >
-              <Download width={15} height={15} /> Confirmar e baixar
+              <Download width={15} height={15} /> {mergeLabel}
             </button>
+            {canOnly && (
+              <>
+                <button
+                  onClick={() => submitSelection('original')}
+                  disabled={submitting || !okVideo}
+                  title="Baixa só o vídeo original, sem merge (o job vira “só original”)"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  <MediaVideo width={15} height={15} /> Apenas original
+                </button>
+                <button
+                  onClick={() => submitSelection('dubbed')}
+                  disabled={submitting || !okAudio}
+                  title="Baixa só a versão dublada, sem merge (o job vira “só dublado”)"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                >
+                  <SoundHigh width={15} height={15} /> Apenas dublado
+                </button>
+              </>
+            )}
             {canResearch && (
               <button
                 onClick={research}

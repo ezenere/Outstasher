@@ -452,8 +452,10 @@ export default function Movies() {
               </div>
             )}
 
-            {/* ações */}
+            {/* ações. Manual: a busca roda pelos dois lados e o "só original"
+                / "só dublado" é decidido no job, na escolha dos torrents */}
             <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
+              {!manual && (<>
               <button
                 onClick={() => start('original')}
                 disabled={starting || (!downloadOnly && !destinations.length)}
@@ -470,13 +472,19 @@ export default function Movies() {
               >
                 <SoundHigh width={15} height={15} /> Só dublado
               </button>
+              </>)}
               <button
                 onClick={() => start('both')}
                 disabled={starting || (!downloadOnly && !destinations.length)}
+                title={manual ? 'Busca os torrents dos dois lados; a escolha (merge, só original ou só dublado) fica no job' : undefined}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
               >
-                <Download width={15} height={15} />
-                {downloadOnly ? 'Baixar os dois' : 'Baixar e fazer merge'}
+                {manual ? (
+                  <><Search width={15} height={15} /> Procurar</>
+                ) : (
+                  <><Download width={15} height={15} />{' '}
+                  {downloadOnly ? 'Baixar os dois' : 'Baixar e fazer merge'}</>
+                )}
               </button>
             </div>
           </div>

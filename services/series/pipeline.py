@@ -1375,9 +1375,50 @@ async def _resolve_manual(job: dict, decision: dict):
     if decision.get("torrents") is None:
         _apply_manual(job, decision)
         return
-    plan, removed, msg = _plan_manual_torrents(job, decision)
-    await _drop_sent(job, removed, plan)
+    novo = _only_kind(job, decision)
+    antes = job.get("kind", _SEM_KIND)
+    if novo:
+        # o plano já é montado com o job de um lado só: o papel que saiu não
+        # é aceito na seleção e os torrents dele saem do plano
+        job["kind"] = novo
+    try:
+        plan, removed, msg = _plan_manual_torrents(job, decision)
+        if novo:
+            msg += f" — só o {ROLE_LABEL[novo]}, sem merge"
+        await _drop_sent(job, removed, plan)
+    except Exception:
+        if antes is _SEM_KIND:
+            job.pop("kind", None)
+        else:
+            job["kind"] = antes
+        raise
     _commit_manual(job, plan, msg)
+
+
+_SEM_KIND = object()
+
+
+def _only_kind(job: dict, decision: dict) -> str | None:
+    """"Apenas original"/"Apenas dublado" na escolha manual (decision.only):
+    o job de merge vira um job de um lado só — o MESMO caminho do botão "Só
+    original"/"Só dublado" do modal (kind gravado no job: roles_of, entrega
+    single). Vale só na escolha inicial: com torrent já enviado ao
+    qBittorrent, o que ele baixou do outro lado ficaria órfão."""
+    only = decision.get("only")
+    if only is None:
+        return None
+    if only not in ROLES:
+        raise ValueError(f"only inválido: {only!r}")
+    if job.get("kind") == only:
+        return None                       # o job já é desse lado só
+    if roles_of(job) != ROLES:
+        raise ValueError("Este job baixa só um lado — não dá para trocar pelo outro")
+    if not decision.get("replace_plan"):
+        raise ValueError("Baixar um lado só exige a seleção do plano inteiro")
+    if any(_sent(t) for t in job["torrents"]):
+        raise ValueError("Baixar um lado só vale na escolha inicial — este job "
+                         "já tem torrent no qBittorrent")
+    return only
 
 
 def _apply_manual(job: dict, decision: dict) -> list[dict]:
@@ -1623,7 +1664,9 @@ def _plan_manual_torrents(job: dict, decision: dict
                 entry["eps"] = {k for k in sorted(entry["eps"])
                                 if taken.setdefault(k, key) == key}
 
-    affected = set(roles_of(job)) if replace else roles_touched
+    # replace: a seleção é o plano INTEIRO — inclusive o papel que o job deixou
+    # de baixar ("apenas original/dublado"), cujos torrents saem
+    affected = set(ROLES) if replace else roles_touched
     newly: dict[str, set[str]] = {r: set() for r in affected}
     for (role, _ident), entry in chosen.items():
         newly[role] |= entry["eps"]

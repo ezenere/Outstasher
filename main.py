@@ -376,6 +376,8 @@ class SelectRequest(BaseModel):
     video_id: str | None = None
     # magnet/link do próprio usuário por papel: {"audio": {url, title}, ...}
     custom: dict | None = None
+    # "original" | "dubbed": baixar só aquele lado (o job vira só original/dublado)
+    only: str | None = None
 
 
 class CustomTorrent(BaseModel):
@@ -1160,7 +1162,7 @@ async def job_details_probe(job_id: str, ep: str | None = None):
 @app.post("/api/jobs/{job_id}/select")
 async def select_job(job_id: str, req: SelectRequest):
     try:
-        job = await jobs.select(job_id, req.audio_id, req.video_id, req.custom)
+        job = await jobs.select(job_id, req.audio_id, req.video_id, req.custom, req.only)
     except ValueError as e:
         raise HTTPException(400, str(e))
     if not job:

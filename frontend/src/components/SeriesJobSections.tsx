@@ -965,12 +965,21 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
       })
     }
 
-    const anySelected = jobRoles.some((r) =>
-      [...assigned[r].values()].some((eps) => eps.length > 0))
+    const hasRole = (r: 'original' | 'dubbed') =>
+      [...assigned[r].values()].some((eps) => eps.length > 0)
+    const anySelected = jobRoles.some(hasRole)
+    // "Apenas original"/"Apenas dublado": o job de merge vira de um lado só (o
+    // mesmo caminho do "Só original"/"Só dublado" do modal). Só na escolha
+    // inicial — com torrent já no qBittorrent (editar o plano no meio do
+    // download) o outro lado ficaria órfão; ali segue o "Confirmar seleção"
+    const canOnly = jobRoles.length === 2
+      && !(job.torrents ?? []).some((t) => t.state !== 'pending')
+    const onlyHint = canOnly && (gate.payload.empty_roles ?? []).length === 1
+      ? (gate.payload.empty_roles![0] === 'dubbed' ? 'original' : 'dublado') : null
 
-    function submit() {
+    function submit(only?: 'original' | 'dubbed') {
       const torrents: Record<string, unknown>[] = []
-      for (const role of jobRoles) {
+      for (const role of only ? [only] : jobRoles) {
         for (const [cid, eps] of Object.entries(sel[role] ?? {})) {
           if (cid.startsWith('custom:')) {
             const url = customUrls[cid]
@@ -985,7 +994,7 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
         }
       }
       // a seleção SUBSTITUI o plano (o backend tira do qBittorrent o que saiu)
-      void send('manual_pick', { torrents, replace_plan: true }, leavingSent.length ? {
+      void send('manual_pick', { torrents, replace_plan: true, ...(only ? { only } : {}) }, leavingSent.length ? {
         message: 'Sai(em) do plano e será(ão) removido(s) do qBittorrent, COM os arquivos já baixados: '
           + leavingSent.map((c) => `t${c.planned!.n} ${c.title}`).join('; ') + '. Continuar?',
         tone: 'danger',
@@ -1004,14 +1013,15 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
               A busca não encontrou nenhum torrent para{' '}
               {emptyRoles.map((r) => (r === 'original' ? 'o original' : 'o dublado')).join(' e ')}
               {' '}— cole um magnet/link próprio no papel abaixo
-              {gate.payload.can_research ? ' ou use “Buscar de novo”' : ''}.
+              {gate.payload.can_research ? ' ou use “Buscar de novo”' : ''}
+              {onlyHint ? `, ou baixe só o ${onlyHint} (“Apenas ${onlyHint}”)` : ''}.
             </span>
           </div>
         )}
         <p className="mb-3 text-sm text-zinc-300">
           O plano atual já vem marcado — inclusive o que já está baixando. Cada
           torrent marcado assume os episódios que o TÍTULO indica (dá para
-          editar). Confirmar SUBSTITUI o plano: o que ficar desmarcado sai (e,
+          editar). A escolha SUBSTITUI o plano: o que ficar desmarcado sai (e,
           se já estava no qBittorrent, é removido de lá com os arquivos); o
           mantido segue de onde está, sem ser reenviado. O que ficar sem
           cobertura passa pelo aviso de lacunas; o match fino com os ARQUIVOS
@@ -1048,10 +1058,11 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
                     <div key={c.id} className={`rounded-lg border px-2.5 py-1.5 ${
                       checked ? 'border-purple-700 bg-purple-950/30' : 'border-zinc-800'}`}
                     >
-                      <label className="flex cursor-pointer items-center gap-2 text-sm">
-                        <input type="checkbox" checked={checked}
+                      {/* no celular o título quebra linha e os selos vão embaixo */}
+                      <label className="flex cursor-pointer items-center gap-2 text-sm mobile:flex-wrap mobile:gap-y-1 mobile:pl-6">
+                        <input type="checkbox" checked={checked} className="mobile:-ml-6"
                           onChange={() => toggleTorrent(role, c.id)} />
-                        <span className="min-w-0 flex-1 truncate" title={c.title}>{c.title}</span>
+                        <span className="min-w-0 flex-1 truncate mobile:basis-[calc(100%-2px)] mobile:break-all mobile:whitespace-normal" title={c.title}>{c.title}</span>
                         {c.planned && (
                           <span className={`shrink-0 rounded px-1.5 py-0.5 text-xs ${
                             c.planned.state === 'pending'
@@ -1172,14 +1183,45 @@ export function SeriesGate({ job, onResolved }: { job: Job; onResolved: () => vo
           )
         })}
         <div className="mt-1 flex flex-wrap items-center gap-2">
-          <button
-            onClick={submit}
-            disabled={busy || !anySelected}
-            title={anySelected ? undefined : 'Marque ao menos um torrent (ou cole um magnet/link próprio)'}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
-          >
-            <Download width={15} height={15} /> Confirmar seleção
-          </button>
+          {canOnly ? (
+            <>
+              <button
+                onClick={() => submit()}
+                disabled={busy || !hasRole('original') || !hasRole('dubbed')}
+                title={hasRole('original') && hasRole('dubbed') ? undefined
+                  : 'Marque torrents nos dois papéis (ou cole um magnet/link próprio)'}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
+              >
+                <Download width={15} height={15} />
+                {job.download_only ? 'Baixar os dois' : 'Baixar e fazer merge'}
+              </button>
+              <button
+                onClick={() => submit('original')}
+                disabled={busy || !hasRole('original')}
+                title="Baixa só o original de cada episódio, sem merge (o job vira “só original”)"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+              >
+                <MediaVideo width={15} height={15} /> Apenas original
+              </button>
+              <button
+                onClick={() => submit('dubbed')}
+                disabled={busy || !hasRole('dubbed')}
+                title="Baixa só o dublado de cada episódio, sem merge (o job vira “só dublado”)"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-600 px-3 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+              >
+                <SoundHigh width={15} height={15} /> Apenas dublado
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={() => submit()}
+              disabled={busy || !anySelected}
+              title={anySelected ? undefined : 'Marque ao menos um torrent (ou cole um magnet/link próprio)'}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50"
+            >
+              <Download width={15} height={15} /> Confirmar seleção
+            </button>
+          )}
           {researchButton}
           {!anySelected && (
             <span className="text-xs text-zinc-500">

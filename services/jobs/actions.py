@@ -72,19 +72,49 @@ def _resume_manual(job: dict):
 
 # -------------------- acoes da UI --------------------
 
+ONLY_KINDS = ("original", "dubbed")
+
+
+def _only_kind(job: dict, only: str | None) -> str | None:
+    """Valida o "apenas original/dublado" da escolha: o job de merge vira um
+    job de um lado só — o MESMO caminho do botão "Só original"/"Só dublado"
+    do modal (kind gravado no job: _needed_torrents, entrega single). Vale só
+    na escolha inicial: com torrent no qBittorrent ou pausa de conversão, o
+    que já foi baixado do outro lado ficaria órfão."""
+    if only is None:
+        return None
+    if only not in ONLY_KINDS:
+        raise ValueError(f"only inválido: {only!r}")
+    kind = job.get("kind") or "both"
+    if kind == only:
+        return None                       # o job já é desse lado só
+    if kind != "both":
+        raise ValueError("Este job baixa só um lado — não dá para trocar pelo outro")
+    if (job.get("drift_confirm") or job.get("advanced") or job.get("awaiting")
+            or any(candidates.active(job, k) for k in ("audio", "video"))):
+        raise ValueError("Baixar um lado só vale na escolha inicial — este job "
+                         "já tem torrent no qBittorrent")
+    return only
+
+
 async def select(job_id: str, audio_id: str | None, video_id: str | None,
-                 custom: dict | None = None) -> dict | None:
+                 custom: dict | None = None, only: str | None = None) -> dict | None:
     """Continuacao do modo manual: usuario escolheu o(s) torrent(s).
 
     custom {"audio": {url, title}, "video": {...}}: magnet/link do próprio
     usuário no lugar de um candidato da busca — é o que torna útil o modo
     "pular busca de torrents", em que a lista de candidatos nasce vazia.
+
+    only "original"/"dubbed": baixar só aquele lado (ex.: a busca não achou o
+    outro). O job passa a ser "só original"/"só dublado" — ver _only_kind.
     """
     job = _jobs.get(job_id)
     # programado depois de uma busca sem resultado: a escolha segue aberta
     if not job or job["status"] not in ("awaiting", schedule.SCHEDULED):
         return None
-    needed = _needed_torrents(job)
+    novo_kind = _only_kind(job, only)
+    needed = (("video",) if novo_kind == "original" else ("audio",)) if novo_kind \
+        else _needed_torrents(job)
     custom = custom or {}
     escolhidos: dict[str, dict] = {}
     for kind, cid in (("audio", audio_id), ("video", video_id)):
@@ -107,6 +137,11 @@ async def select(job_id: str, audio_id: str | None, video_id: str | None,
                     f"sido refeita)")
         escolhidos[kind] = cand
     a, v = escolhidos.get("audio"), escolhidos.get("video")
+    if novo_kind:
+        job["kind"] = novo_kind
+        _event(job, "chosen", "Usuário escolheu baixar só o "
+               + ("original" if novo_kind == "original" else "dublado")
+               + " (sem merge)")
     schedule.leave(job)
     # awaiting também acontece na pausa de drift (possível versão diferente);
     # se o usuário preferiu outro torrent em vez de Continuar, a pausa caduca

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import {
   Calendar, Check, Download, Folder, Hourglass, MediaVideo, NavArrowDown, NavArrowRight,
-  SoundHigh, Xmark,
+  Search, SoundHigh, Xmark,
 } from 'iconoir-react'
 import {
   api, type AdvancedMergeConfig, EPISODE_STATE_LABEL, post,
@@ -739,11 +739,13 @@ export default function SeriesModal({
           <AdvancedMergePolicy value={advMerge} onChange={setAdvMerge} title="Se precisar do merge avançado (montagens diferentes)" />
         </div>
 
-        {/* ações */}
+        {/* ações. Manual: a busca roda pelos dois lados e o "só original" /
+            "só dublado" é decidido no job, na escolha dos torrents */}
         <div className="mt-4 flex items-center justify-end gap-2 mobile:flex-wrap">
           {!hasSelection && (
             <span className="mr-auto min-w-0 truncate text-xs text-zinc-500 mobile:basis-full">Selecione temporadas ou episódios.</span>
           )}
+          {!manual && (<>
           <button
             onClick={() => start('original')}
             disabled={!hasSelection || starting || !destinations.length}
@@ -760,13 +762,18 @@ export default function SeriesModal({
           >
             <SoundHigh width={15} height={15} /> Só dublado
           </button>
+          </>)}
           <button
             onClick={() => start('both')}
             disabled={!hasSelection || starting || !destinations.length}
-            title="Baixa as versões original e dublada de cada episódio e faz o merge"
+            title={manual
+              ? 'Busca os torrents dos dois lados; a escolha (merge, só original ou só dublado) fica no job'
+              : 'Baixa as versões original e dublada de cada episódio e faz o merge'}
             className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold hover:bg-blue-500 disabled:opacity-50 mobile:basis-full mobile:justify-center"
           >
-            <Download width={15} height={15} /> Baixar e fazer merge
+            {manual
+              ? <><Search width={15} height={15} /> Procurar</>
+              : <><Download width={15} height={15} /> Baixar e fazer merge</>}
           </button>
         </div>
       </div>
